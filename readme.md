@@ -14,6 +14,15 @@ bonsai clean              # removes merged worktrees and their branches
 
 ## Install
 
+With [mise](https://mise.jdx.dev) (prebuilt binaries for Linux, macOS, and
+Windows — amd64 and arm64):
+
+```sh
+mise use -g ubi:aymericbeaumet/bonsai
+```
+
+Or build from source:
+
 ```sh
 cargo install --git https://github.com/aymericbeaumet/bonsai bonsai-cli
 ```
