@@ -242,22 +242,33 @@ fn commands_behave_identically_from_inside_a_worktree() {
 fn cd_resolves_exact_branch_to_path() {
     let repo = TestRepo::new();
     let path = repo.add("feat-cd");
-    repo.bonsai(&repo.clone)
+    let output = repo
+        .bonsai(&repo.clone)
         .args(["cd", "feat-cd"])
-        .assert()
-        .success()
-        .stdout(format!("{}\n", path.display()));
+        .output()
+        .unwrap();
+    assert!(output.status.success());
+    // git may report forward-slash paths on Windows; compare components.
+    assert_eq!(
+        PathBuf::from(String::from_utf8_lossy(&output.stdout).trim()),
+        path
+    );
 }
 
 #[test]
 fn cd_works_globally_outside_any_repo() {
     let repo = TestRepo::new();
     let path = repo.add("feat-global");
-    repo.bonsai(&repo.dir)
+    let output = repo
+        .bonsai(&repo.dir)
         .args(["cd", "feat-global"])
-        .assert()
-        .success()
-        .stdout(format!("{}\n", path.display()));
+        .output()
+        .unwrap();
+    assert!(output.status.success());
+    assert_eq!(
+        PathBuf::from(String::from_utf8_lossy(&output.stdout).trim()),
+        path
+    );
 }
 
 #[test]
@@ -323,7 +334,8 @@ fn remove_from_inside_the_worktree_sends_shell_home() {
     );
     let stdout = String::from_utf8_lossy(&output.stdout);
     let last = stdout.lines().last().unwrap();
-    assert_eq!(last, format!("{SENTINEL}{}", repo.clone.display()));
+    let target = last.strip_prefix(SENTINEL).expect("cd sentinel expected");
+    assert_eq!(PathBuf::from(target), repo.clone);
     assert!(!path.exists());
 }
 
@@ -444,7 +456,7 @@ fn repo_config_overrides_and_cli_flag_wins() {
     let alt_root = repo.dir.join("alt-root");
     std::fs::write(
         repo.clone.join(".bonsai.toml"),
-        format!("root = \"{}\"\n", alt_root.display()),
+        format!("root = '{}'\n", alt_root.display()),
     )
     .unwrap();
     // Drop the BONSAI_ROOT env var: env sits above repo config in the
@@ -513,11 +525,14 @@ fn init_scripts_are_valid_shell() {
         assert!(output.status.success());
         let script = repo.dir.join(format!("init.{shell}"));
         std::fs::write(&script, &output.stdout).unwrap();
-        let check = StdCommand::new(shell_path)
+        let Ok(check) = StdCommand::new(shell_path)
             .args(&check_args)
             .arg(&script)
             .output()
-            .unwrap();
+        else {
+            eprintln!("skipping {shell}: cannot execute");
+            continue;
+        };
         assert!(
             check.status.success(),
             "{shell} rejected init script: {}",
@@ -603,7 +618,7 @@ fn bonsai_toml_is_read_from_current_worktree() {
     // Untracked config in this worktree only.
     std::fs::write(
         wt.join(".bonsai.toml"),
-        format!("root = \"{}\"\n", wt_root.display()),
+        format!("root = '{}'\n", wt_root.display()),
     )
     .unwrap();
     let output = repo
@@ -624,7 +639,7 @@ fn git_config_bonsai_layer_between_toml_and_env() {
     let gitcfg_root = repo.dir.join("gitcfg-root");
     std::fs::write(
         repo.clone.join(".bonsai.toml"),
-        format!("root = \"{}\"\n", toml_root.display()),
+        format!("root = '{}'\n", toml_root.display()),
     )
     .unwrap();
     repo.git(
@@ -789,7 +804,7 @@ fn list_json_is_machine_readable() {
     assert_eq!(main["branch"], "main");
     let feat = entries.iter().find(|e| e["branch"] == "feat-json").unwrap();
     assert_eq!(feat["main"], false);
-    assert_eq!(feat["path"], path.to_string_lossy().as_ref());
+    assert_eq!(PathBuf::from(feat["path"].as_str().unwrap()), path);
 }
 
 #[test]

@@ -209,8 +209,10 @@ pub fn repo_id_from_url(url: &str) -> Option<String> {
             _ => return None, // file://, etc: fall back to local id
         }
     } else if let Some((head, tail)) = url.split_once(':') {
-        if head.contains('/') || tail.starts_with("//") {
-            return None; // local path like ./x:y — not scp-like
+        // Not scp-like: local paths (./x:y), Windows drive letters (C:\x,
+        // C:/x — same single-letter rule git itself applies), UNC paths.
+        if head.contains('/') || head.contains('\\') || head.len() == 1 || tail.starts_with("//") {
+            return None;
         }
         return finish_repo_id(head, tail);
     } else {
@@ -264,6 +266,9 @@ mod tests {
     #[test]
     fn repo_id_normalization() {
         let cases = [
+            (r"C:\Users\me\repo.git", None),
+            ("C:/Users/me/repo.git", None),
+            (r"\\server\share\repo", None),
             (
                 "git@github.com:Owner/Repo.git",
                 Some("github.com/Owner/Repo"),
