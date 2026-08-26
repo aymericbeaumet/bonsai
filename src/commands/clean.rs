@@ -218,9 +218,9 @@ fn run_inner(
     // Remove the worktree we are standing in last, then send the shell home.
     let cwd = std::env::current_dir()
         .ok()
-        .and_then(|d| d.canonicalize().ok());
+        .and_then(|d| crate::paths::canonicalize_ok(&d));
     let inside = |wt: &Worktree| {
-        let canonical = wt.path.canonicalize().unwrap_or_else(|_| wt.path.clone());
+        let canonical = crate::paths::canonicalize_or_self(&wt.path);
         cwd.as_ref().is_some_and(|c| c.starts_with(&canonical))
     };
     candidates.sort_by_key(|(wt, _, _)| inside(wt));

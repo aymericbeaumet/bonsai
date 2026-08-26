@@ -45,10 +45,10 @@ pub fn run(
 
     let cwd = std::env::current_dir()
         .ok()
-        .and_then(|d| d.canonicalize().ok());
+        .and_then(|d| crate::paths::canonicalize_ok(&d));
     let mut cd_home = false;
     for wt in &targets {
-        let canonical = wt.path.canonicalize().unwrap_or_else(|_| wt.path.clone());
+        let canonical = crate::paths::canonicalize_or_self(&wt.path);
         remove_worktree(&repo, config, wt, force)?;
         if cwd.as_ref().is_some_and(|c| c.starts_with(&canonical)) {
             cd_home = true;

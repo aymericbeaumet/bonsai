@@ -115,7 +115,7 @@ impl Config {
     /// Canonicalized: git resolves symlinks (e.g. /tmp -> /private/tmp on
     /// macOS) when registering worktrees, and we compare paths by prefix.
     pub fn root_dir(&self) -> PathBuf {
-        canonicalize_lenient(&expand_tilde(&self.root))
+        crate::paths::canonicalize_lenient(&expand_tilde(&self.root))
     }
 }
 
@@ -186,17 +186,6 @@ fn git_bool(value: &str) -> Option<bool> {
         "true" | "yes" | "on" | "1" | "" => Some(true),
         "false" | "no" | "off" | "0" => Some(false),
         _ => None,
-    }
-}
-
-/// Canonicalize as much of the path as exists, keeping the rest verbatim.
-fn canonicalize_lenient(path: &Path) -> PathBuf {
-    if let Ok(canonical) = path.canonicalize() {
-        return canonical;
-    }
-    match (path.parent(), path.file_name()) {
-        (Some(parent), Some(name)) => canonicalize_lenient(parent).join(name),
-        _ => path.to_path_buf(),
     }
 }
 

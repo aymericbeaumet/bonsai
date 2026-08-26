@@ -316,8 +316,13 @@ fn run_post_add(config: &Config, branch: &str, path: &std::path::Path) {
         return;
     };
     eprintln!("bonsai: running post_add hook");
-    let result = std::process::Command::new("sh")
-        .arg("-c")
+    let (shell, flag) = if cfg!(windows) {
+        ("cmd", "/C")
+    } else {
+        ("sh", "-c")
+    };
+    let result = std::process::Command::new(shell)
+        .arg(flag)
         .arg(hook)
         .current_dir(path)
         .env("BONSAI_BRANCH", branch)

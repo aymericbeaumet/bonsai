@@ -19,7 +19,10 @@ struct TestRepo {
 impl TestRepo {
     fn new() -> Self {
         let tmp = TempDir::new().unwrap();
-        let dir = tmp.path().canonicalize().unwrap();
+        let dir = canon(tmp.path());
+        // Isolate git from the host: an empty file beats /dev/null (which
+        // does not exist on Windows).
+        std::fs::write(dir.join("gitconfig-empty"), "").unwrap();
         let origin = dir.join("origin.git");
         let clone = dir.join("clone");
         let root = dir.join("bonsai-root");
@@ -45,8 +48,9 @@ impl TestRepo {
     fn env_vars(&self) -> Vec<(&'static str, std::ffi::OsString)> {
         vec![
             ("HOME", self.dir.clone().into()),
+            ("USERPROFILE", self.dir.clone().into()),
             ("XDG_CONFIG_HOME", self.dir.join(".config").into()),
-            ("GIT_CONFIG_GLOBAL", "/dev/null".into()),
+            ("GIT_CONFIG_GLOBAL", self.dir.join("gitconfig-empty").into()),
             ("GIT_CONFIG_NOSYSTEM", "1".into()),
             ("GIT_TERMINAL_PROMPT", "0".into()),
             ("GIT_AUTHOR_NAME", "Test".into()),
@@ -470,9 +474,15 @@ fn repo_config_overrides_and_cli_flag_wins() {
 fn add_copies_configured_files_and_runs_post_add_hook() {
     let repo = TestRepo::new();
     std::fs::write(repo.clone.join(".env"), "SECRET=1\n").unwrap();
+    // Hooks run via `sh -c` on unix and `cmd /C` on windows.
+    let hook = if cfg!(windows) {
+        "type nul > hook-ran"
+    } else {
+        "touch hook-ran"
+    };
     std::fs::write(
         repo.clone.join(".bonsai.toml"),
-        "[add]\ncopy = [\".env\"]\npost_add = \"touch hook-ran\"\n",
+        format!("[add]\ncopy = [\".env\"]\npost_add = \"{hook}\"\n"),
     )
     .unwrap();
     let path = repo.add("feat-hook");
@@ -699,6 +709,7 @@ fn clean_removes_never_pushed_squash_merged_branch() {
 }
 
 #[test]
+#[cfg(unix)]
 fn symlinked_root_is_handled() {
     // git registers worktrees under the resolved path (macOS: /tmp ->
     // /private/tmp), so a symlinked BONSAI_ROOT must not break recognition.
@@ -862,6 +873,22 @@ fn completions_are_generated() {
         .assert()
         .success()
         .stdout(predicate::str::contains("_bonsai"));
+}
+
+/// Canonicalize without Windows verbatim prefixes (`\\?\C:\...`), which git
+/// neither prints nor accepts.
+fn canon(p: &Path) -> PathBuf {
+    let c = p.canonicalize().unwrap();
+    #[cfg(windows)]
+    {
+        let s = c.to_string_lossy();
+        if let Some(rest) = s.strip_prefix(r"\\?\") {
+            if !rest.starts_with("UNC") {
+                return PathBuf::from(rest);
+            }
+        }
+    }
+    c
 }
 
 fn which(bin: &str) -> Result<PathBuf, ()> {

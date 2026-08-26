@@ -127,10 +127,7 @@ impl Repo {
     }
 
     fn fallback_id(&self) -> String {
-        let canonical = self
-            .main_root
-            .canonicalize()
-            .unwrap_or_else(|_| self.main_root.clone());
+        let canonical = crate::paths::canonicalize_or_self(&self.main_root);
         let hash = Sha256::digest(canonical.to_string_lossy().as_bytes());
         let dirname = self
             .main_root
@@ -252,11 +249,11 @@ pub fn dir_collides(path: &Path, worktrees: &[Worktree], branch: &str) -> Option
     if !path.exists() {
         return None;
     }
-    let canonical = path.canonicalize().ok()?;
+    let canonical = crate::paths::canonicalize_ok(path)?;
     worktrees
         .iter()
         .filter(|wt| wt.branch.as_deref().is_some_and(|b| b != branch))
-        .find(|wt| wt.path.canonicalize().is_ok_and(|other| other == canonical))
+        .find(|wt| crate::paths::canonicalize_ok(&wt.path).is_some_and(|other| other == canonical))
         .and_then(|wt| wt.branch.clone())
 }
 

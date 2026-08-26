@@ -29,10 +29,10 @@ pub fn run(config: &Config, all: bool, yes: bool) -> Result<()> {
         let registered: HashSet<PathBuf> = repo
             .worktrees()?
             .iter()
-            .filter_map(|wt| wt.path.canonicalize().ok())
+            .filter_map(|wt| crate::paths::canonicalize_ok(&wt.path))
             .collect();
         for path in find_worktree_dirs(&repo.bonsai_dir(config)) {
-            let canonical = path.canonicalize().unwrap_or_else(|_| path.clone());
+            let canonical = crate::paths::canonicalize_or_self(&path);
             if !registered.contains(&canonical) {
                 orphans.push(path);
             }
