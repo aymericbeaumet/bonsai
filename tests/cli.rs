@@ -882,10 +882,10 @@ fn canon(p: &Path) -> PathBuf {
     #[cfg(windows)]
     {
         let s = c.to_string_lossy();
-        if let Some(rest) = s.strip_prefix(r"\\?\") {
-            if !rest.starts_with("UNC") {
-                return PathBuf::from(rest);
-            }
+        if let Some(rest) = s.strip_prefix(r"\\?\")
+            && !rest.starts_with("UNC")
+        {
+            return PathBuf::from(rest);
         }
     }
     c

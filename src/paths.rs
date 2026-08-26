@@ -28,11 +28,11 @@ pub fn canonicalize_lenient(path: &Path) -> PathBuf {
 #[cfg(windows)]
 fn simplify(path: PathBuf) -> PathBuf {
     let s = path.to_string_lossy();
-    if let Some(rest) = s.strip_prefix(r"\\?\") {
-        // \\?\C:\x -> C:\x, but leave \\?\UNC\server\share alone.
-        if !rest.starts_with("UNC") {
-            return PathBuf::from(rest);
-        }
+    // \\?\C:\x -> C:\x, but leave \\?\UNC\server\share alone.
+    if let Some(rest) = s.strip_prefix(r"\\?\")
+        && !rest.starts_with("UNC")
+    {
+        return PathBuf::from(rest);
     }
     path
 }
