@@ -49,14 +49,27 @@ fn run(cli: Cli) -> Result<Option<PathBuf>> {
         _ => {}
     }
 
-    let repo_root = repo::Repo::discover()?.map(|r| r.main_root);
-    let mut config = Config::load(repo_root.as_deref())?;
+    // .bonsai.toml is read from the current worktree's checkout when it has
+    // one (your branch's version wins), falling back to the main worktree.
+    let main_root = repo::Repo::discover()?.map(|r| r.main_root);
+    let cwd_toplevel = git::Git::new()
+        .out(&["rev-parse", "--show-toplevel"])
+        .ok()
+        .map(std::path::PathBuf::from);
+    let toml_dir = match (&cwd_toplevel, &main_root) {
+        (Some(top), _) if top.join(".bonsai.toml").is_file() => Some(top.clone()),
+        (_, Some(root)) => Some(root.clone()),
+        (top, None) => top.clone(),
+    };
+    // Git::new() reads the effective git config from the cwd: the repo's
+    // `bonsai.*` keys when inside one, the user's global ones otherwise.
+    let mut config = Config::load(toml_dir.as_deref(), &git::Git::new())?;
     // CLI flags sit at the top of the precedence chain.
     if let Some(root) = cli.root {
         config.root = root;
     }
     if let Some(remote) = cli.remote {
-        config.remote = remote;
+        config.remote = Some(remote);
     }
 
     match cli.command {

@@ -1,4 +1,4 @@
-# bonsai
+# bonsai [![ci](https://github.com/aymericbeaumet/bonsai/actions/workflows/ci.yml/badge.svg)](https://github.com/aymericbeaumet/bonsai/actions/workflows/ci.yml)
 
 Ergonomic git worktree manager. Use it from inside any clone; the worktrees it
 creates are centralized under a global root (`~/.bonsai/<repo-id>/<branch>/`),
@@ -48,13 +48,24 @@ it — the confirmation prompt and `--dry-run` are there for a reason.
 ## Configuration
 
 Precedence, low to high: defaults < `~/.config/bonsai/config.toml` <
-`<repo>/.bonsai.toml` (checked in, team policy) < `BONSAI_*` environment
+`<repo>/.bonsai.toml` (checked in, team policy) < `git config bonsai.*`
+(per-clone personal overrides, like `user.email`) < `BONSAI_*` environment
 variables (`__` nests: `BONSAI_CLEAN__FETCH=false`) < CLI flags
 (`--root`, `--remote`).
 
+`.bonsai.toml` is read from the worktree you are standing in (your branch's
+version wins), falling back to the main worktree. The git-config layer uses
+the same keys, e.g.:
+
+```sh
+git config bonsai.root ~/src/worktrees          # this clone only
+git config --global bonsai.clean.fetch false    # everywhere
+git config --add bonsai.add.copy ".env"         # multi-valued
+```
+
 ```toml
 root = "~/.bonsai"          # where worktrees live
-remote = "origin"           # remote used for tracking/fetching/repo identity
+remote = "origin"           # optional: defaults to checkout.defaultRemote, then origin
 default_branch = "main"     # optional: skip detection
 
 [add]
@@ -67,17 +78,42 @@ fetch = true                # fetch --prune before computing merged branches
 protected = ["release/*"]   # branch globs never cleaned
 ```
 
+## Working from inside a worktree
+
+Every command anchors on the main worktree via git itself, so bonsai behaves
+identically whether you run it from the original clone or from any worktree —
+`bonsai add` from inside one worktree creates a sibling for the same repo.
+A few things are deliberately relative to *where you stand*:
+
+- `--base` refs resolve in your current worktree: `bonsai add fixup --base
+  HEAD` from inside `feat-a` stacks the new branch on `feat-a`'s HEAD.
+- `[add] copy` files are taken from your current worktree first (they carry
+  your freshest local `.env` tweaks), then the main worktree.
+- `.bonsai.toml` is read from your current checkout first.
+
+New branches are created with `--no-track` (no phantom upstream on
+`origin/main`), so `git push` with `push.autoSetupRemote` does the right
+thing and `bonsai clean` can detect squash-merges reliably.
+
+## Integrations
+
+- **git**: respects `checkout.defaultRemote` and `init.defaultBranch`;
+  configurable through `git config bonsai.*`; all operations shell out to
+  your system `git`.
+- **zsh/bash/fish**: wrapper + completions via `bonsai init`. The wrapper
+  uses a plain `cd`, so `chpwd`-based tools (zoxide, direnv, starship) pick
+  up worktree jumps automatically.
+- **direnv**: `.envrc` files copied by bonsai from your own worktree are
+  `direnv allow`ed automatically; tracked ones stay gated by direnv as usual.
+
 ## How it works
 
 - Worktrees live at `<root>/<repo-id>/<branch>`, where the repo-id is derived
   from the remote URL (`github.com/owner/repo`, nested groups preserved) or a
   hash of the repo path when there is no remote. Branch names map verbatim to
   nested directories (`feature/login` → `feature/login/`).
-- Every command anchors on the main worktree via git itself, so bonsai behaves
-  identically whether you run it from the original clone or from any worktree.
 - The shell wrapper captures stdout and watches for a sentinel line to cd;
   prompts render on stderr, so fuzzy pickers work even inside `$(...)`.
-- All git operations shell out to your system `git`.
 
 ## License
 

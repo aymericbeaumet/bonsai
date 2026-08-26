@@ -99,10 +99,20 @@ pub fn run(
         ])?;
         eprintln!("bonsai: added worktree for '{branch}' (tracking {remote_ref}) at {path_str}");
     } else {
-        let base = resolve_base(&repo, config, base)?;
-        repo.git
-            .run(&["worktree", "add", "-b", &branch, &path_str, &base])?;
-        eprintln!("bonsai: created branch '{branch}' from {base}, worktree at {path_str}");
+        let (base_display, base_ref) = resolve_base(&repo, config, base)?;
+        // --no-track: git would otherwise set the upstream to the base
+        // (e.g. origin/main), which misleads `git push` and defeats clean's
+        // gone-upstream detection once the branch gets its own upstream.
+        repo.git.run(&[
+            "worktree",
+            "add",
+            "--no-track",
+            "-b",
+            &branch,
+            &path_str,
+            &base_ref,
+        ])?;
+        eprintln!("bonsai: created branch '{branch}' from {base_display}, worktree at {path_str}");
     }
 
     copy_files(&repo, config, &path);
@@ -187,9 +197,21 @@ fn remote_ref_for(repo: &Repo, config: &Config, branch: &str) -> Result<Option<S
     }
 }
 
-fn resolve_base(repo: &Repo, config: &Config, base: Option<String>) -> Result<String> {
+/// Returns (display name, ref to pass to git).
+fn resolve_base(repo: &Repo, config: &Config, base: Option<String>) -> Result<(String, String)> {
     if let Some(base) = base {
-        return Ok(base);
+        // Resolve in the *current directory's* context: `--base HEAD` from
+        // inside a worktree must mean that worktree's HEAD (stacked
+        // branches), not the main checkout's.
+        let sha = crate::git::Git::new()
+            .out(&[
+                "rev-parse",
+                "--verify",
+                "--end-of-options",
+                &format!("{base}^{{commit}}"),
+            ])
+            .map_err(|e| anyhow::anyhow!("cannot resolve base ref '{base}': {e}"))?;
+        return Ok((base, sha));
     }
     let default = repo.default_branch(config)?;
     if let Some(remote) = repo.remote_name(config)
@@ -200,7 +222,8 @@ fn resolve_base(repo: &Repo, config: &Config, base: Option<String>) -> Result<St
             &format!("refs/remotes/{remote}/{default}"),
         ])
     {
-        return Ok(format!("{remote}/{default}"));
+        let base = format!("{remote}/{default}");
+        return Ok((base.clone(), base));
     }
     if repo.git.ok(&[
         "show-ref",
@@ -208,42 +231,79 @@ fn resolve_base(repo: &Repo, config: &Config, base: Option<String>) -> Result<St
         "--quiet",
         &format!("refs/heads/{default}"),
     ]) {
-        return Ok(default);
+        return Ok((default.clone(), default));
     }
     bail!("base ref '{default}' not found; pass --base");
 }
 
-/// Copy configured globs (e.g. .env files) from the worktree we are standing
-/// in — falling back to the main worktree — into the new one. Best-effort.
+/// Copy configured globs (e.g. .env files) into the new worktree, looking in
+/// the worktree we are standing in first (freshest local files), then the
+/// main worktree. Best-effort. Copied `.envrc` files get `direnv allow`ed —
+/// they come from the user's own checkout.
 fn copy_files(repo: &Repo, config: &Config, dest: &std::path::Path) {
     if config.add.copy.is_empty() {
         return;
     }
-    let source = crate::git::Git::new()
-        .out(&["rev-parse", "--show-toplevel"])
-        .map(PathBuf::from)
-        .unwrap_or_else(|_| repo.main_root.clone());
+    let mut sources: Vec<PathBuf> = Vec::new();
+    if let Ok(top) = crate::git::Git::new().out(&["rev-parse", "--show-toplevel"]) {
+        sources.push(PathBuf::from(top));
+    }
+    if !sources.contains(&repo.main_root) {
+        sources.push(repo.main_root.clone());
+    }
+    let mut copied_envrc: Vec<PathBuf> = Vec::new();
     for pattern in &config.add.copy {
-        let full = format!("{}/{pattern}", source.display());
-        let Ok(paths) = glob::glob(&full) else {
-            eprintln!("bonsai: invalid copy glob '{pattern}', skipping");
-            continue;
-        };
-        for path in paths.flatten().filter(|p| p.is_file()) {
-            let Ok(rel) = path.strip_prefix(&source) else {
-                continue;
+        for source in &sources {
+            let full = format!("{}/{pattern}", source.display());
+            let Ok(paths) = glob::glob(&full) else {
+                eprintln!("bonsai: invalid copy glob '{pattern}', skipping");
+                break;
             };
-            let target = dest.join(rel);
-            if target.exists() {
-                continue;
+            for path in paths.flatten().filter(|p| p.is_file()) {
+                let Ok(rel) = path.strip_prefix(source) else {
+                    continue;
+                };
+                let target = dest.join(rel);
+                // Also what makes the current worktree win over the main one.
+                if target.exists() {
+                    continue;
+                }
+                if let Some(parent) = target.parent() {
+                    let _ = std::fs::create_dir_all(parent);
+                }
+                match std::fs::copy(&path, &target) {
+                    Ok(_) => {
+                        eprintln!("bonsai: copied {}", rel.display());
+                        if rel.file_name().is_some_and(|n| n == ".envrc") {
+                            copied_envrc.push(target);
+                        }
+                    }
+                    Err(e) => eprintln!("bonsai: failed to copy {}: {e}", rel.display()),
+                }
             }
-            if let Some(parent) = target.parent() {
-                let _ = std::fs::create_dir_all(parent);
+        }
+    }
+    direnv_allow(&copied_envrc);
+}
+
+/// Pre-approve `.envrc` files that bonsai itself copied from the user's own
+/// worktree, so the first cd doesn't stop on "direnv: error .envrc is
+/// blocked". Tracked `.envrc` files coming from the repo checkout are left
+/// for direnv to gate as usual.
+fn direnv_allow(envrcs: &[PathBuf]) {
+    for envrc in envrcs {
+        match std::process::Command::new("direnv")
+            .arg("allow")
+            .arg(envrc)
+            .stdout(std::process::Stdio::null())
+            .stderr(std::process::Stdio::null())
+            .status()
+        {
+            Ok(status) if status.success() => {
+                eprintln!("bonsai: direnv allowed {}", envrc.display());
             }
-            match std::fs::copy(&path, &target) {
-                Ok(_) => eprintln!("bonsai: copied {}", rel.display()),
-                Err(e) => eprintln!("bonsai: failed to copy {}: {e}", rel.display()),
-            }
+            Ok(_) => eprintln!("bonsai: direnv allow failed for {}", envrc.display()),
+            Err(_) => return, // direnv not installed
         }
     }
 }

@@ -517,6 +517,188 @@ fn init_scripts_are_valid_shell() {
 }
 
 #[test]
+fn new_branch_has_no_upstream() {
+    // git would auto-track the base (origin/main) on `-b`; that misleads
+    // `git push` and breaks clean's gone-upstream detection later.
+    let repo = TestRepo::new();
+    let path = repo.add("feat-notrack");
+    let out = StdCommand::new("git")
+        .args(["rev-parse", "--abbrev-ref", "feat-notrack@{upstream}"])
+        .current_dir(&path)
+        .output()
+        .unwrap();
+    assert!(
+        !out.status.success(),
+        "new branch must not have an upstream"
+    );
+}
+
+#[test]
+fn base_head_resolves_against_current_worktree() {
+    // Stacked branches: from inside worktree A, `--base HEAD` means A's
+    // HEAD, not the main checkout's.
+    let repo = TestRepo::new();
+    let a = repo.add("feat-a");
+    std::fs::write(a.join("a.txt"), "a\n").unwrap();
+    repo.git(&a, &["add", "."]);
+    repo.git(&a, &["commit", "-m", "a"]);
+    let a_head = repo.git(&a, &["rev-parse", "HEAD"]);
+
+    let output = repo
+        .bonsai(&a)
+        .args(["add", "feat-a2", "--base", "HEAD"])
+        .output()
+        .unwrap();
+    assert!(
+        output.status.success(),
+        "{}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let a2 = PathBuf::from(String::from_utf8_lossy(&output.stdout).trim().to_string());
+    assert_eq!(repo.git(&a2, &["rev-parse", "HEAD"]), a_head);
+    assert!(a2.join("a.txt").exists());
+}
+
+#[test]
+fn copy_prefers_current_worktree_over_main() {
+    let repo = TestRepo::new();
+    std::fs::write(
+        repo.clone.join(".bonsai.toml"),
+        "[add]\ncopy = [\".env\"]\n",
+    )
+    .unwrap();
+    std::fs::write(repo.clone.join(".env"), "FROM=main\n").unwrap();
+    let src = repo.add("feat-src");
+    // The copied .env is then modified in the worktree we stand in.
+    std::fs::write(src.join(".env"), "FROM=worktree\n").unwrap();
+
+    let output = repo
+        .bonsai(&src)
+        .args(["add", "feat-dst"])
+        .output()
+        .unwrap();
+    assert!(output.status.success());
+    let dst = PathBuf::from(String::from_utf8_lossy(&output.stdout).trim().to_string());
+    assert_eq!(
+        std::fs::read_to_string(dst.join(".env")).unwrap(),
+        "FROM=worktree\n"
+    );
+}
+
+#[test]
+fn bonsai_toml_is_read_from_current_worktree() {
+    let repo = TestRepo::new();
+    let wt = repo.add("feat-cfgwt");
+    let wt_root = repo.dir.join("wt-config-root");
+    // Untracked config in this worktree only.
+    std::fs::write(
+        wt.join(".bonsai.toml"),
+        format!("root = \"{}\"\n", wt_root.display()),
+    )
+    .unwrap();
+    let output = repo
+        .bonsai(&wt)
+        .env_remove("BONSAI_ROOT")
+        .args(["add", "feat-from-wt"])
+        .output()
+        .unwrap();
+    assert!(output.status.success());
+    let path = PathBuf::from(String::from_utf8_lossy(&output.stdout).trim().to_string());
+    assert!(path.starts_with(&wt_root), "path: {}", path.display());
+}
+
+#[test]
+fn git_config_bonsai_layer_between_toml_and_env() {
+    let repo = TestRepo::new();
+    let toml_root = repo.dir.join("toml-root");
+    let gitcfg_root = repo.dir.join("gitcfg-root");
+    std::fs::write(
+        repo.clone.join(".bonsai.toml"),
+        format!("root = \"{}\"\n", toml_root.display()),
+    )
+    .unwrap();
+    repo.git(
+        &repo.clone,
+        &["config", "bonsai.root", gitcfg_root.to_str().unwrap()],
+    );
+
+    // git config beats .bonsai.toml...
+    let output = repo
+        .bonsai(&repo.clone)
+        .env_remove("BONSAI_ROOT")
+        .args(["add", "feat-gitcfg"])
+        .output()
+        .unwrap();
+    assert!(output.status.success());
+    let path = PathBuf::from(String::from_utf8_lossy(&output.stdout).trim().to_string());
+    assert!(path.starts_with(&gitcfg_root), "path: {}", path.display());
+
+    // ...but BONSAI_* env beats git config (BONSAI_ROOT is set by bonsai()).
+    let path = repo.add("feat-envwins");
+    assert!(path.starts_with(&repo.root), "path: {}", path.display());
+}
+
+#[test]
+fn git_config_multi_valued_copy() {
+    let repo = TestRepo::new();
+    std::fs::write(repo.clone.join(".env"), "A=1\n").unwrap();
+    std::fs::write(repo.clone.join(".envrc"), "export A=1\n").unwrap();
+    repo.git(&repo.clone, &["config", "--add", "bonsai.add.copy", ".env"]);
+    repo.git(
+        &repo.clone,
+        &["config", "--add", "bonsai.add.copy", ".envrc"],
+    );
+    let path = repo.add("feat-multicopy");
+    assert!(path.join(".env").exists());
+    assert!(path.join(".envrc").exists());
+}
+
+#[test]
+fn checkout_default_remote_is_respected() {
+    let repo = TestRepo::new();
+    // A second remote holding a branch that only exists there.
+    repo.git(&repo.dir, &["init", "--bare", "-b", "main", "upstream.git"]);
+    let upstream = repo.dir.join("upstream.git");
+    repo.git(
+        &repo.clone,
+        &["remote", "add", "upstream", upstream.to_str().unwrap()],
+    );
+    repo.git(&repo.clone, &["push", "upstream", "main:up-only"]);
+    repo.git(&repo.clone, &["fetch", "upstream"]);
+    repo.git(
+        &repo.clone,
+        &["config", "checkout.defaultRemote", "upstream"],
+    );
+
+    let path = repo.add("up-only");
+    let tracking = repo.git(&path, &["rev-parse", "--abbrev-ref", "up-only@{upstream}"]);
+    assert_eq!(tracking, "upstream/up-only");
+}
+
+#[test]
+fn clean_removes_never_pushed_squash_merged_branch() {
+    // The local-only PR flow: branch never pushed, squash-merged into main.
+    // Works only because new branches carry no auto-upstream (--no-track).
+    let repo = TestRepo::new();
+    let path = repo.add("feat-local");
+    std::fs::write(path.join("local.txt"), "x\n").unwrap();
+    repo.git(&path, &["add", "."]);
+    repo.git(&path, &["commit", "-m", "local feature"]);
+    repo.git(&repo.clone, &["merge", "--squash", "feat-local"]);
+    repo.git(&repo.clone, &["commit", "-m", "feat-local (squashed)"]);
+    repo.git(&repo.clone, &["push", "origin", "main"]);
+
+    repo.bonsai(&repo.clone)
+        .args(["clean", "--yes"])
+        .assert()
+        .success()
+        .stderr(predicate::str::contains("squash-merged"));
+    assert!(!path.exists());
+    let refs = repo.git(&repo.clone, &["for-each-ref", "refs/heads"]);
+    assert!(!refs.contains("feat-local"));
+}
+
+#[test]
 fn symlinked_root_is_handled() {
     // git registers worktrees under the resolved path (macOS: /tmp ->
     // /private/tmp), so a symlinked BONSAI_ROOT must not break recognition.

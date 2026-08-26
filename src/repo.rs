@@ -75,18 +75,55 @@ impl Repo {
             .unwrap_or_else(|| self.fallback_id())
     }
 
-    /// The remote to use: the configured one if it exists, else the only
-    /// remote if there is exactly one.
+    /// The remote to use, first existing wins: bonsai config > git's own
+    /// `checkout.defaultRemote` > "origin" > the only remote when there is
+    /// exactly one.
     pub fn remote_name(&self, config: &Config) -> Option<String> {
-        let remotes = self.git.out(&["remote"]).unwrap_or_default();
-        let mut remotes = remotes.lines().map(str::to_string).collect::<Vec<_>>();
-        if remotes.iter().any(|r| r == &config.remote) {
-            return Some(config.remote.clone());
+        let mut remotes = self
+            .git
+            .out(&["remote"])
+            .unwrap_or_default()
+            .lines()
+            .map(str::to_string)
+            .collect::<Vec<_>>();
+        let mut preferred: Vec<String> = Vec::new();
+        if let Some(remote) = &config.remote {
+            preferred.push(remote.clone());
+        }
+        if let Ok(remote) = self.git.out(&["config", "checkout.defaultRemote"])
+            && !remote.is_empty()
+        {
+            preferred.push(remote);
+        }
+        preferred.push("origin".to_string());
+        for candidate in preferred {
+            if remotes.contains(&candidate) {
+                return Some(candidate);
+            }
         }
         if remotes.len() == 1 {
             return Some(remotes.remove(0));
         }
         None
+    }
+
+    fn branch_ref_exists(&self, name: &str, remote: Option<&str>) -> bool {
+        if let Some(remote) = remote
+            && self.git.ok(&[
+                "show-ref",
+                "--verify",
+                "--quiet",
+                &format!("refs/remotes/{remote}/{name}"),
+            ])
+        {
+            return true;
+        }
+        self.git.ok(&[
+            "show-ref",
+            "--verify",
+            "--quiet",
+            &format!("refs/heads/{name}"),
+        ])
     }
 
     fn fallback_id(&self) -> String {
@@ -106,13 +143,15 @@ impl Repo {
         )
     }
 
-    /// Default branch resolution: config > origin/HEAD > well-known names.
+    /// Default branch resolution: config > <remote>/HEAD > git's own
+    /// `init.defaultBranch` (when the ref exists) > well-known names.
     /// Ambiguity is fatal — `clean` deletes based on this answer.
     pub fn default_branch(&self, config: &Config) -> Result<String> {
         if let Some(branch) = &config.default_branch {
             return Ok(branch.clone());
         }
-        if let Some(remote) = self.remote_name(config)
+        let remote = self.remote_name(config);
+        if let Some(remote) = &remote
             && let Ok(head) = self.git.out(&[
                 "symbolic-ref",
                 "--short",
@@ -122,8 +161,13 @@ impl Repo {
         {
             return Ok(branch.to_string());
         }
+        if let Ok(name) = self.git.out(&["config", "init.defaultBranch"])
+            && !name.is_empty()
+            && self.branch_ref_exists(&name, remote.as_deref())
+        {
+            return Ok(name);
+        }
         let candidates = ["main", "master", "trunk", "develop"];
-        let remote = self.remote_name(config);
         for refs in ["refs/remotes", "refs/heads"] {
             let matches: Vec<&str> = candidates
                 .iter()
