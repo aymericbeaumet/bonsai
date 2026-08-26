@@ -104,26 +104,16 @@ New branches are created with `--no-track` (no phantom upstream on
 `origin/main`), so `git push` with `push.autoSetupRemote` does the right
 thing and `bonsai clean` can detect squash-merges reliably.
 
-## AI harness plugins and skills
+## AI agents (Claude Code, Cursor, Codex, OpenCode, ...)
 
 bonsai is built to work the same across coding harnesses, so switching tools
-mid-project costs nothing.
+mid-project costs nothing. It sticks to the two cross-harness standards —
+no per-harness plugins to install or maintain.
 
-The repo ships one [Agent Skill](https://agentskills.io)
-(`skills/bonsai/SKILL.md`) teaching agents the workflow, its invariants, and
-the destructive-command policy. Each harness gets that same skill through its
-native distribution mechanism. The `bonsai` CLI from the install section is
-still required; these packages teach the harness how to use it.
-
-| Harness | Install |
-|---|---|
-| Claude Code | `claude plugin marketplace add aymericbeaumet/bonsai`<br>`claude plugin install bonsai@bonsai` |
-| Codex | `codex plugin marketplace add aymericbeaumet/bonsai`<br>`codex plugin add bonsai@bonsai` |
-| OpenCode | `bonsai skill install` (or `bonsai skill install --all` before OpenCode has created its config directory) |
-| Pi | `pi install git:github.com/aymericbeaumet/bonsai` |
-
-The generic installer also provisions every detected skill-compatible
-harness, including Cursor:
+**The [Agent Skill](https://agentskills.io)** (`skills/bonsai/SKILL.md`)
+teaches agents the workflow, its invariants, and the destructive-command
+policy. It is embedded in the binary and installs into each harness's
+standard skill directory:
 
 ```sh
 bonsai skill install        # detects Claude Code, Codex, OpenCode, Cursor, Pi
@@ -131,13 +121,8 @@ bonsai skill install --all  # or install for every harness unconditionally
 bonsai skill                # or print it and pipe it wherever you want
 ```
 
-Pi discovers `skills/**/SKILL.md` directly from the Git package, so it needs
-no duplicate manifest. OpenCode likewise uses its native global skill
-directory; an executable npm plugin would only wrap the same file and would
-not improve installation.
-
-**Or drop a snippet in your instructions file**: `bonsai agents >> AGENTS.md`
-prints a shorter usage contract for the cross-harness instructions file.
+**Or the AGENTS.md standard**: `bonsai agents >> AGENTS.md` appends a
+shorter usage contract to the cross-harness instructions file.
 
 **Everything is scriptable**: `path=$(bonsai add feat-x)` prints the worktree
 path and is idempotent; `bonsai list --json` and `bonsai clean --dry-run
@@ -174,13 +159,6 @@ cursor "$(bonsai workspace --all)"   # everything under the bonsai root
 ```
 
 Disable the file maintenance with `workspace = false`.
-
-**Optional VS Code extension** for the last 20%:
-[Bonsai Worktrees](editors/vscode/README.md) adds a compact worktrees view
-in the Explorer sidebar (grouped by repo, click-to-open, inline remove) and
-Command Palette actions to create, open, remove, and safely clean worktrees.
-Build and install the local VSIX with `cd editors/vscode && npm run
-package`, then `code --install-extension bonsai-0.1.0.vsix`.
 
 **Folder-based apps** (Claude Code desktop, Codex desktop): every worktree
 is a plain directory named after its branch under

@@ -148,18 +148,7 @@ policy.
                             #   OpenCode     ~/.config/opencode/skills/bonsai/
                             #   Cursor       ~/.agents/skills/bonsai/
                             #   Pi           ~/.pi/agent/skills/bonsai/
-  bonsai skill install --all  # skip detection, install everywhere
-
-Claude Code users can instead track releases via the plugin marketplace:
-  /plugin marketplace add aymericbeaumet/bonsai
-  /plugin install bonsai@bonsai
-
-Codex users can install the repository marketplace:
-  codex plugin marketplace add aymericbeaumet/bonsai
-  codex plugin add bonsai@bonsai
-
-Pi can install the repository as a native Git package:
-  pi install git:github.com/aymericbeaumet/bonsai";
+  bonsai skill install --all  # skip detection, install everywhere";
 
 #[derive(Debug, Subcommand)]
 pub enum SkillAction {

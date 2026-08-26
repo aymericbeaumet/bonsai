@@ -69,23 +69,4 @@ mod tests {
             assert!(super::SKILL_MD.contains(needle), "missing: {needle}");
         }
     }
-
-    #[test]
-    fn codex_plugin_skill_matches_canonical_skill() {
-        let plugin_skill = include_str!("../../plugins/bonsai/skills/bonsai/SKILL.md");
-        assert_eq!(super::SKILL_MD, plugin_skill);
-    }
-
-    #[test]
-    fn package_versions_match_crate_version() {
-        let manifests = [
-            include_str!("../../.claude-plugin/plugin.json"),
-            include_str!("../../plugins/bonsai/.codex-plugin/plugin.json"),
-            include_str!("../../editors/vscode/package.json"),
-        ];
-        for manifest in manifests {
-            let json: serde_json::Value = serde_json::from_str(manifest).unwrap();
-            assert_eq!(json["version"], env!("CARGO_PKG_VERSION"));
-        }
-    }
 }
