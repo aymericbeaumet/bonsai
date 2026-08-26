@@ -412,6 +412,7 @@ mod tests {
             ("AB/Fix Parser #42", "ab/fix-parser-42"),
             ("feature/login", "feature/login"),
             ("Crème brûlée/Über Fix", "creme-brulee/uber-fix"),
+            ("foo/💥", "foo/boom"),
         ];
         for (input, expected) in cases {
             assert_eq!(slugify_branch_input(input).unwrap(), expected);
@@ -420,7 +421,7 @@ mod tests {
 
     #[test]
     fn rejects_empty_slug_segments() {
-        for input in ["", "/foo", "foo/", "foo//bar", "foo/💥"] {
+        for input in ["", "/foo", "foo/", "foo//bar", "foo/---"] {
             assert!(slugify_branch_input(input).is_err(), "input: {input:?}");
         }
     }

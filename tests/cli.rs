@@ -299,11 +299,7 @@ fn add_fetch_can_be_disabled_in_config() {
     repo.git(&publisher, &["add", "."]);
     repo.git(&publisher, &["commit", "-m", "latest"]);
     repo.git(&publisher, &["push", "origin", "main"]);
-    std::fs::write(
-        repo.clone.join(".bonsai.toml"),
-        "[add]\nfetch = false\n",
-    )
-    .unwrap();
+    std::fs::write(repo.clone.join(".bonsai.toml"), "[add]\nfetch = false\n").unwrap();
 
     let path = repo.add("feat-stale");
     assert!(!path.join("latest.txt").exists());
