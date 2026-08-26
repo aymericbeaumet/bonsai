@@ -1,4 +1,4 @@
-# bonsai [![ci](https://github.com/aymericbeaumet/bonsai/actions/workflows/ci.yml/badge.svg)](https://github.com/aymericbeaumet/bonsai/actions/workflows/ci.yml)
+# bonsai [![release](https://github.com/aymericbeaumet/bonsai/actions/workflows/release.yml/badge.svg)](https://github.com/aymericbeaumet/bonsai/actions/workflows/release.yml)
 
 Ergonomic git worktree manager. Use it from inside any clone; the worktrees it
 creates are centralized under a global root (`~/.bonsai/<repo-id>/<branch>/`),

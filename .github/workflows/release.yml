@@ -15,6 +15,9 @@ env:
   CARGO_TERM_COLOR: always
 
 jobs:
+  test:
+    uses: ./.github/workflows/ci.yml
+
   version:
     runs-on: ubuntu-latest
     outputs:
@@ -44,7 +47,7 @@ jobs:
 
   build:
     name: build (${{ matrix.name }})
-    needs: version
+    needs: [test, version]
     strategy:
       fail-fast: false
       matrix:
