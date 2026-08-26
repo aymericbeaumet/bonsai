@@ -13,7 +13,8 @@ pub fn show() {
 /// on this machine (`--all` skips detection). Directory conventions:
 /// Claude Code ~/.claude/skills, Codex ~/.codex/skills, OpenCode
 /// $XDG_CONFIG_HOME/opencode/skills, Cursor ~/.agents/skills (the shared
-/// agent-compatible location it reads alongside the Claude/Codex ones).
+/// agent-compatible location it reads alongside the Claude/Codex ones), Pi
+/// ~/.pi/agent/skills.
 pub fn install(all: bool) -> Result<()> {
     let mut installed = 0;
     for (harness, detect_dir, skills_dir) in targets()? {
@@ -55,6 +56,7 @@ fn targets() -> Result<Vec<(&'static str, PathBuf, PathBuf)>> {
             xdg_config.join("opencode/skills"),
         ),
         ("Cursor", home.join(".cursor"), home.join(".agents/skills")),
+        ("Pi", home.join(".pi/agent"), home.join(".pi/agent/skills")),
     ])
 }
 
@@ -65,6 +67,25 @@ mod tests {
         assert!(super::SKILL_MD.starts_with("---\nname: bonsai\n"));
         for needle in ["description:", "--dry-run --json", "--help"] {
             assert!(super::SKILL_MD.contains(needle), "missing: {needle}");
+        }
+    }
+
+    #[test]
+    fn codex_plugin_skill_matches_canonical_skill() {
+        let plugin_skill = include_str!("../../plugins/bonsai/skills/bonsai/SKILL.md");
+        assert_eq!(super::SKILL_MD, plugin_skill);
+    }
+
+    #[test]
+    fn package_versions_match_crate_version() {
+        let manifests = [
+            include_str!("../../.claude-plugin/plugin.json"),
+            include_str!("../../plugins/bonsai/.codex-plugin/plugin.json"),
+            include_str!("../../editors/vscode/package.json"),
+        ];
+        for manifest in manifests {
+            let json: serde_json::Value = serde_json::from_str(manifest).unwrap();
+            assert_eq!(json["version"], env!("CARGO_PKG_VERSION"));
         }
     }
 }

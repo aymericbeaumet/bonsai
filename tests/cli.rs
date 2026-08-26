@@ -805,6 +805,25 @@ fn list_json_is_machine_readable() {
     let feat = entries.iter().find(|e| e["branch"] == "feat-json").unwrap();
     assert_eq!(feat["main"], false);
     assert_eq!(PathBuf::from(feat["path"].as_str().unwrap()), path);
+    let repo_id = feat["repo"].as_str().unwrap();
+    assert!(repo_id.starts_with("local/clone-"), "repo: {repo_id}");
+
+    // --all carries the same repo id (derived from the path layout), so UIs
+    // can group worktrees by repository.
+    let output = repo
+        .bonsai(&repo.dir)
+        .args(["list", "--all", "--json"])
+        .output()
+        .unwrap();
+    assert!(output.status.success());
+    let entries: serde_json::Value = serde_json::from_slice(&output.stdout).unwrap();
+    let feat = entries
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|e| e["branch"] == "feat-json")
+        .unwrap();
+    assert_eq!(feat["repo"].as_str().unwrap(), repo_id);
 }
 
 #[test]

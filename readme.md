@@ -41,7 +41,7 @@ target path, so `cd "$(bonsai add foo)"` composes.
 | `bonsai prune` | Clean up stale worktree registrations, orphaned directories, and empty dirs. `--all` sweeps the whole root, including worktrees of repos whose clone was deleted. |
 | `bonsai init <shell>` | Print the shell wrapper (zsh, bash, fish). |
 | `bonsai agents` | Print a usage contract for AI coding agents, ready for `bonsai agents >> AGENTS.md`. |
-| `bonsai skill [install]` | Print the bundled Agent Skill, or install it for detected harnesses (Claude Code, Codex, OpenCode, Cursor). |
+| `bonsai skill [install]` | Print the bundled Agent Skill, or install it for detected harnesses (Claude Code, Codex, OpenCode, Cursor, Pi). |
 | `bonsai completions <shell>` | Print shell completions. |
 
 Every subcommand has detailed `--help` with examples.
@@ -104,27 +104,37 @@ New branches are created with `--no-track` (no phantom upstream on
 `origin/main`), so `git push` with `push.autoSetupRemote` does the right
 thing and `bonsai clean` can detect squash-merges reliably.
 
-## AI agents (Claude Code, Cursor, Codex, OpenCode, ...)
+## AI harness plugins and skills
 
 bonsai is built to work the same across coding harnesses, so switching tools
 mid-project costs nothing.
 
-**Install the skill.** The repo ships an [Agent Skill](https://agentskills.io)
+The repo ships one [Agent Skill](https://agentskills.io)
 (`skills/bonsai/SKILL.md`) teaching agents the workflow, its invariants, and
-the destructive-command policy. It is embedded in the binary:
+the destructive-command policy. Each harness gets that same skill through its
+native distribution mechanism. The `bonsai` CLI from the install section is
+still required; these packages teach the harness how to use it.
+
+| Harness | Install |
+|---|---|
+| Claude Code | `claude plugin marketplace add aymericbeaumet/bonsai`<br>`claude plugin install bonsai@bonsai` |
+| Codex | `codex plugin marketplace add aymericbeaumet/bonsai`<br>`codex plugin add bonsai@bonsai` |
+| OpenCode | `bonsai skill install` (or `bonsai skill install --all` before OpenCode has created its config directory) |
+| Pi | `pi install git:github.com/aymericbeaumet/bonsai` |
+
+The generic installer also provisions every detected skill-compatible
+harness, including Cursor:
 
 ```sh
-bonsai skill install        # detects Claude Code, Codex, OpenCode, Cursor
+bonsai skill install        # detects Claude Code, Codex, OpenCode, Cursor, Pi
 bonsai skill install --all  # or install for every harness unconditionally
 bonsai skill                # or print it and pipe it wherever you want
 ```
 
-Claude Code users can track releases through the plugin marketplace instead:
-
-```
-/plugin marketplace add aymericbeaumet/bonsai
-/plugin install bonsai@bonsai
-```
+Pi discovers `skills/**/SKILL.md` directly from the Git package, so it needs
+no duplicate manifest. OpenCode likewise uses its native global skill
+directory; an executable npm plugin would only wrap the same file and would
+not improve installation.
 
 **Or drop a snippet in your instructions file**: `bonsai agents >> AGENTS.md`
 prints a shorter usage contract for the cross-harness instructions file.
@@ -150,6 +160,14 @@ The bonsai root is structured so GUI tools get worktrees for free:
   worktree, labelled by branch, kept in sync by add/remove/clean/prune.
   Open everything in one window: `code "$(bonsai workspace)"` or
   `cursor "$(bonsai workspace)"`. Disable with `workspace = false`.
+- **VS Code extension**: [Bonsai Worktrees](editors/vscode/README.md) adds a
+  **Bonsai Worktrees view in the Explorer sidebar** — every worktree of every
+  repo, grouped by repository, with click-to-open, open-in-new-window, and
+  remove actions — plus Command Palette actions to create, open, remove, and
+  safely clean worktrees, and a command to open the maintained multi-root
+  workspace. Build and install the local VSIX with
+  `cd editors/vscode && npm run package`, then
+  `code --install-extension bonsai-0.1.0.vsix`.
 - **Claude Code desktop / Codex desktop** (folder-based apps): every
   worktree is a plain directory named after its branch under
   `~/.bonsai/<host>/<owner>/<repo>/`, so folder pickers and recent-project

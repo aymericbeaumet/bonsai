@@ -1,0 +1,20 @@
+{
+  "name": "bonsai",
+  "interface": {
+    "displayName": "Bonsai"
+  },
+  "plugins": [
+    {
+      "name": "bonsai",
+      "source": {
+        "source": "local",
+        "path": "./plugins/bonsai"
+      },
+      "policy": {
+        "installation": "AVAILABLE",
+        "authentication": "ON_INSTALL"
+      },
+      "category": "Productivity"
+    }
+  ]
+}

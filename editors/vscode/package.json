@@ -1,0 +1,175 @@
+{
+  "name": "bonsai",
+  "displayName": "Bonsai Worktrees",
+  "description": "Create, open, remove, and safely clean Bonsai Git worktrees from VS Code.",
+  "version": "0.1.0",
+  "publisher": "aymericbeaumet",
+  "license": "MIT",
+  "homepage": "https://github.com/aymericbeaumet/bonsai",
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/aymericbeaumet/bonsai.git",
+    "directory": "editors/vscode"
+  },
+  "bugs": {
+    "url": "https://github.com/aymericbeaumet/bonsai/issues"
+  },
+  "engines": {
+    "vscode": "^1.90.0"
+  },
+  "categories": [
+    "Other"
+  ],
+  "keywords": [
+    "git",
+    "worktree",
+    "bonsai",
+    "branch"
+  ],
+  "main": "./extension.js",
+  "extensionKind": [
+    "workspace"
+  ],
+  "capabilities": {
+    "untrustedWorkspaces": {
+      "supported": false,
+      "description": "Bonsai commands execute the local bonsai and git binaries in the workspace."
+    }
+  },
+  "activationEvents": [
+    "onCommand:bonsai.add",
+    "onCommand:bonsai.clean",
+    "onCommand:bonsai.open",
+    "onCommand:bonsai.openWorkspace",
+    "onCommand:bonsai.refreshTree",
+    "onCommand:bonsai.remove",
+    "onCommand:bonsai.showOutput",
+    "onView:bonsaiWorktrees"
+  ],
+  "contributes": {
+    "commands": [
+      {
+        "command": "bonsai.add",
+        "title": "Bonsai: Create Worktree",
+        "icon": "$(git-branch-create)"
+      },
+      {
+        "command": "bonsai.openWorkspace",
+        "title": "Bonsai: Open Repository Workspace",
+        "icon": "$(root-folder-opened)"
+      },
+      {
+        "command": "bonsai.open",
+        "title": "Bonsai: Open Worktree",
+        "icon": "$(folder-opened)"
+      },
+      {
+        "command": "bonsai.remove",
+        "title": "Bonsai: Remove Worktree",
+        "icon": "$(trash)"
+      },
+      {
+        "command": "bonsai.clean",
+        "title": "Bonsai: Clean Merged Worktrees",
+        "icon": "$(clear-all)"
+      },
+      {
+        "command": "bonsai.showOutput",
+        "title": "Bonsai: Show Output"
+      },
+      {
+        "command": "bonsai.refreshTree",
+        "title": "Bonsai: Refresh Worktrees",
+        "icon": "$(refresh)"
+      },
+      {
+        "command": "bonsai.openTreeItem",
+        "title": "Bonsai: Open Worktree from Tree"
+      },
+      {
+        "command": "bonsai.openTreeItemNewWindow",
+        "title": "Open in New Window",
+        "icon": "$(empty-window)"
+      },
+      {
+        "command": "bonsai.removeTreeItem",
+        "title": "Remove Worktree",
+        "icon": "$(trash)"
+      }
+    ],
+    "configuration": {
+      "title": "Bonsai",
+      "properties": {
+        "bonsai.executable": {
+          "type": "string",
+          "default": "bonsai",
+          "description": "Path or command name for the Bonsai executable."
+        },
+        "bonsai.openWorktreesInNewWindow": {
+          "type": "boolean",
+          "default": true,
+          "description": "Open selected or newly created worktrees in a new VS Code window."
+        }
+      }
+    },
+    "views": {
+      "explorer": [
+        {
+          "id": "bonsaiWorktrees",
+          "name": "Bonsai Worktrees",
+          "contextualTitle": "Bonsai Worktrees"
+        }
+      ]
+    },
+    "viewsWelcome": [
+      {
+        "view": "bonsaiWorktrees",
+        "contents": "No bonsai worktrees yet.\n[Create Worktree](command:bonsai.add)"
+      }
+    ],
+    "menus": {
+      "view/title": [
+        {
+          "command": "bonsai.add",
+          "when": "view == bonsaiWorktrees",
+          "group": "navigation@1"
+        },
+        {
+          "command": "bonsai.refreshTree",
+          "when": "view == bonsaiWorktrees",
+          "group": "navigation@2"
+        }
+      ],
+      "view/item/context": [
+        {
+          "command": "bonsai.openTreeItemNewWindow",
+          "when": "view == bonsaiWorktrees && viewItem == worktree",
+          "group": "inline@1"
+        },
+        {
+          "command": "bonsai.removeTreeItem",
+          "when": "view == bonsaiWorktrees && viewItem == worktree",
+          "group": "inline@2"
+        }
+      ],
+      "commandPalette": [
+        {
+          "command": "bonsai.openTreeItem",
+          "when": "false"
+        },
+        {
+          "command": "bonsai.openTreeItemNewWindow",
+          "when": "false"
+        },
+        {
+          "command": "bonsai.removeTreeItem",
+          "when": "false"
+        }
+      ]
+    }
+  },
+  "scripts": {
+    "check": "node --check extension.js && node --test",
+    "package": "npx --yes @vscode/vsce package"
+  }
+}
