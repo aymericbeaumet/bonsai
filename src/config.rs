@@ -28,16 +28,41 @@ pub struct Config {
     pub clean: CleanConfig,
 }
 
-#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+/// Local-only files worth carrying into every new worktree by default:
+/// environment files plus per-user AI harness config (Claude Code, Cursor,
+/// Codex, OpenCode, ...), so any harness finds its setup in any worktree.
+/// Tracked files are part of the checkout already and are never overwritten.
+pub const DEFAULT_COPY: &[&str] = &[
+    ".env",
+    ".env.*",
+    ".envrc",
+    ".mcp.json",
+    "CLAUDE.local.md",
+    ".claude/settings.local.json",
+    ".cursor/mcp.json",
+];
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(default, deny_unknown_fields)]
 pub struct AddConfig {
     /// Fetch the remote before creating a worktree.
     pub fetch: bool,
     /// Globs of untracked files copied into new worktrees, looked up in the
-    /// current worktree first, then the main one (e.g. [".env*", ".envrc"]).
+    /// current worktree first, then the main one. Setting this replaces the
+    /// defaults (DEFAULT_COPY).
     pub copy: Vec<String>,
     /// Shell command run inside a freshly created worktree.
     pub post_add: Option<String>,
+}
+
+impl Default for AddConfig {
+    fn default() -> Self {
+        Self {
+            fetch: false,
+            copy: DEFAULT_COPY.iter().map(|s| s.to_string()).collect(),
+            post_add: None,
+        }
+    }
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -226,7 +251,7 @@ mod tests {
             assert_eq!(config.root, "/global-root");
             assert_eq!(config.remote.as_deref(), Some("upstream"));
             assert!(!config.clean.fetch);
-            assert!(config.add.copy.is_empty());
+            assert_eq!(config.add.copy, DEFAULT_COPY);
 
             // Repo config overrides global.
             std::fs::write(

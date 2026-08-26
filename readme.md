@@ -39,7 +39,10 @@ target path, so `cd "$(bonsai add foo)"` composes.
 | `bonsai clean` | Remove every worktree whose branch is merged into the default branch — including squash-merges and branches whose upstream is gone (the GitHub PR flow). Deletes the branches too. Fetches `--prune` first (`--no-fetch` to skip), always shows the plan, `-n`/`--dry-run`, `-y`/`--yes`. Dirty worktrees are never touched. |
 | `bonsai prune` | Clean up stale worktree registrations, orphaned directories, and empty dirs. `--all` sweeps the whole root, including worktrees of repos whose clone was deleted. |
 | `bonsai init <shell>` | Print the shell wrapper (zsh, bash, fish). |
+| `bonsai agents` | Print a usage contract for AI coding agents, ready for `bonsai agents >> AGENTS.md`. |
 | `bonsai completions <shell>` | Print shell completions. |
+
+Every subcommand has detailed `--help` with examples.
 
 Note: a freshly added worktree with no commits counts as merged (same
 semantics as `git branch --merged`), so `bonsai clean` will offer to remove
@@ -70,8 +73,11 @@ default_branch = "main"     # optional: skip detection
 
 [add]
 fetch = false               # fetch --prune before adding
-copy = [".env*", ".envrc"]  # untracked files copied into new worktrees
 post_add = "mise install"   # command run inside a new worktree
+# untracked files copied into new worktrees; setting this replaces the
+# defaults: [".env", ".env.*", ".envrc", ".mcp.json", "CLAUDE.local.md",
+#           ".claude/settings.local.json", ".cursor/mcp.json"]
+copy = [".env*", ".envrc"]
 
 [clean]
 fetch = true                # fetch --prune before computing merged branches
@@ -94,6 +100,23 @@ A few things are deliberately relative to *where you stand*:
 New branches are created with `--no-track` (no phantom upstream on
 `origin/main`), so `git push` with `push.autoSetupRemote` does the right
 thing and `bonsai clean` can detect squash-merges reliably.
+
+## AI agents (Claude Code, Cursor, Codex, OpenCode, ...)
+
+bonsai is built to work the same across coding harnesses, so switching tools
+mid-project costs nothing:
+
+- Teach any agent the workflow with one line: `bonsai agents >> AGENTS.md`
+  (the cross-harness instructions file; symlink or copy for harnesses that
+  read a different filename). The snippet documents the whole non-interactive
+  contract.
+- Everything is scriptable: `path=$(bonsai add feat-x)` prints the worktree
+  path and is idempotent; `list` is plain TSV; `clean --yes` / `prune --yes`
+  never prompt; fuzzy pickers only ever appear on a real terminal.
+- New worktrees come pre-provisioned: untracked local config — `.env*`,
+  `.envrc`, `.mcp.json`, `CLAUDE.local.md`, `.claude/settings.local.json`,
+  `.cursor/mcp.json` — is copied over by default, so whichever harness (or
+  human) created the worktree, the others find their setup in place.
 
 ## Integrations
 

@@ -733,6 +733,49 @@ fn symlinked_root_is_handled() {
 }
 
 #[test]
+fn default_copy_carries_env_and_harness_config() {
+    // No copy config at all: env files and per-user harness config still
+    // travel into new worktrees, whatever tool created them.
+    let repo = TestRepo::new();
+    std::fs::write(repo.clone.join(".env"), "SECRET=1\n").unwrap();
+    std::fs::write(repo.clone.join("CLAUDE.local.md"), "notes\n").unwrap();
+    std::fs::create_dir_all(repo.clone.join(".claude")).unwrap();
+    std::fs::write(repo.clone.join(".claude/settings.local.json"), "{}\n").unwrap();
+    let path = repo.add("feat-defaultcopy");
+    assert!(path.join(".env").exists());
+    assert!(path.join("CLAUDE.local.md").exists());
+    assert!(path.join(".claude/settings.local.json").exists());
+}
+
+#[test]
+fn explicit_copy_config_replaces_defaults() {
+    let repo = TestRepo::new();
+    std::fs::write(repo.clone.join(".env"), "SECRET=1\n").unwrap();
+    std::fs::write(repo.clone.join("notes.txt"), "n\n").unwrap();
+    std::fs::write(
+        repo.clone.join(".bonsai.toml"),
+        "[add]\ncopy = [\"notes.txt\"]\n",
+    )
+    .unwrap();
+    let path = repo.add("feat-explicitcopy");
+    assert!(path.join("notes.txt").exists());
+    assert!(!path.join(".env").exists());
+}
+
+#[test]
+fn agents_prints_usage_contract() {
+    let repo = TestRepo::new();
+    repo.bonsai(&repo.dir)
+        .arg("agents")
+        .assert()
+        .success()
+        .stdout(
+            predicate::str::contains("bonsai add")
+                .and(predicate::str::contains("bonsai clean --yes")),
+        );
+}
+
+#[test]
 fn completions_are_generated() {
     let repo = TestRepo::new();
     repo.bonsai(&repo.dir)

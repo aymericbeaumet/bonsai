@@ -79,13 +79,21 @@ impl Git {
         self.out_bytes(args).map(|_| ())
     }
 
-    /// Run with stdin/stderr inherited (progress bars, auth prompts). Anything
-    /// the child writes to stdout is forwarded to our stderr so that wrapped
-    /// stdout capture stays clean.
+    /// Run with stderr inherited (progress bars) and stdin inherited only
+    /// when it is a real terminal — otherwise stdin may be a protocol pipe
+    /// (MCP) or a captured stream that git must not read auth prompts from.
+    /// Anything the child writes to stdout is forwarded to our stderr so
+    /// that wrapped stdout capture stays clean.
     pub fn interactive(&self, args: &[&str]) -> Result<(), GitError> {
+        use std::io::IsTerminal;
+        let stdin = if std::io::stdin().is_terminal() {
+            Stdio::inherit()
+        } else {
+            Stdio::null()
+        };
         let output = self
             .command(args)
-            .stdin(Stdio::inherit())
+            .stdin(stdin)
             .stderr(Stdio::inherit())
             .stdout(Stdio::piped())
             .output()

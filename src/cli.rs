@@ -2,16 +2,131 @@ use std::path::PathBuf;
 
 use clap::{Parser, Subcommand};
 
-/// Ergonomic git worktree manager: worktrees for any repo, centralized under
-/// a global root, with fuzzy pickers and automatic branch creation.
+const ABOUT: &str = "Ergonomic git worktree manager";
+
+const LONG_ABOUT: &str = "\
+Ergonomic git worktree manager.
+
+Run bonsai from inside any git clone; the worktrees it creates are stored
+outside the repository, under a global root (default ~/.bonsai), at
+<root>/<repo-id>/<branch>. Every command works identically from the main
+checkout or from inside any worktree.
+
+Interactive use: enable the shell wrapper with `eval \"$(bonsai init zsh)\"`
+so add/cd/remove move your shell automatically, and omit arguments to get
+fuzzy pickers.
+
+Scripted use (CI, AI agents): pass arguments explicitly; cd-capable commands
+print the target path on stdout, so `cd \"$(bonsai add foo)\"` composes.
+Pickers never appear without a terminal. See `bonsai agents`.
+
+Configuration precedence, low to high: built-in defaults,
+~/.config/bonsai/config.toml, <repo>/.bonsai.toml, `git config bonsai.*`,
+BONSAI_* environment variables, command-line flags.";
+
+const ADD_LONG: &str = "\
+Create a worktree for <branch> at <root>/<repo-id>/<branch> and cd into it
+(prints the path without the shell wrapper).
+
+Branch resolution, in order:
+  - already checked out in a bonsai worktree: reuse it (idempotent)
+  - exists locally: check it out in the new worktree
+  - exists on the remote: create a local branch tracking it
+  - otherwise: create it from --base, or from the default branch
+
+--base refs resolve against the directory you run bonsai from, so
+`bonsai add fixup --base HEAD` inside a worktree stacks on that worktree's
+HEAD. Untracked files matching the copy configuration (.env*, .envrc,
+.mcp.json, CLAUDE.local.md, ... by default) are copied from your current
+worktree (then the main one) into the new worktree, and the [add] post_add
+command runs inside it.
+
+Examples:
+  bonsai add                    # fuzzy-pick a branch, or type a new name
+  bonsai add fix-parser         # branch + worktree, based on the default branch
+  bonsai add fix-parser --base HEAD    # stack on the current checkout
+  cd \"$(bonsai add fix-parser)\"        # without the shell wrapper";
+
+const LIST_LONG: &str = "\
+List worktrees of the current repo, one per line, tab-separated:
+<branch>\\t<path>\\t<flags>. Flags: main, locked, prunable, dirty (with
+--status). The main checkout is listed first. With --all, list every
+bonsai-managed worktree across all repos (works outside a repo; paths are
+relative to the bonsai root).";
+
+const REMOVE_LONG: &str = "\
+Remove the worktrees of the given branches. Without arguments, opens a fuzzy
+multi-select of this repo's worktrees (terminal only).
+
+The branch itself is kept unless -d/--delete-branch is passed (use `clean`
+for \"remove everything that is merged\"). Worktrees with uncommitted changes
+are refused unless --force. Removing the worktree you are standing in is
+supported: the shell wrapper brings you back to the main checkout.
+
+Examples:
+  bonsai remove                 # fuzzy pick
+  bonsai remove fix-parser -d   # remove worktree and delete the branch";
+
+const PRUNE_LONG: &str = "\
+Housekeeping for the bonsai root: runs `git worktree prune` for the current
+repo, deletes orphaned directories (crash leftovers not registered as
+worktrees, after confirmation), and removes empty directories. With --all,
+sweeps the entire bonsai root instead, including worktrees whose main clone
+has been deleted (their .git file points nowhere).";
+
+const CLEAN_LONG: &str = "\
+Remove every worktree whose branch is already integrated into the default
+branch, then delete those branches. Detects three cases: regular merges,
+squash-merges (content comparison), and branches whose upstream was deleted
+after merging (the GitHub PR flow) — which is why clean fetches with --prune
+first (disable with --no-fetch or [clean] fetch = false).
+
+Never touched: the main checkout, the default branch, locked worktrees,
+dirty worktrees (skipped and reported, even with --yes), branches with
+unpushed commits on a live upstream, and branches matching [clean] protected
+globs. The plan is always printed; without --yes a confirmation
+multi-select opens (terminal only).
+
+Examples:
+  bonsai clean --dry-run        # show what would be removed
+  bonsai clean --yes            # no confirmation (scripts, agents)";
+
+const CD_LONG: &str = "\
+Jump to a worktree. With the shell wrapper this cds; without it the target
+path is printed on stdout. Inside a repo, candidates are that repo's
+worktrees plus its main checkout; outside a repo, every bonsai-managed
+worktree of every repo. An exact branch match wins, then a unique substring
+match; anything ambiguous opens the fuzzy picker pre-filtered with the
+query (terminal only).";
+
+const INIT_LONG: &str = "\
+Print the shell integration for zsh, bash, or fish. Add to your shell rc:
+
+  eval \"$(bonsai init zsh)\"     # zsh (also loads completions)
+  eval \"$(bonsai init bash)\"    # bash
+  bonsai init fish | source     # fish
+
+The wrapper makes add/cd/remove/clean move your shell into the right
+directory. It uses a plain `cd`, so chpwd-based tools (zoxide, direnv,
+starship, ...) keep working.";
+
+const AGENTS_LONG: &str = "\
+Print a concise markdown usage contract intended for AI coding agents
+(Claude Code, Cursor, Codex, OpenCode, ...). Append it to the file your
+harnesses read:
+
+  bonsai agents >> AGENTS.md";
+
+/// Ergonomic git worktree manager.
 #[derive(Debug, Parser)]
-#[command(name = "bonsai", version, about)]
+#[command(name = "bonsai", version, about = ABOUT, long_about = LONG_ABOUT)]
 pub struct Cli {
     /// Root directory holding all worktrees (default: ~/.bonsai)
     #[arg(long, global = true, value_name = "DIR")]
     pub root: Option<String>,
 
     /// Remote used for tracking, fetching, and repo identification
+    /// (default: checkout.defaultRemote, then origin)
     #[arg(long, global = true, value_name = "NAME")]
     pub remote: Option<String>,
 
@@ -22,42 +137,47 @@ pub struct Cli {
 #[derive(Debug, Subcommand)]
 pub enum Commands {
     /// Create a worktree (and its branch) under the bonsai root, then cd into it
+    #[command(long_about = ADD_LONG)]
     Add {
-        /// Branch to check out; created automatically if it does not exist
+        /// Branch to check out; created automatically if it does not exist.
+        /// Omit it (on a terminal) to fuzzy-pick or type a new name
         branch: Option<String>,
-        /// Base ref for a newly created branch (default: the default branch)
+        /// Base ref for a newly created branch, resolved against the current
+        /// directory (default: the default branch)
         #[arg(long, value_name = "REF")]
         base: Option<String>,
-        /// Fetch the remote first
+        /// Fetch the remote (with --prune) first
         #[arg(long)]
         fetch: bool,
         /// Override the worktree path (escape hatch for path collisions)
         #[arg(long, value_name = "DIR")]
         path: Option<PathBuf>,
     },
-    /// List worktrees of the current repo (or all repos with --all)
-    #[command(alias = "ls")]
+    /// List worktrees of the current repo (or every repo with --all)
+    #[command(alias = "ls", long_about = LIST_LONG)]
     List {
         /// List every bonsai-managed worktree across all repos
         #[arg(long)]
         all: bool,
-        /// Show dirty status (runs git status in each worktree)
+        /// Add a dirty flag (runs git status in each worktree; slower)
         #[arg(long)]
         status: bool,
     },
-    /// Remove worktrees (fuzzy picker when no branch is given)
-    #[command(alias = "rm")]
+    /// Remove worktrees, keeping their branches unless -d
+    #[command(alias = "rm", long_about = REMOVE_LONG)]
     Remove {
-        /// Branches whose worktrees to remove
+        /// Branches whose worktrees to remove; omit (on a terminal) to
+        /// fuzzy multi-select
         branches: Vec<String>,
-        /// Also delete the branch (refuses unmerged unless --force)
+        /// Also delete the branch (refuses unmerged branches unless --force)
         #[arg(short = 'd', long)]
         delete_branch: bool,
         /// Discard uncommitted changes / force-delete the branch
         #[arg(short, long)]
         force: bool,
     },
-    /// Clean up stale worktree registrations, orphaned directories, and empty dirs
+    /// Clean up stale registrations, orphaned directories, and empty dirs
+    #[command(long_about = PRUNE_LONG)]
     Prune {
         /// Sweep the whole bonsai root, including repos whose clone is gone
         #[arg(long)]
@@ -66,25 +186,37 @@ pub enum Commands {
         #[arg(short = 'y', long)]
         yes: bool,
     },
-    /// Remove worktrees whose branch is merged into the default branch
+    /// Remove worktrees merged into the default branch (incl. squash-merges)
+    #[command(long_about = CLEAN_LONG)]
     Clean {
         /// Show what would be removed without touching anything
         #[arg(short = 'n', long)]
         dry_run: bool,
-        /// Do not ask for confirmation
+        /// Do not ask for confirmation (dirty worktrees are still skipped)
         #[arg(short = 'y', long)]
         yes: bool,
         /// Skip the initial fetch --prune
         #[arg(long)]
         no_fetch: bool,
     },
-    /// Jump to a worktree (fuzzy picker; global when outside a repo)
+    /// Jump to a worktree (fuzzy; works across all repos when outside one)
+    #[command(long_about = CD_LONG)]
     Cd {
-        /// Branch name or fuzzy query
+        /// Branch name or fuzzy query; prints the path without the wrapper
         query: Option<String>,
     },
     /// Print the shell wrapper enabling auto-cd (eval "$(bonsai init zsh)")
-    Init { shell: crate::shell::Shell },
+    #[command(long_about = INIT_LONG)]
+    Init {
+        /// Shell flavor to emit
+        shell: crate::shell::Shell,
+    },
+    /// Print AI-agent usage instructions (bonsai agents >> AGENTS.md)
+    #[command(long_about = AGENTS_LONG)]
+    Agents,
     /// Print shell completions
-    Completions { shell: clap_complete::Shell },
+    Completions {
+        /// Shell flavor to emit
+        shell: clap_complete::Shell,
+    },
 }

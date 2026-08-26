@@ -46,6 +46,10 @@ fn run(cli: Cli) -> Result<Option<PathBuf>> {
             );
             return Ok(None);
         }
+        Commands::Agents => {
+            commands::agents::run();
+            return Ok(None);
+        }
         _ => {}
     }
 
@@ -92,7 +96,7 @@ fn run(cli: Cli) -> Result<Option<PathBuf>> {
             no_fetch,
         } => commands::clean::run(&config, dry_run, yes, no_fetch),
         Commands::Cd { query } => commands::cd::run(&config, query),
-        Commands::Init { .. } | Commands::Completions { .. } => unreachable!(),
+        Commands::Init { .. } | Commands::Completions { .. } | Commands::Agents => unreachable!(),
     }
 }
 
