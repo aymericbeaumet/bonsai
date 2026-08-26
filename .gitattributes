@@ -1,0 +1,3 @@
+# Keep LF everywhere: SKILL.md is embedded via include_str! and byte-compared,
+# and shell wrapper templates must not grow CRLF on Windows checkouts.
+* text=auto eol=lf

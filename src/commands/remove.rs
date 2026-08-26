@@ -76,6 +76,18 @@ pub fn remove_worktree(repo: &Repo, config: &Config, wt: &Worktree, force: bool)
             wt.path.display()
         );
     }
+    // Windows cannot delete the directory a process has as its cwd; step out
+    // to the main checkout first (harmless elsewhere, and the shell is being
+    // sent there anyway).
+    let canonical = crate::paths::canonicalize_or_self(&wt.path);
+    if std::env::current_dir()
+        .ok()
+        .and_then(|d| crate::paths::canonicalize_ok(&d))
+        .is_some_and(|cwd| cwd.starts_with(&canonical))
+    {
+        let _ = std::env::set_current_dir(&repo.main_root);
+    }
+
     let path = wt.path.to_string_lossy().into_owned();
     let mut args = vec!["worktree", "remove"];
     if force {
