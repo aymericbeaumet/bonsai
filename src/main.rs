@@ -6,6 +6,7 @@ mod paths;
 mod picker;
 mod repo;
 mod shell;
+mod workspace;
 mod worktree;
 
 use std::path::PathBuf;
@@ -107,6 +108,15 @@ fn run(cli: Cli) -> Result<Option<PathBuf>> {
             json,
         } => commands::clean::run(&config, dry_run, yes, no_fetch, json),
         Commands::Cd { query } => commands::cd::run(&config, query),
+        Commands::Workspace => {
+            let repo = repo::Repo::require()?;
+            let file = workspace::sync(&repo, &config)?;
+            if !file.exists() {
+                anyhow::bail!("no bonsai worktrees for this repo; run 'bonsai add' first");
+            }
+            println!("{}", file.display());
+            Ok(None)
+        }
         Commands::Init { .. }
         | Commands::Completions { .. }
         | Commands::Agents

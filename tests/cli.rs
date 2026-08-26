@@ -868,6 +868,62 @@ fn skill_prints_and_installs_into_detected_harnesses() {
 }
 
 #[test]
+fn workspace_file_tracks_worktrees() {
+    let repo = TestRepo::new();
+    let a = repo.add("feat-ws-a");
+    repo.add("feature/ws-b");
+
+    let output = repo.bonsai(&repo.clone).arg("workspace").output().unwrap();
+    assert!(output.status.success());
+    let file = PathBuf::from(String::from_utf8_lossy(&output.stdout).trim());
+    assert!(file.extension().is_some_and(|e| e == "code-workspace"));
+    let ws: serde_json::Value =
+        serde_json::from_str(&std::fs::read_to_string(&file).unwrap()).unwrap();
+    let folders = ws["folders"].as_array().unwrap();
+    assert_eq!(folders.len(), 3); // main + 2 worktrees
+    let names: Vec<&str> = folders
+        .iter()
+        .map(|f| f["name"].as_str().unwrap())
+        .collect();
+    assert!(names[0].ends_with("(main)"), "names: {names:?}");
+    assert!(names.contains(&"feat-ws-a"));
+    assert!(names.contains(&"feature/ws-b"));
+
+    // remove keeps the file in sync, and deletes it with the last worktree.
+    repo.bonsai(&repo.clone)
+        .args(["remove", "feature/ws-b"])
+        .assert()
+        .success();
+    let ws: serde_json::Value =
+        serde_json::from_str(&std::fs::read_to_string(&file).unwrap()).unwrap();
+    assert_eq!(ws["folders"].as_array().unwrap().len(), 2);
+    repo.bonsai(&repo.clone)
+        .args(["remove", "feat-ws-a"])
+        .assert()
+        .success();
+    assert!(!file.exists());
+    assert!(a.parent().is_none_or(|p| !p.exists()));
+}
+
+#[test]
+fn workspace_file_can_be_disabled() {
+    let repo = TestRepo::new();
+    let path = repo
+        .bonsai(&repo.clone)
+        .env("BONSAI_WORKSPACE", "false")
+        .args(["add", "feat-nows"])
+        .output()
+        .unwrap();
+    assert!(path.status.success());
+    let path = PathBuf::from(String::from_utf8_lossy(&path.stdout).trim());
+    let has_workspace_file = std::fs::read_dir(path.parent().unwrap())
+        .unwrap()
+        .flatten()
+        .any(|e| e.path().extension().is_some_and(|x| x == "code-workspace"));
+    assert!(!has_workspace_file);
+}
+
+#[test]
 fn agents_prints_usage_contract() {
     let repo = TestRepo::new();
     repo.bonsai(&repo.dir)

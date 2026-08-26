@@ -237,6 +237,7 @@ fn run_inner(
         eprintln!("bonsai: deleted branch '{branch}'");
         report.removed.push(branch.clone());
     }
+    crate::workspace::sync_quietly(&repo, config);
 
     if cd_home {
         eprintln!("bonsai: current directory was removed, returning to the repo root");

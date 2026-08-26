@@ -117,6 +117,19 @@ harnesses read:
 
   bonsai agents >> AGENTS.md";
 
+const WORKSPACE_LONG: &str = "\
+bonsai maintains a multi-root VS Code workspace file per repo at
+<root>/<repo-id>/<repo>.code-workspace, listing the main checkout and every
+worktree labelled by branch. It is kept up to date by add/remove/clean/prune
+(disable with `workspace = false`). This command refreshes it and prints its
+path, so opening all worktrees in a desktop editor is one line:
+
+  code \"$(bonsai workspace)\"      # VS Code
+  cursor \"$(bonsai workspace)\"    # Cursor
+
+Claude Code and Codex desktop open plain folders: point them at a worktree
+directory (<root>/<repo-id>/<branch>) or use `bonsai cd`.";
+
 const SKILL_LONG: &str = "\
 The bonsai Agent Skill (SKILL.md, agentskills.io format) teaches AI coding
 agents the worktree workflow, its invariants, and the destructive-command
@@ -238,6 +251,9 @@ pub enum Commands {
         /// Branch name or fuzzy query; prints the path without the wrapper
         query: Option<String>,
     },
+    /// Print the repo's .code-workspace file path (refreshing it first)
+    #[command(long_about = WORKSPACE_LONG)]
+    Workspace,
     /// Print the shell wrapper enabling auto-cd (eval "$(bonsai init zsh)")
     #[command(long_about = INIT_LONG)]
     Init {

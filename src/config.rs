@@ -24,6 +24,8 @@ pub struct Config {
     pub remote: Option<String>,
     /// Skip default-branch detection entirely.
     pub default_branch: Option<String>,
+    /// Maintain a .code-workspace file per repo (VS Code, Cursor, ...).
+    pub workspace: bool,
     pub add: AddConfig,
     pub clean: CleanConfig,
 }
@@ -80,6 +82,7 @@ impl Default for Config {
             root: "~/.bonsai".to_string(),
             remote: None,
             default_branch: None,
+            workspace: true,
             add: AddConfig::default(),
             clean: CleanConfig::default(),
         }
@@ -129,6 +132,8 @@ struct GitConfigPatch {
     remote: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     default_branch: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    workspace: Option<bool>,
     add: GitConfigAddPatch,
     clean: GitConfigCleanPatch,
 }
@@ -170,6 +175,7 @@ fn git_config_patch(git: &Git) -> GitConfigPatch {
             "bonsai.root" => patch.root = Some(value),
             "bonsai.remote" => patch.remote = Some(value),
             "bonsai.defaultbranch" => patch.default_branch = Some(value),
+            "bonsai.workspace" => patch.workspace = git_bool(&value),
             "bonsai.add.fetch" => patch.add.fetch = git_bool(&value),
             "bonsai.add.postadd" => patch.add.post_add = Some(value),
             "bonsai.add.copy" => patch.add.copy.get_or_insert_default().push(value),

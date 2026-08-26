@@ -117,6 +117,7 @@ pub fn run(
 
     copy_files(&repo, config, &path);
     run_post_add(config, &branch, &path);
+    crate::workspace::sync_quietly(&repo, config);
 
     Ok(Some(path))
 }

@@ -59,6 +59,7 @@ pub fn run(
             eprintln!("bonsai: deleted branch '{branch}'");
         }
     }
+    crate::workspace::sync_quietly(&repo, config);
 
     if cd_home {
         eprintln!("bonsai: current directory was removed, returning to the repo root");

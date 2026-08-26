@@ -56,6 +56,9 @@ pub fn run(config: &Config, all: bool, yes: bool) -> Result<()> {
         }
     }
 
+    if !all && let Some(repo) = Repo::discover()? {
+        crate::workspace::sync_quietly(&repo, config);
+    }
     remove_empty_tree(&root);
     eprintln!("bonsai: done");
     Ok(())
@@ -74,6 +77,8 @@ fn gitdir_target(worktree: &Path) -> Option<PathBuf> {
 }
 
 /// Depth-first removal of empty directories under `root` (root itself stays).
+/// A directory whose only remaining content is generated `.code-workspace`
+/// files has no worktrees left; the stale files go too.
 fn remove_empty_tree(dir: &Path) {
     let Ok(entries) = std::fs::read_dir(dir) else {
         return;
@@ -82,7 +87,24 @@ fn remove_empty_tree(dir: &Path) {
         let path = entry.path();
         if path.is_dir() && !path.join(".git").exists() {
             remove_empty_tree(&path);
+            remove_if_only_workspace_files(&path);
             let _ = std::fs::remove_dir(&path); // only succeeds when empty
+        }
+    }
+}
+
+fn remove_if_only_workspace_files(dir: &Path) {
+    let Ok(entries) = std::fs::read_dir(dir) else {
+        return;
+    };
+    let entries: Vec<PathBuf> = entries.flatten().map(|e| e.path()).collect();
+    let only_workspace_files = !entries.is_empty()
+        && entries
+            .iter()
+            .all(|p| p.is_file() && p.extension().is_some_and(|ext| ext == "code-workspace"));
+    if only_workspace_files {
+        for p in entries {
+            let _ = std::fs::remove_file(&p);
         }
     }
 }

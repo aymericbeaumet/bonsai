@@ -35,6 +35,7 @@ target path, so `cd "$(bonsai add foo)"` composes.
 | `bonsai add [branch]` | Create a worktree under the bonsai root and cd into it. The branch is created from the default branch if it doesn't exist, or set up to track its remote counterpart. No argument opens a fuzzy prompt (type a new name to create it). |
 | `bonsai list` (`ls`) | List the current repo's worktrees. `--all` lists every bonsai worktree, `--status` adds a dirty marker. |
 | `bonsai cd [query]` | Fuzzy-jump between worktrees. Works globally (across all repos) when run outside a repo. |
+| `bonsai workspace` | Refresh and print the repo's `.code-workspace` file: `code "$(bonsai workspace)"`. |
 | `bonsai remove [branch…]` (`rm`) | Remove worktrees (fuzzy multi-pick without arguments). Keeps the branch unless `-d`; `--force` discards uncommitted changes. Safe to run from inside the worktree being removed. |
 | `bonsai clean` | Remove every worktree whose branch is merged into the default branch — including squash-merges and branches whose upstream is gone (the GitHub PR flow). Deletes the branches too. Fetches `--prune` first (`--no-fetch` to skip), always shows the plan, `-n`/`--dry-run`, `-y`/`--yes`. Dirty worktrees are never touched. |
 | `bonsai prune` | Clean up stale worktree registrations, orphaned directories, and empty dirs. `--all` sweeps the whole root, including worktrees of repos whose clone was deleted. |
@@ -71,6 +72,7 @@ git config --add bonsai.add.copy ".env"         # multi-valued
 root = "~/.bonsai"          # where worktrees live
 remote = "origin"           # optional: defaults to checkout.defaultRemote, then origin
 default_branch = "main"     # optional: skip detection
+workspace = true            # maintain a .code-workspace file per repo
 
 [add]
 fetch = false               # fetch --prune before adding
@@ -137,6 +139,21 @@ a real terminal.
 `.envrc`, `.mcp.json`, `CLAUDE.local.md`, `.claude/settings.local.json`,
 `.cursor/mcp.json` — is copied over by default, so whichever harness (or
 human) created the worktree, the others find their setup in place.
+
+## Desktop editors
+
+The bonsai root is structured so GUI tools get worktrees for free:
+
+- **VS Code / Cursor / Windsurf** (and other VS Code derivatives): bonsai
+  maintains a multi-root workspace file per repo at
+  `~/.bonsai/<repo-id>/<repo>.code-workspace` — the main checkout plus every
+  worktree, labelled by branch, kept in sync by add/remove/clean/prune.
+  Open everything in one window: `code "$(bonsai workspace)"` or
+  `cursor "$(bonsai workspace)"`. Disable with `workspace = false`.
+- **Claude Code desktop / Codex desktop** (folder-based apps): every
+  worktree is a plain directory named after its branch under
+  `~/.bonsai/<host>/<owner>/<repo>/`, so folder pickers and recent-project
+  lists stay readable. Jump from a terminal with `bonsai cd`.
 
 ## Integrations
 
