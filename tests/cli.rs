@@ -236,6 +236,7 @@ fn add_slugifies_branch_and_preserves_nested_dirs() {
 fn add_is_idempotent_for_existing_bonsai_worktree() {
     let repo = TestRepo::new();
     let first = repo.add("feat-x");
+    std::fs::rename(&repo.origin, repo.dir.join("origin-offline.git")).unwrap();
     let second = repo.add("feat-x");
     assert_eq!(first, second);
 }
@@ -648,9 +649,26 @@ fn add_installs_with_pnpm_when_lockfile_present() {
     let repo = TestRepo::new();
     repo.commit_files(&[("package.json", "{}\n"), ("pnpm-lock.yaml", "")]);
     repo.fake_pm("pnpm");
-    let (path, _) = repo.add_with_path("feat-pnpm", &repo.path_with_fakebin());
+    let (path, stderr) = repo.add_with_path("feat-pnpm", &repo.path_with_fakebin());
     let args = std::fs::read_to_string(path.join("pnpm-args.txt")).unwrap();
     assert_eq!(args.trim(), "install --frozen-lockfile --prefer-offline");
+    assert!(stderr.contains("warning: pnpm is using a per-worktree virtual store"));
+    assert!(stderr.contains("https://pnpm.io/git-worktrees"));
+    assert!(!stderr.contains("\x1b["), "captured stderr must be plain");
+}
+
+#[test]
+fn add_suppresses_pnpm_warning_when_global_store_is_configured() {
+    let repo = TestRepo::new();
+    repo.commit_files(&[
+        ("package.json", "{}\n"),
+        ("pnpm-lock.yaml", ""),
+        ("pnpm-workspace.yaml", "virtualStoreType: global\n"),
+    ]);
+    repo.fake_pm("pnpm");
+    let (path, stderr) = repo.add_with_path("feat-pnpm-global", &repo.path_with_fakebin());
+    assert!(path.join("pnpm-args.txt").is_file());
+    assert!(!stderr.contains("pnpm is using a per-worktree virtual store"));
 }
 
 #[test]
@@ -687,8 +705,9 @@ fn add_install_disabled_via_config() {
     repo.commit_files(&[("pnpm-lock.yaml", "")]);
     repo.fake_pm("pnpm");
     std::fs::write(repo.clone.join(".bonsai.toml"), "[add]\ninstall = false\n").unwrap();
-    let (path, _) = repo.add_with_path("feat-noinstall", &repo.path_with_fakebin());
+    let (path, stderr) = repo.add_with_path("feat-noinstall", &repo.path_with_fakebin());
     assert!(!path.join("pnpm-args.txt").exists());
+    assert!(stderr.contains("warning: pnpm"));
 }
 
 #[test]

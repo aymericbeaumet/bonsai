@@ -25,14 +25,19 @@ Configuration precedence, low to high: built-in defaults,
 BONSAI_* environment variables, command-line flags.";
 
 const ADD_LONG: &str = "\
-Create a worktree for <branch> at <root>/<repo-id>/<branch> and cd into it
-(prints the path without the shell wrapper).
+Create a worktree and cd into it (prints the path without the shell wrapper).
+The branch input is slugified segment-by-segment (`Fix API/Login` becomes
+`fix-api/login`); `/` remains the branch and directory delimiter.
 
 Branch resolution, in order:
   - already checked out in a bonsai worktree: reuse it (idempotent)
   - exists locally: check it out in the new worktree
   - exists on the remote: create a local branch tracking it
   - otherwise: create it from --base, or from the default branch
+
+Before creating a worktree, bonsai fetches the selected remote with --prune,
+so the remote default branch and remote-only branches are current. Disable
+this with [add] fetch = false; --fetch overrides that setting for one add.
 
 --base refs resolve against the directory you run bonsai from, so
 `bonsai add fixup --base HEAD` inside a worktree stacks on that worktree's
@@ -41,7 +46,9 @@ HEAD. Untracked files matching the copy configuration (.env*, .envrc,
 worktree (then the main one) into the new worktree, dependencies are
 installed with the package manager detected from lockfiles (pnpm, npm, yarn,
 bun, cargo, uv — lockfile-frozen, skipped when the tool is missing, disable
-with [add] install = false), and the [add] post_add command runs inside it.
+with [add] install = false). Bonsai warns when an actionable package-manager
+setting would make sibling worktree installs substantially faster, then the
+[add] post_add command runs inside the new worktree.
 
 Examples:
   bonsai add                    # fuzzy-pick a branch, or type a new name
@@ -184,14 +191,15 @@ pub enum Commands {
     /// Create a worktree (and its branch) under the bonsai root, then cd into it
     #[command(long_about = ADD_LONG)]
     Add {
-        /// Branch to check out; created automatically if it does not exist.
-        /// Omit it (on a terminal) to fuzzy-pick or type a new name
+        /// Branch input to slugify and check out; created if it does not exist.
+        /// Slashes remain nested branch/path delimiters. Omit it (on a
+        /// terminal) to fuzzy-pick or type a new name
         branch: Option<String>,
         /// Base ref for a newly created branch, resolved against the current
         /// directory (default: the default branch)
         #[arg(long, value_name = "REF")]
         base: Option<String>,
-        /// Fetch the remote (with --prune) first
+        /// Fetch even when [add] fetch = false
         #[arg(long)]
         fetch: bool,
         /// Override the worktree path (escape hatch for path collisions)

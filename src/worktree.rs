@@ -67,9 +67,9 @@ impl Worktree {
     }
 }
 
-/// Where the worktree for `branch` lives. Branch names map verbatim to nested
-/// directories: git forbids ref conflicts (`foo` vs `foo/bar`), so this is
-/// collision-free with respect to branch names.
+/// Where the worktree for a normalized `branch` lives. Slash-separated branch
+/// segments map verbatim to nested directories; git forbids ref conflicts
+/// (`foo` vs `foo/bar`), so this is collision-free with respect to branches.
 pub fn path_for_branch(repo_dir: &Path, branch: &str) -> PathBuf {
     let mut path = repo_dir.to_path_buf();
     for segment in branch.split('/') {

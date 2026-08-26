@@ -11,9 +11,11 @@ description: Manage git worktrees with the bonsai CLI - create isolated per-bran
   (default root `~/.bonsai`). Branch names nest: `feat/x` → `feat/x/`.
 - Run bonsai from anywhere inside the repo — the main checkout or any
   worktree — it always operates on the repository as a whole.
-- `add` creates branches automatically. Missing arguments open fuzzy pickers
-  on a real terminal only; in non-interactive use, always pass arguments or
-  the command exits with an error.
+- `add` slugifies branch inputs segment-by-segment while preserving `/` as a
+  nested branch/path delimiter, creates branches automatically, and fetches
+  the remote default branch first. Missing arguments open fuzzy pickers on a
+  real terminal only; in non-interactive use, always pass arguments or the
+  command exits with an error.
 
 ## Core workflow
 
@@ -39,7 +41,8 @@ bonsai clean --yes              # then execute
 - Dependencies are installed automatically in new worktrees when a lockfile
   is present (pnpm/npm/yarn/bun/cargo/uv, lockfile-frozen); a missing tool is
   skipped and an install failure never aborts `add` — check stderr before
-  assuming deps are in place.
+  assuming deps are in place. Follow any linked package-manager configuration
+  warning to enable its worktree-optimized shared store.
 
 ## Destructive-command policy
 

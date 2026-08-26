@@ -16,10 +16,10 @@ pub fn run(
 ) -> Result<Option<PathBuf>> {
     let repo = Repo::require()?;
 
-    if (fetch || config.add.fetch)
-        && let Some(remote) = repo.remote_name(config)
-    {
-        repo.git.interactive(&["fetch", "--prune", &remote])?;
+    let fetch_enabled = fetch || config.add.fetch;
+    let fetched_before_prompt = fetch_enabled && branch.is_none();
+    if fetched_before_prompt {
+        fetch_remote(&repo, config)?;
     }
 
     let raw_branch = match branch {
@@ -54,6 +54,10 @@ pub fn run(
             "'{branch}' is checked out at {}; switch branches there or pick another name",
             wt.path.display()
         );
+    }
+
+    if fetch_enabled && !fetched_before_prompt {
+        fetch_remote(&repo, config)?;
     }
 
     let path = match path_override {
@@ -117,11 +121,19 @@ pub fn run(
     }
 
     copy_files(&repo, config, &path);
+    warn_package_manager_config(&path);
     install_dependencies(config, &path);
     run_post_add(config, &branch, &path);
     crate::workspace::sync_quietly(&repo, config);
 
     Ok(Some(path))
+}
+
+fn fetch_remote(repo: &Repo, config: &Config) -> Result<()> {
+    if let Some(remote) = repo.remote_name(config) {
+        repo.git.interactive(&["fetch", "--prune", &remote])?;
+    }
+    Ok(())
 }
 
 /// Turn a task-like branch input into a stable Git/path slug while keeping
@@ -327,6 +339,24 @@ fn direnv_allow(envrcs: &[PathBuf]) {
     }
 }
 
+fn warn_package_manager_config(path: &std::path::Path) {
+    use std::io::IsTerminal;
+
+    let color = std::io::stderr().is_terminal() && std::env::var_os("NO_COLOR").is_none();
+    let label = warning_label(color);
+    for warning in crate::pm::worktree_warnings(path) {
+        eprintln!("bonsai: {label} {}: {}", warning.message, warning.docs);
+    }
+}
+
+fn warning_label(color: bool) -> &'static str {
+    if color {
+        "\x1b[30;43m WARNING \x1b[0m"
+    } else {
+        "warning:"
+    }
+}
+
 /// Install dependencies with every package manager detected in the new
 /// worktree. Frozen-lockfile flags keep the checkout pristine and each
 /// tool's shared store keeps disk usage low. A missing tool is silently
@@ -403,7 +433,7 @@ fn run_post_add(config: &Config, branch: &str, path: &std::path::Path) {
 
 #[cfg(test)]
 mod tests {
-    use super::slugify_branch_input;
+    use super::{slugify_branch_input, warning_label};
 
     #[test]
     fn slugifies_branch_segments_without_removing_slashes() {
@@ -424,5 +454,11 @@ mod tests {
         for input in ["", "/foo", "foo/", "foo//bar", "foo/---"] {
             assert!(slugify_branch_input(input).is_err(), "input: {input:?}");
         }
+    }
+
+    #[test]
+    fn warning_label_has_a_yellow_background_when_colored() {
+        assert_eq!(warning_label(true), "\x1b[30;43m WARNING \x1b[0m");
+        assert_eq!(warning_label(false), "warning:");
     }
 }

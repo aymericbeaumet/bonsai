@@ -41,7 +41,7 @@ target path, so `cd "$(bonsai add foo)"` composes.
 
 | Command | Description |
 |---|---|
-| `bonsai add [branch]` | Create a worktree under the bonsai root and cd into it. The branch is created from the default branch if it doesn't exist, or set up to track its remote counterpart. No argument opens a fuzzy prompt (type a new name to create it). |
+| `bonsai add [branch]` | Slugify the input (preserving `/` as a nested branch/path delimiter), fetch the remote, then create a worktree under the bonsai root and cd into it. The branch is created from the latest default branch if it doesn't exist, or set up to track its remote counterpart. No argument opens a fuzzy prompt (type a new name to create it). |
 | `bonsai list` (`ls`) | List the current repo's worktrees. `--all` lists every bonsai worktree, `--status` adds a dirty marker. |
 | `bonsai cd [query]` | Fuzzy-jump between worktrees. Works globally (across all repos) when run outside a repo. |
 | `bonsai workspace` | Refresh and print the repo's `.code-workspace` file: `code "$(bonsai workspace)"`. |
@@ -84,7 +84,7 @@ default_branch = "main"     # optional: skip detection
 workspace = true            # maintain a .code-workspace file per repo
 
 [add]
-fetch = false               # fetch --prune before adding
+fetch = true                # fetch --prune before creating (set false for offline use)
 install = true              # auto-install deps (pnpm/npm/yarn/bun/cargo/uv)
 post_add = "mise install"   # command run inside a new worktree
 # untracked files copied into new worktrees; setting this replaces the
@@ -189,17 +189,29 @@ lists stay readable. Jump from a terminal with `bonsai cd`.
 - **package managers** (pnpm, npm, yarn, bun, cargo, uv): new worktrees get
   their dependencies installed automatically, keyed on the lockfile (and
   `package.json`'s `packageManager` field). Installs are lockfile-frozen —
-  the checkout is never dirtied — and lean on each tool's shared
-  content-addressable store, so sibling worktrees cost little extra disk.
+  the checkout is never dirtied. Before installing, bonsai checks the
+  manager's effective repository configuration and prints an interactive
+  `WARNING` label with a yellow background (plain text when redirected) plus
+  an official setup link when a faster shared worktree layout is available.
+  This check still runs with `[add] install = false`.
+
+  | Manager | Worktree-friendly behavior |
+  |---|---|
+  | pnpm | Warns until `virtualStoreType: global` (or the legacy `enableGlobalVirtualStore: true`) is set in `pnpm-workspace.yaml`; see [pnpm's worktree guide](https://pnpm.io/git-worktrees). |
+  | Bun | Warns until `[install]` uses `linker = "isolated"` and `globalStore = true`; see [Bun's global virtual store](https://bun.sh/docs/pm/global-store). |
+  | Yarn Berry | Yarn 4's global cache + PnP defaults are optimized; Yarn 2/3 needs `enableGlobalCache: true`, and `node-modules` needs `nmMode: hardlinks-global`. See [Yarn settings](https://yarnpkg.com/configuration/yarnrc/). |
+  | npm, Yarn Classic, Cargo, uv | Their default global download/source caches already give Bonsai's frozen install commands the appropriate sharing. uv warns if its cache is explicitly disabled or placed inside the worktree. |
+
   Missing tools are skipped silently; failures never abort the add. Disable
-  with `[add] install = false`.
+  installation with `[add] install = false`.
 
 ## How it works
 
 - Worktrees live at `<root>/<repo-id>/<branch>`, where the repo-id is derived
   from the remote URL (`github.com/owner/repo`, nested groups preserved) or a
-  hash of the repo path when there is no remote. Branch names map verbatim to
-  nested directories (`feature/login` → `feature/login/`).
+  hash of the repo path when there is no remote. Inputs are slugified per `/`
+  segment, and the resulting branch maps to nested directories (`Fix API/Login`
+  → branch and directory `fix-api/login`).
 - The shell wrapper captures stdout and watches for a sentinel line to cd;
   prompts render on stderr, so fuzzy pickers work even inside `$(...)`.
 

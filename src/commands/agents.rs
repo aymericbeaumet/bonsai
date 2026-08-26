@@ -13,8 +13,10 @@ branches in place.
 
 - Create (or get) a worktree: `path=$(bonsai add <branch>)`. Prints the
   worktree's absolute path on stdout; creates the branch from the default
-  branch when it does not exist. Idempotent: re-running returns the existing
-  path. Run all subsequent commands inside that directory.
+  branch when it does not exist. Inputs are slugified while `/` remains a
+  nested branch/path delimiter. The remote is fetched first by default.
+  Idempotent: re-running returns the existing path. Run all subsequent
+  commands inside that directory.
 - Stack on the current checkout: `bonsai add <branch> --base HEAD`.
 - List worktrees: `bonsai list` (TSV: branch, path, flags) or
   `bonsai list --json`.
@@ -35,7 +37,8 @@ Notes for non-interactive use:
   over.
 - Dependencies are installed automatically when a lockfile is present
   (pnpm/npm/yarn/bun/cargo/uv); install failures are reported on stderr but
-  never abort `bonsai add`.
+  never abort `bonsai add`. Configuration warnings link to each package
+  manager's worktree optimization guidance.
 "#;
 
 #[cfg(test)]
