@@ -152,26 +152,40 @@ human) created the worktree, the others find their setup in place.
 
 ## Desktop editors
 
-The bonsai root is structured so GUI tools get worktrees for free:
+The bonsai root is structured so GUI tools get worktrees for free — no
+extension required.
 
-- **VS Code / Cursor / Windsurf** (and other VS Code derivatives): bonsai
-  maintains a multi-root workspace file per repo at
-  `~/.bonsai/<repo-id>/<repo>.code-workspace` — the main checkout plus every
-  worktree, labelled by branch, kept in sync by add/remove/clean/prune.
-  Open everything in one window: `code "$(bonsai workspace)"` or
-  `cursor "$(bonsai workspace)"`. Disable with `workspace = false`.
-- **VS Code extension**: [Bonsai Worktrees](editors/vscode/README.md) adds a
-  **Bonsai Worktrees view in the Explorer sidebar** — every worktree of every
-  repo, grouped by repository, with click-to-open, open-in-new-window, and
-  remove actions — plus Command Palette actions to create, open, remove, and
-  safely clean worktrees, and a command to open the maintained multi-root
-  workspace. Build and install the local VSIX with
-  `cd editors/vscode && npm run package`, then
-  `code --install-extension bonsai-0.1.0.vsix`.
-- **Claude Code desktop / Codex desktop** (folder-based apps): every
-  worktree is a plain directory named after its branch under
-  `~/.bonsai/<host>/<owner>/<repo>/`, so folder pickers and recent-project
-  lists stay readable. Jump from a terminal with `bonsai cd`.
+**Native, via the multi-root workspace standard** (VS Code, Cursor,
+Windsurf, and every other VS Code derivative): bonsai maintains two
+`.code-workspace` files, kept in sync by add/remove/clean/prune:
+
+- `~/.bonsai/<repo-id>/<repo>.code-workspace` — this repo's main checkout
+  plus every worktree, labelled by branch
+- `~/.bonsai/bonsai.code-workspace` — every worktree of every repo,
+  labelled `repo · branch`
+
+Open one and each worktree appears as a root folder in the Explorer's left
+tree, with per-root git status in the Source Control panel. Editors watch
+the file, so the tree updates live as bonsai creates and removes worktrees:
+
+```sh
+code "$(bonsai workspace)"           # this repo's worktrees
+cursor "$(bonsai workspace --all)"   # everything under the bonsai root
+```
+
+Disable the file maintenance with `workspace = false`.
+
+**Optional VS Code extension** for the last 20%:
+[Bonsai Worktrees](editors/vscode/README.md) adds a compact worktrees view
+in the Explorer sidebar (grouped by repo, click-to-open, inline remove) and
+Command Palette actions to create, open, remove, and safely clean worktrees.
+Build and install the local VSIX with `cd editors/vscode && npm run
+package`, then `code --install-extension bonsai-0.1.0.vsix`.
+
+**Folder-based apps** (Claude Code desktop, Codex desktop): every worktree
+is a plain directory named after its branch under
+`~/.bonsai/<host>/<owner>/<repo>/`, so folder pickers and recent-project
+lists stay readable. Jump from a terminal with `bonsai cd`.
 
 ## Integrations
 

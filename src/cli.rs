@@ -118,14 +118,20 @@ harnesses read:
   bonsai agents >> AGENTS.md";
 
 const WORKSPACE_LONG: &str = "\
-bonsai maintains a multi-root VS Code workspace file per repo at
-<root>/<repo-id>/<repo>.code-workspace, listing the main checkout and every
-worktree labelled by branch. It is kept up to date by add/remove/clean/prune
-(disable with `workspace = false`). This command refreshes it and prints its
-path, so opening all worktrees in a desktop editor is one line:
+bonsai maintains multi-root VS Code workspace files — the native, standard
+way to get every worktree as a root folder in the Explorer of VS Code,
+Cursor, Windsurf, and other derivatives, no extension required. Editors
+watch the file, so the left tree updates live as bonsai adds and removes
+worktrees.
 
-  code \"$(bonsai workspace)\"      # VS Code
-  cursor \"$(bonsai workspace)\"    # Cursor
+  <root>/<repo-id>/<repo>.code-workspace   per repo: main checkout + worktrees
+  <root>/bonsai.code-workspace             global: every worktree, every repo
+
+Both are kept up to date by add/remove/clean/prune (disable with
+`workspace = false`). This command refreshes one and prints its path:
+
+  code \"$(bonsai workspace)\"          # this repo's worktrees
+  cursor \"$(bonsai workspace --all)\"  # everything under the bonsai root
 
 Claude Code and Codex desktop open plain folders: point them at a worktree
 directory (<root>/<repo-id>/<branch>) or use `bonsai cd`.";
@@ -261,7 +267,11 @@ pub enum Commands {
     },
     /// Print the repo's .code-workspace file path (refreshing it first)
     #[command(long_about = WORKSPACE_LONG)]
-    Workspace,
+    Workspace {
+        /// The global workspace instead: every worktree of every repo
+        #[arg(long)]
+        all: bool,
+    },
     /// Print the shell wrapper enabling auto-cd (eval "$(bonsai init zsh)")
     #[command(long_about = INIT_LONG)]
     Init {

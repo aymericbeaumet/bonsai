@@ -4,8 +4,9 @@ use anyhow::Result;
 use serde_json::json;
 
 use crate::config::Config;
+use crate::git::Git;
 use crate::repo::Repo;
-use crate::worktree::cleanup_empty_dirs;
+use crate::worktree::{cleanup_empty_dirs, find_worktree_dirs, repo_id_of};
 
 /// Multi-root VS Code workspace file understood by VS Code, Cursor,
 /// Windsurf, and other derivatives: one entry for the main checkout plus one
@@ -69,6 +70,81 @@ pub fn sync(repo: &Repo, config: &Config) -> Result<PathBuf> {
     Ok(file)
 }
 
+/// The global workspace file: every worktree of every repo under the bonsai
+/// root, at `<root>/bonsai.code-workspace`.
+pub fn global_file_path(config: &Config) -> PathBuf {
+    config.root_dir().join("bonsai.code-workspace")
+}
+
+/// Rewrite the global workspace file from the on-disk layout (no repo
+/// context needed), or delete it when no worktrees remain anywhere.
+pub fn sync_global(config: &Config) -> Result<PathBuf> {
+    let root = config.root_dir();
+    let file = global_file_path(config);
+    let dirs = find_worktree_dirs(&root);
+
+    if dirs.is_empty() {
+        if file.exists() {
+            std::fs::remove_file(&file)?;
+        }
+        return Ok(file);
+    }
+
+    // (repo-id, branch label, relative path), sorted for a stable file.
+    let mut entries: Vec<(String, String, PathBuf)> = dirs
+        .into_iter()
+        .map(|path| {
+            let branch = Git::at(&path)
+                .out(&["branch", "--show-current"])
+                .ok()
+                .filter(|b| !b.is_empty());
+            let repo_id = repo_id_of(&root, &path, branch.as_deref())
+                .unwrap_or_else(|| "(unknown)".to_string());
+            let rel = path
+                .strip_prefix(&root)
+                .map(|p| p.to_path_buf())
+                .unwrap_or(path);
+            (
+                repo_id,
+                branch.unwrap_or_else(|| "(detached)".to_string()),
+                rel,
+            )
+        })
+        .collect();
+    entries.sort();
+
+    // Label with the repo's short name, falling back to the full repo-id
+    // when two repos share one.
+    let short = |id: &str| id.rsplit('/').next().unwrap_or(id).to_string();
+    let mut name_owners = std::collections::HashMap::new();
+    for (id, _, _) in &entries {
+        name_owners
+            .entry(short(id))
+            .or_insert_with(std::collections::HashSet::new)
+            .insert(id.clone());
+    }
+    let folders: Vec<_> = entries
+        .iter()
+        .map(|(id, branch, rel)| {
+            let repo_label = if name_owners[&short(id)].len() > 1 {
+                id.clone()
+            } else {
+                short(id)
+            };
+            json!({"name": format!("{repo_label} \u{00b7} {branch}"), "path": rel})
+        })
+        .collect();
+
+    std::fs::write(
+        &file,
+        format!(
+            "{}\n",
+            serde_json::to_string_pretty(&json!({"folders": folders}))?
+        ),
+    )?;
+    Ok(file)
+}
+
 /// Best-effort sync after a mutating command; failure to write an editor
 /// convenience file must never fail the command itself.
 pub fn sync_quietly(repo: &Repo, config: &Config) {
@@ -77,5 +153,18 @@ pub fn sync_quietly(repo: &Repo, config: &Config) {
     }
     if let Err(e) = sync(repo, config) {
         eprintln!("bonsai: could not update workspace file: {e:#}");
+    }
+    if let Err(e) = sync_global(config) {
+        eprintln!("bonsai: could not update global workspace file: {e:#}");
+    }
+}
+
+/// Global variant for commands without a repo context (prune --all).
+pub fn sync_global_quietly(config: &Config) {
+    if !config.workspace {
+        return;
+    }
+    if let Err(e) = sync_global(config) {
+        eprintln!("bonsai: could not update global workspace file: {e:#}");
     }
 }

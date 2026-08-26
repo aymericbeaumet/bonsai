@@ -108,11 +108,15 @@ fn run(cli: Cli) -> Result<Option<PathBuf>> {
             json,
         } => commands::clean::run(&config, dry_run, yes, no_fetch, json),
         Commands::Cd { query } => commands::cd::run(&config, query),
-        Commands::Workspace => {
-            let repo = repo::Repo::require()?;
-            let file = workspace::sync(&repo, &config)?;
+        Commands::Workspace { all } => {
+            let file = if all {
+                workspace::sync_global(&config)?
+            } else {
+                let repo = repo::Repo::require()?;
+                workspace::sync(&repo, &config)?
+            };
             if !file.exists() {
-                anyhow::bail!("no bonsai worktrees for this repo; run 'bonsai add' first");
+                anyhow::bail!("no bonsai worktrees found; run 'bonsai add' first");
             }
             println!("{}", file.display());
             Ok(None)

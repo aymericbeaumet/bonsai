@@ -104,6 +104,22 @@ pub fn cleanup_empty_dirs(removed: &Path, root: &Path) {
     }
 }
 
+/// The repo-id is the worktree's path relative to the root, minus the branch
+/// segments (`<root>/<repo-id>/<branch dirs...>`).
+pub fn repo_id_of(root: &Path, path: &Path, branch: Option<&str>) -> Option<String> {
+    let rel = path.strip_prefix(root).ok()?;
+    let segments: Vec<String> = rel
+        .components()
+        .map(|c| c.as_os_str().to_string_lossy().to_string())
+        .collect();
+    let branch_segments = branch.map_or(1, |b| b.split('/').count());
+    let keep = segments.len().checked_sub(branch_segments)?;
+    if keep == 0 {
+        return None;
+    }
+    Some(segments[..keep].join("/"))
+}
+
 /// Recursively find worktree checkout dirs (dirs containing a `.git` file)
 /// under `root`, without descending into checkouts themselves.
 pub fn find_worktree_dirs(root: &Path) -> Vec<PathBuf> {
@@ -159,6 +175,33 @@ mod tests {
     #[test]
     fn parses_empty_input() {
         assert!(Worktree::parse_list(b"").is_empty());
+    }
+
+    #[test]
+    fn repo_id_strips_branch_segments() {
+        let root = Path::new("/b");
+        let cases = [
+            (
+                "/b/github.com/o/r/feat",
+                Some("feat"),
+                Some("github.com/o/r"),
+            ),
+            (
+                "/b/github.com/o/r/feature/login",
+                Some("feature/login"),
+                Some("github.com/o/r"),
+            ),
+            ("/b/local/x-1234/feat", None, Some("local/x-1234")),
+            ("/b/feat", Some("feat"), None),
+            ("/elsewhere/feat", Some("feat"), None),
+        ];
+        for (path, branch, expected) in cases {
+            assert_eq!(
+                repo_id_of(root, Path::new(path), branch).as_deref(),
+                expected,
+                "path: {path}"
+            );
+        }
     }
 
     #[test]

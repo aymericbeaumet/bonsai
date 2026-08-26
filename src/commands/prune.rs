@@ -58,6 +58,8 @@ pub fn run(config: &Config, all: bool, yes: bool) -> Result<()> {
 
     if !all && let Some(repo) = Repo::discover()? {
         crate::workspace::sync_quietly(&repo, config);
+    } else {
+        crate::workspace::sync_global_quietly(config);
     }
     remove_empty_tree(&root);
     eprintln!("bonsai: done");

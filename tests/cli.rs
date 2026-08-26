@@ -925,6 +925,58 @@ fn workspace_file_tracks_worktrees() {
 }
 
 #[test]
+fn global_workspace_file_spans_repos_and_updates() {
+    let repo = TestRepo::new();
+    repo.add("feat-g1");
+    repo.add("feature/g2");
+
+    // `workspace --all` works even outside any repo.
+    let output = repo
+        .bonsai(&repo.dir)
+        .args(["workspace", "--all"])
+        .output()
+        .unwrap();
+    assert!(output.status.success());
+    let file = PathBuf::from(String::from_utf8_lossy(&output.stdout).trim());
+    assert_eq!(file, repo.root.join("bonsai.code-workspace"));
+    let ws: serde_json::Value =
+        serde_json::from_str(&std::fs::read_to_string(&file).unwrap()).unwrap();
+    let folders = ws["folders"].as_array().unwrap();
+    assert_eq!(folders.len(), 2);
+    let names: Vec<&str> = folders
+        .iter()
+        .map(|f| f["name"].as_str().unwrap())
+        .collect();
+    assert!(
+        names.iter().any(|n| n.ends_with("\u{b7} feat-g1")),
+        "names: {names:?}"
+    );
+    assert!(
+        names.iter().any(|n| n.ends_with("\u{b7} feature/g2")),
+        "names: {names:?}"
+    );
+    // Relative folder paths resolve against the file's directory.
+    for folder in folders {
+        let rel = folder["path"].as_str().unwrap();
+        assert!(repo.root.join(rel).is_dir(), "missing: {rel}");
+    }
+
+    // Kept in sync by mutations; deleted with the last worktree.
+    repo.bonsai(&repo.clone)
+        .args(["remove", "feature/g2"])
+        .assert()
+        .success();
+    let ws: serde_json::Value =
+        serde_json::from_str(&std::fs::read_to_string(&file).unwrap()).unwrap();
+    assert_eq!(ws["folders"].as_array().unwrap().len(), 1);
+    repo.bonsai(&repo.clone)
+        .args(["remove", "feat-g1"])
+        .assert()
+        .success();
+    assert!(!file.exists());
+}
+
+#[test]
 fn workspace_file_can_be_disabled() {
     let repo = TestRepo::new();
     let path = repo
