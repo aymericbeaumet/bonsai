@@ -53,6 +53,9 @@ pub struct AddConfig {
     /// current worktree first, then the main one. Setting this replaces the
     /// defaults (DEFAULT_COPY).
     pub copy: Vec<String>,
+    /// Auto-install dependencies in new worktrees with the package manager
+    /// detected from lockfiles (pnpm/npm/yarn/bun/cargo/uv).
+    pub install: bool,
     /// Shell command run inside a freshly created worktree.
     pub post_add: Option<String>,
 }
@@ -62,6 +65,7 @@ impl Default for AddConfig {
         Self {
             fetch: false,
             copy: DEFAULT_COPY.iter().map(|s| s.to_string()).collect(),
+            install: true,
             post_add: None,
         }
     }
@@ -145,6 +149,8 @@ struct GitConfigAddPatch {
     #[serde(skip_serializing_if = "Option::is_none")]
     copy: Option<Vec<String>>,
     #[serde(skip_serializing_if = "Option::is_none")]
+    install: Option<bool>,
+    #[serde(skip_serializing_if = "Option::is_none")]
     post_add: Option<String>,
 }
 
@@ -177,6 +183,7 @@ fn git_config_patch(git: &Git) -> GitConfigPatch {
             "bonsai.defaultbranch" => patch.default_branch = Some(value),
             "bonsai.workspace" => patch.workspace = git_bool(&value),
             "bonsai.add.fetch" => patch.add.fetch = git_bool(&value),
+            "bonsai.add.install" => patch.add.install = git_bool(&value),
             "bonsai.add.postadd" => patch.add.post_add = Some(value),
             "bonsai.add.copy" => patch.add.copy.get_or_insert_default().push(value),
             "bonsai.clean.fetch" => patch.clean.fetch = git_bool(&value),
@@ -247,24 +254,28 @@ mod tests {
             assert_eq!(config.remote.as_deref(), Some("upstream"));
             assert!(!config.clean.fetch);
             assert_eq!(config.add.copy, DEFAULT_COPY);
+            assert!(config.add.install);
 
             // Repo config overrides global.
             std::fs::write(
                 repo.join(".bonsai.toml"),
-                "default_branch = \"develop\"\nremote = \"origin\"\n",
+                "default_branch = \"develop\"\nremote = \"origin\"\n[add]\ninstall = false\n",
             )
             .unwrap();
             let config = Config::load(Some(&repo), &git).unwrap();
             assert_eq!(config.remote.as_deref(), Some("origin"));
             assert_eq!(config.default_branch.as_deref(), Some("develop"));
             assert_eq!(config.root, "/global-root");
+            assert!(!config.add.install);
 
             // Env overrides repo config, with __ nesting.
             jail.set_env("BONSAI_REMOTE", "fork");
             jail.set_env("BONSAI_CLEAN__FETCH", "true");
+            jail.set_env("BONSAI_ADD__INSTALL", "true");
             let config = Config::load(Some(&repo), &git).unwrap();
             assert_eq!(config.remote.as_deref(), Some("fork"));
             assert!(config.clean.fetch);
+            assert!(config.add.install);
             Ok(())
         });
     }

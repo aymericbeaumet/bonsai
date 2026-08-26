@@ -76,6 +76,7 @@ workspace = true            # maintain a .code-workspace file per repo
 
 [add]
 fetch = false               # fetch --prune before adding
+install = true              # auto-install deps (pnpm/npm/yarn/bun/cargo/uv)
 post_add = "mise install"   # command run inside a new worktree
 # untracked files copied into new worktrees; setting this replaces the
 # defaults: [".env", ".env.*", ".envrc", ".mcp.json", "CLAUDE.local.md",
@@ -132,8 +133,9 @@ a real terminal.
 
 **New worktrees come pre-provisioned**: untracked local config — `.env*`,
 `.envrc`, `.mcp.json`, `CLAUDE.local.md`, `.claude/settings.local.json`,
-`.cursor/mcp.json` — is copied over by default, so whichever harness (or
-human) created the worktree, the others find their setup in place.
+`.cursor/mcp.json` — is copied over by default, and dependencies are
+installed automatically from the lockfile, so whichever harness (or human)
+created the worktree, the others find their setup in place.
 
 ## Desktop editors
 
@@ -175,6 +177,13 @@ lists stay readable. Jump from a terminal with `bonsai cd`.
   up worktree jumps automatically.
 - **direnv**: `.envrc` files copied by bonsai from your own worktree are
   `direnv allow`ed automatically; tracked ones stay gated by direnv as usual.
+- **package managers** (pnpm, npm, yarn, bun, cargo, uv): new worktrees get
+  their dependencies installed automatically, keyed on the lockfile (and
+  `package.json`'s `packageManager` field). Installs are lockfile-frozen —
+  the checkout is never dirtied — and lean on each tool's shared
+  content-addressable store, so sibling worktrees cost little extra disk.
+  Missing tools are skipped silently; failures never abort the add. Disable
+  with `[add] install = false`.
 
 ## How it works
 

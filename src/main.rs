@@ -4,6 +4,7 @@ mod config;
 mod git;
 mod paths;
 mod picker;
+mod pm;
 mod repo;
 mod shell;
 mod workspace;

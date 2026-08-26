@@ -36,6 +36,10 @@ bonsai clean --yes              # then execute
   will list it — read the plan before executing.
 - Untracked local config (`.env*`, `.envrc`, `.mcp.json`, `CLAUDE.local.md`,
   ...) is copied into new worktrees automatically.
+- Dependencies are installed automatically in new worktrees when a lockfile
+  is present (pnpm/npm/yarn/bun/cargo/uv, lockfile-frozen); a missing tool is
+  skipped and an install failure never aborts `add` — check stderr before
+  assuming deps are in place.
 
 ## Destructive-command policy
 

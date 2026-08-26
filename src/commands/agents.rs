@@ -33,6 +33,9 @@ Notes for non-interactive use:
 - Untracked local config (.env*, .envrc, .mcp.json, CLAUDE.local.md, ...) is
   copied into new worktrees automatically, so agent/harness setup carries
   over.
+- Dependencies are installed automatically when a lockfile is present
+  (pnpm/npm/yarn/bun/cargo/uv); install failures are reported on stderr but
+  never abort `bonsai add`.
 "#;
 
 #[cfg(test)]

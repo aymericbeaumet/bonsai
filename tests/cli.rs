@@ -109,6 +109,98 @@ impl TestRepo {
     fn worktree_list(&self) -> String {
         self.git(&self.clone, &["worktree", "list", "--porcelain"])
     }
+
+    /// Commit files in the clone and push them to origin/main so they show
+    /// up in worktrees created from it.
+    fn commit_files(&self, files: &[(&str, &str)]) {
+        for (name, content) in files {
+            std::fs::write(self.clone.join(name), content).unwrap();
+        }
+        self.git(&self.clone, &["add", "."]);
+        self.git(&self.clone, &["commit", "-m", "fixtures"]);
+        self.git(&self.clone, &["push", "origin", "main"]);
+    }
+
+    /// Directory holding fake package-manager executables.
+    fn fake_bin_dir(&self) -> PathBuf {
+        let dir = self.dir.join("fakebin");
+        std::fs::create_dir_all(&dir).unwrap();
+        dir
+    }
+
+    /// A fake package manager recording its argv into `<name>-args.txt` in
+    /// its cwd (i.e. the new worktree) before exiting with `code`.
+    fn fake_pm_with_exit(&self, name: &str, code: i32) {
+        let dir = self.fake_bin_dir();
+        if cfg!(windows) {
+            std::fs::write(
+                dir.join(format!("{name}.cmd")),
+                format!("@echo %*> {name}-args.txt\r\n@exit /b {code}\r\n"),
+            )
+            .unwrap();
+        } else {
+            let path = dir.join(name);
+            std::fs::write(
+                &path,
+                format!("#!/bin/sh\nprintf '%s' \"$*\" > {name}-args.txt\nexit {code}\n"),
+            )
+            .unwrap();
+            #[cfg(unix)]
+            {
+                use std::os::unix::fs::PermissionsExt;
+                std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o755)).unwrap();
+            }
+        }
+    }
+
+    fn fake_pm(&self, name: &str) {
+        self.fake_pm_with_exit(name, 0);
+    }
+
+    /// The host PATH with the fake-binary dir prepended (fakes win).
+    fn path_with_fakebin(&self) -> std::ffi::OsString {
+        let mut paths = vec![self.fake_bin_dir()];
+        paths.extend(std::env::split_paths(
+            &std::env::var_os("PATH").unwrap_or_default(),
+        ));
+        std::env::join_paths(paths).unwrap()
+    }
+
+    /// A PATH reduced to the fake-binary dir plus every host dir containing
+    /// git, making "package manager not installed" reproducible even on
+    /// machines that have the real tools.
+    fn restricted_path(&self) -> std::ffi::OsString {
+        let git_name = if cfg!(windows) { "git.exe" } else { "git" };
+        let mut paths = vec![self.fake_bin_dir()];
+        paths.extend(
+            std::env::split_paths(&std::env::var_os("PATH").unwrap_or_default())
+                .filter(|dir| dir.join(git_name).is_file()),
+        );
+        std::env::join_paths(paths).unwrap()
+    }
+
+    /// `bonsai add` with a custom PATH; returns the worktree path + stderr.
+    fn add_with_path(&self, branch: &str, path_env: &std::ffi::OsStr) -> (PathBuf, String) {
+        let output = self
+            .bonsai(&self.clone)
+            .env("PATH", path_env)
+            .arg("add")
+            .arg(branch)
+            .output()
+            .unwrap();
+        assert!(
+            output.status.success(),
+            "bonsai add {branch} failed: {}",
+            String::from_utf8_lossy(&output.stderr)
+        );
+        let path = PathBuf::from(String::from_utf8_lossy(&output.stdout).trim().to_string());
+        assert!(
+            path.is_dir(),
+            "worktree path not created: {}",
+            path.display()
+        );
+        (path, String::from_utf8_lossy(&output.stderr).into_owned())
+    }
 }
 
 const SENTINEL: &str = "__bonsai_cd\u{1f}";
@@ -503,6 +595,80 @@ fn add_copies_configured_files_and_runs_post_add_hook() {
         "SECRET=1\n"
     );
     assert!(path.join("hook-ran").exists());
+}
+
+#[test]
+fn add_installs_with_pnpm_when_lockfile_present() {
+    let repo = TestRepo::new();
+    repo.commit_files(&[("package.json", "{}\n"), ("pnpm-lock.yaml", "")]);
+    repo.fake_pm("pnpm");
+    let (path, _) = repo.add_with_path("feat-pnpm", &repo.path_with_fakebin());
+    let args = std::fs::read_to_string(path.join("pnpm-args.txt")).unwrap();
+    assert_eq!(args.trim(), "install --frozen-lockfile --prefer-offline");
+}
+
+#[test]
+fn add_install_honors_package_manager_field() {
+    let repo = TestRepo::new();
+    repo.commit_files(&[
+        ("package.json", "{\"packageManager\": \"yarn@4.0.0\"}\n"),
+        ("package-lock.json", "{}\n"),
+    ]);
+    repo.fake_pm("yarn");
+    repo.fake_pm("npm");
+    let (path, _) = repo.add_with_path("feat-yarn", &repo.path_with_fakebin());
+    let args = std::fs::read_to_string(path.join("yarn-args.txt")).unwrap();
+    assert_eq!(args.trim(), "install --immutable");
+    assert!(!path.join("npm-args.txt").exists());
+}
+
+#[test]
+fn add_installs_multiple_ecosystems() {
+    let repo = TestRepo::new();
+    repo.commit_files(&[("Cargo.lock", ""), ("package-lock.json", "{}\n")]);
+    repo.fake_pm("cargo");
+    repo.fake_pm("npm");
+    let (path, _) = repo.add_with_path("feat-multi", &repo.path_with_fakebin());
+    let cargo_args = std::fs::read_to_string(path.join("cargo-args.txt")).unwrap();
+    assert_eq!(cargo_args.trim(), "fetch --locked");
+    let npm_args = std::fs::read_to_string(path.join("npm-args.txt")).unwrap();
+    assert_eq!(npm_args.trim(), "ci --prefer-offline --no-audit --no-fund");
+}
+
+#[test]
+fn add_install_disabled_via_config() {
+    let repo = TestRepo::new();
+    repo.commit_files(&[("pnpm-lock.yaml", "")]);
+    repo.fake_pm("pnpm");
+    std::fs::write(repo.clone.join(".bonsai.toml"), "[add]\ninstall = false\n").unwrap();
+    let (path, _) = repo.add_with_path("feat-noinstall", &repo.path_with_fakebin());
+    assert!(!path.join("pnpm-args.txt").exists());
+}
+
+#[test]
+fn add_install_skips_silently_when_pm_missing() {
+    let repo = TestRepo::new();
+    repo.commit_files(&[("pnpm-lock.yaml", "")]);
+    // Empty fakebin + only the host dirs containing git: pnpm is absent.
+    let (path, stderr) = repo.add_with_path("feat-nopm", &repo.restricted_path());
+    assert!(!path.join("pnpm-args.txt").exists());
+    assert!(
+        !stderr.contains("installing dependencies"),
+        "expected silent skip, got: {stderr}"
+    );
+}
+
+#[test]
+fn add_install_failure_is_non_fatal() {
+    let repo = TestRepo::new();
+    repo.commit_files(&[("pnpm-lock.yaml", "")]);
+    repo.fake_pm_with_exit("pnpm", 1);
+    let (path, stderr) = repo.add_with_path("feat-installfail", &repo.path_with_fakebin());
+    assert!(path.is_dir());
+    assert!(
+        stderr.contains("failed"),
+        "missing failure notice: {stderr}"
+    );
 }
 
 #[test]

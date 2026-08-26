@@ -116,6 +116,7 @@ pub fn run(
     }
 
     copy_files(&repo, config, &path);
+    install_dependencies(config, &path);
     run_post_add(config, &branch, &path);
     crate::workspace::sync_quietly(&repo, config);
 
@@ -305,6 +306,43 @@ fn direnv_allow(envrcs: &[PathBuf]) {
             }
             Ok(_) => eprintln!("bonsai: direnv allow failed for {}", envrc.display()),
             Err(_) => return, // direnv not installed
+        }
+    }
+}
+
+/// Install dependencies with every package manager detected in the new
+/// worktree. Frozen-lockfile flags keep the checkout pristine and each
+/// tool's shared store keeps disk usage low. A missing tool is silently
+/// skipped; failure is reported but does not undo the add. Tool stdout goes
+/// to our stderr so wrapped stdout capture stays clean.
+fn install_dependencies(config: &Config, path: &std::path::Path) {
+    if !config.add.install {
+        return;
+    }
+    for pm in crate::pm::detect(path) {
+        let Some(program) = crate::pm::find_program(pm.program()) else {
+            continue; // tool not installed
+        };
+        let display = format!("{} {}", pm.program(), pm.args().join(" "));
+        eprintln!("bonsai: installing dependencies: {display}");
+        let result = std::process::Command::new(&program)
+            .args(pm.args())
+            .current_dir(path)
+            .stdout(std::process::Stdio::piped())
+            .stderr(std::process::Stdio::inherit())
+            .output();
+        match result {
+            Ok(output) => {
+                use std::io::Write;
+                let _ = std::io::stderr().write_all(&output.stdout);
+                if !output.status.success() {
+                    eprintln!(
+                        "bonsai: '{display}' failed (exit {:?})",
+                        output.status.code()
+                    );
+                }
+            }
+            Err(e) => eprintln!("bonsai: '{display}' failed to start: {e}"),
         }
     }
 }

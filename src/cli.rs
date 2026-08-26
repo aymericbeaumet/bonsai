@@ -38,8 +38,10 @@ Branch resolution, in order:
 `bonsai add fixup --base HEAD` inside a worktree stacks on that worktree's
 HEAD. Untracked files matching the copy configuration (.env*, .envrc,
 .mcp.json, CLAUDE.local.md, ... by default) are copied from your current
-worktree (then the main one) into the new worktree, and the [add] post_add
-command runs inside it.
+worktree (then the main one) into the new worktree, dependencies are
+installed with the package manager detected from lockfiles (pnpm, npm, yarn,
+bun, cargo, uv — lockfile-frozen, skipped when the tool is missing, disable
+with [add] install = false), and the [add] post_add command runs inside it.
 
 Examples:
   bonsai add                    # fuzzy-pick a branch, or type a new name
