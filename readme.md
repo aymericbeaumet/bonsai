@@ -40,6 +40,7 @@ target path, so `cd "$(bonsai add foo)"` composes.
 | `bonsai prune` | Clean up stale worktree registrations, orphaned directories, and empty dirs. `--all` sweeps the whole root, including worktrees of repos whose clone was deleted. |
 | `bonsai init <shell>` | Print the shell wrapper (zsh, bash, fish). |
 | `bonsai agents` | Print a usage contract for AI coding agents, ready for `bonsai agents >> AGENTS.md`. |
+| `bonsai skill [install]` | Print the bundled Agent Skill, or install it for detected harnesses (Claude Code, Codex, OpenCode, Cursor). |
 | `bonsai completions <shell>` | Print shell completions. |
 
 Every subcommand has detailed `--help` with examples.
@@ -104,19 +105,38 @@ thing and `bonsai clean` can detect squash-merges reliably.
 ## AI agents (Claude Code, Cursor, Codex, OpenCode, ...)
 
 bonsai is built to work the same across coding harnesses, so switching tools
-mid-project costs nothing:
+mid-project costs nothing.
 
-- Teach any agent the workflow with one line: `bonsai agents >> AGENTS.md`
-  (the cross-harness instructions file; symlink or copy for harnesses that
-  read a different filename). The snippet documents the whole non-interactive
-  contract.
-- Everything is scriptable: `path=$(bonsai add feat-x)` prints the worktree
-  path and is idempotent; `list` is plain TSV; `clean --yes` / `prune --yes`
-  never prompt; fuzzy pickers only ever appear on a real terminal.
-- New worktrees come pre-provisioned: untracked local config — `.env*`,
-  `.envrc`, `.mcp.json`, `CLAUDE.local.md`, `.claude/settings.local.json`,
-  `.cursor/mcp.json` — is copied over by default, so whichever harness (or
-  human) created the worktree, the others find their setup in place.
+**Install the skill.** The repo ships an [Agent Skill](https://agentskills.io)
+(`skills/bonsai/SKILL.md`) teaching agents the workflow, its invariants, and
+the destructive-command policy. It is embedded in the binary:
+
+```sh
+bonsai skill install        # detects Claude Code, Codex, OpenCode, Cursor
+bonsai skill install --all  # or install for every harness unconditionally
+bonsai skill                # or print it and pipe it wherever you want
+```
+
+Claude Code users can track releases through the plugin marketplace instead:
+
+```
+/plugin marketplace add aymericbeaumet/bonsai
+/plugin install bonsai@bonsai
+```
+
+**Or drop a snippet in your instructions file**: `bonsai agents >> AGENTS.md`
+prints a shorter usage contract for the cross-harness instructions file.
+
+**Everything is scriptable**: `path=$(bonsai add feat-x)` prints the worktree
+path and is idempotent; `bonsai list --json` and `bonsai clean --dry-run
+--json` give structured output for a reliable inspect-then-execute loop;
+`clean --yes` / `prune --yes` never prompt; fuzzy pickers only ever appear on
+a real terminal.
+
+**New worktrees come pre-provisioned**: untracked local config — `.env*`,
+`.envrc`, `.mcp.json`, `CLAUDE.local.md`, `.claude/settings.local.json`,
+`.cursor/mcp.json` — is copied over by default, so whichever harness (or
+human) created the worktree, the others find their setup in place.
 
 ## Integrations
 

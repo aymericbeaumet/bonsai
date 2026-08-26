@@ -16,11 +16,13 @@ branches in place.
   branch when it does not exist. Idempotent: re-running returns the existing
   path. Run all subsequent commands inside that directory.
 - Stack on the current checkout: `bonsai add <branch> --base HEAD`.
-- List worktrees (TSV: branch, path, flags): `bonsai list`.
+- List worktrees: `bonsai list` (TSV: branch, path, flags) or
+  `bonsai list --json`.
 - Remove a worktree when done: `bonsai remove <branch>` (`-d` also deletes
   the branch; `--force` discards uncommitted changes).
-- Remove all merged/squash-merged worktrees: `bonsai clean --yes` (dirty
-  worktrees are never touched).
+- Remove merged/squash-merged worktrees: inspect with
+  `bonsai clean --dry-run --json`, then execute with `bonsai clean --yes`
+  (dirty worktrees are never touched).
 
 Notes for non-interactive use:
 

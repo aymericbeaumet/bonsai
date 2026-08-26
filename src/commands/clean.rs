@@ -53,7 +53,46 @@ pub fn classify(facts: BranchFacts) -> Option<Reason> {
     }
 }
 
-pub fn run(config: &Config, dry_run: bool, yes: bool, no_fetch: bool) -> Result<Option<PathBuf>> {
+#[derive(serde::Serialize)]
+struct JsonEntry {
+    branch: String,
+    reason: &'static str,
+    path: PathBuf,
+}
+
+#[derive(Default, serde::Serialize)]
+struct JsonReport {
+    dry_run: bool,
+    planned: Vec<JsonEntry>,
+    skipped_dirty: Vec<JsonEntry>,
+    removed: Vec<String>,
+}
+
+pub fn run(
+    config: &Config,
+    dry_run: bool,
+    yes: bool,
+    no_fetch: bool,
+    json: bool,
+) -> Result<Option<PathBuf>> {
+    let mut report = JsonReport {
+        dry_run,
+        ..Default::default()
+    };
+    let outcome = run_inner(config, dry_run, yes, no_fetch, &mut report);
+    if json && outcome.is_ok() {
+        println!("{}", serde_json::to_string_pretty(&report)?);
+    }
+    outcome
+}
+
+fn run_inner(
+    config: &Config,
+    dry_run: bool,
+    yes: bool,
+    no_fetch: bool,
+    report: &mut JsonReport,
+) -> Result<Option<PathBuf>> {
     let repo = Repo::require()?;
     let remote = repo.remote_name(config);
 
@@ -135,10 +174,23 @@ pub fn run(config: &Config, dry_run: bool, yes: bool, no_fetch: bool) -> Result<
                 "bonsai: skipping '{branch}' ({}): uncommitted changes",
                 reason.as_str()
             );
+            report.skipped_dirty.push(JsonEntry {
+                branch,
+                reason: reason.as_str(),
+                path: wt.path,
+            });
             continue;
         }
         candidates.push((wt, branch, reason));
     }
+    report.planned = candidates
+        .iter()
+        .map(|(wt, branch, reason)| JsonEntry {
+            branch: branch.clone(),
+            reason: reason.as_str(),
+            path: wt.path.clone(),
+        })
+        .collect();
 
     if candidates.is_empty() {
         eprintln!("bonsai: nothing to clean");
@@ -183,6 +235,7 @@ pub fn run(config: &Config, dry_run: bool, yes: bool, no_fetch: bool) -> Result<
         // the safety justification for -D.
         repo.git.run(&["branch", "-D", branch])?;
         eprintln!("bonsai: deleted branch '{branch}'");
+        report.removed.push(branch.clone());
     }
 
     if cd_home {

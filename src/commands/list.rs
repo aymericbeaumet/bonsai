@@ -1,73 +1,102 @@
+use std::path::PathBuf;
+
 use anyhow::Result;
+use serde::Serialize;
 
 use crate::config::Config;
 use crate::git::Git;
 use crate::repo::Repo;
-use crate::worktree::{Worktree, find_worktree_dirs};
+use crate::worktree::find_worktree_dirs;
 
-pub fn run(config: &Config, all: bool, status: bool) -> Result<()> {
-    if all {
-        return run_all(config, status);
+#[derive(Serialize)]
+struct Entry {
+    branch: Option<String>,
+    path: PathBuf,
+    main: bool,
+    locked: bool,
+    prunable: bool,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    dirty: Option<bool>,
+}
+
+pub fn run(config: &Config, all: bool, status: bool, json: bool) -> Result<()> {
+    let entries = if all {
+        global_entries(config, status)?
+    } else {
+        repo_entries(config, status)?
+    };
+    if json {
+        println!("{}", serde_json::to_string_pretty(&entries)?);
+        return Ok(());
     }
-    let repo = Repo::require()?;
-    let bonsai_dir = repo.bonsai_dir(config);
-    for wt in repo.worktrees()? {
-        if wt.is_bare {
-            continue;
-        }
-        let is_main = !wt.path.starts_with(&bonsai_dir);
+    for e in entries {
         let mut flags = Vec::new();
-        if is_main {
+        if e.main {
             flags.push("main");
         }
-        if wt.is_locked {
+        if e.locked {
             flags.push("locked");
         }
-        if wt.is_prunable {
+        if e.prunable {
             flags.push("prunable");
         }
-        if status && is_dirty(&wt) {
+        if e.dirty == Some(true) {
             flags.push("dirty");
         }
         println!(
             "{}\t{}\t{}",
-            wt.branch.as_deref().unwrap_or("(detached)"),
-            wt.path.display(),
+            e.branch.as_deref().unwrap_or("(detached)"),
+            e.path.display(),
             flags.join(",")
         );
     }
     Ok(())
 }
 
-/// Global listing scans the bonsai root on disk (there is no repo context to
-/// ask git from); branch names are read from each checkout.
-fn run_all(config: &Config, status: bool) -> Result<()> {
-    let root = config.root_dir();
-    for path in find_worktree_dirs(&root) {
-        let git = Git::at(&path);
-        let branch = git
-            .out(&["branch", "--show-current"])
-            .ok()
-            .filter(|b| !b.is_empty())
-            .unwrap_or_else(|| "(unknown)".to_string());
-        let mut flags = Vec::new();
-        if status {
-            let dirty = git
-                .out(&["status", "--porcelain"])
-                .map(|s| !s.is_empty())
-                .unwrap_or(false);
-            if dirty {
-                flags.push("dirty");
-            }
+fn repo_entries(config: &Config, status: bool) -> Result<Vec<Entry>> {
+    let repo = Repo::require()?;
+    let bonsai_dir = repo.bonsai_dir(config);
+    let mut entries = Vec::new();
+    for wt in repo.worktrees()? {
+        if wt.is_bare {
+            continue;
         }
-        let rel = path.strip_prefix(&root).unwrap_or(&path);
-        println!("{}\t{}\t{}", branch, rel.display(), flags.join(","));
+        entries.push(Entry {
+            main: !wt.path.starts_with(&bonsai_dir),
+            dirty: status.then(|| is_dirty(&wt.path)),
+            branch: wt.branch,
+            path: wt.path,
+            locked: wt.is_locked,
+            prunable: wt.is_prunable,
+        });
     }
-    Ok(())
+    Ok(entries)
 }
 
-fn is_dirty(wt: &Worktree) -> bool {
-    Git::at(&wt.path)
+/// Global listing scans the bonsai root on disk (there is no repo context to
+/// ask git from); branch names are read from each checkout.
+fn global_entries(config: &Config, status: bool) -> Result<Vec<Entry>> {
+    let root = config.root_dir();
+    let mut entries = Vec::new();
+    for path in find_worktree_dirs(&root) {
+        let branch = Git::at(&path)
+            .out(&["branch", "--show-current"])
+            .ok()
+            .filter(|b| !b.is_empty());
+        entries.push(Entry {
+            branch,
+            main: false,
+            locked: false,
+            prunable: false,
+            dirty: status.then(|| is_dirty(&path)),
+            path,
+        });
+    }
+    Ok(entries)
+}
+
+fn is_dirty(path: &std::path::Path) -> bool {
+    Git::at(path)
         .out(&["status", "--porcelain"])
         .map(|s| !s.is_empty())
         .unwrap_or(false)

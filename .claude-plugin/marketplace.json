@@ -1,0 +1,14 @@
+{
+  "name": "bonsai",
+  "owner": {
+    "name": "Aymeric Beaumet",
+    "email": "hi@aymericbeaumet.com"
+  },
+  "plugins": [
+    {
+      "name": "bonsai",
+      "source": "./",
+      "description": "Git worktree management with the bonsai CLI: isolated per-branch worktrees, fuzzy navigation, and safe cleanup of merged work"
+    }
+  ]
+}

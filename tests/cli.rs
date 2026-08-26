@@ -763,6 +763,85 @@ fn explicit_copy_config_replaces_defaults() {
 }
 
 #[test]
+fn list_json_is_machine_readable() {
+    let repo = TestRepo::new();
+    let path = repo.add("feat-json");
+    let output = repo
+        .bonsai(&repo.clone)
+        .args(["list", "--json"])
+        .output()
+        .unwrap();
+    assert!(output.status.success());
+    let entries: serde_json::Value = serde_json::from_slice(&output.stdout).unwrap();
+    let entries = entries.as_array().unwrap();
+    let main = entries.iter().find(|e| e["main"] == true).unwrap();
+    assert_eq!(main["branch"], "main");
+    let feat = entries.iter().find(|e| e["branch"] == "feat-json").unwrap();
+    assert_eq!(feat["main"], false);
+    assert_eq!(feat["path"], path.to_string_lossy().as_ref());
+}
+
+#[test]
+fn clean_json_reports_plan_and_removals() {
+    let repo = TestRepo::new();
+    let path = repo.add("feat-cleanjson");
+
+    let output = repo
+        .bonsai(&repo.clone)
+        .args(["clean", "--dry-run", "--json"])
+        .output()
+        .unwrap();
+    assert!(output.status.success());
+    let report: serde_json::Value = serde_json::from_slice(&output.stdout).unwrap();
+    assert_eq!(report["dry_run"], true);
+    assert_eq!(report["planned"][0]["branch"], "feat-cleanjson");
+    assert_eq!(report["removed"].as_array().unwrap().len(), 0);
+    assert!(path.exists());
+
+    let output = repo
+        .bonsai(&repo.clone)
+        .args(["clean", "--yes", "--json"])
+        .output()
+        .unwrap();
+    assert!(output.status.success());
+    let report: serde_json::Value = serde_json::from_slice(&output.stdout).unwrap();
+    assert_eq!(report["removed"][0], "feat-cleanjson");
+    assert!(!path.exists());
+}
+
+#[test]
+fn skill_prints_and_installs_into_detected_harnesses() {
+    let repo = TestRepo::new();
+    repo.bonsai(&repo.dir)
+        .arg("skill")
+        .assert()
+        .success()
+        .stdout(predicate::str::starts_with("---\nname: bonsai\n"));
+
+    // HOME is the temp dir; only Claude Code is "installed".
+    std::fs::create_dir_all(repo.dir.join(".claude")).unwrap();
+    repo.bonsai(&repo.dir)
+        .args(["skill", "install"])
+        .assert()
+        .success();
+    assert!(repo.dir.join(".claude/skills/bonsai/SKILL.md").exists());
+    assert!(!repo.dir.join(".codex").exists());
+
+    // --all installs everywhere, detected or not.
+    repo.bonsai(&repo.dir)
+        .args(["skill", "install", "--all"])
+        .assert()
+        .success();
+    assert!(repo.dir.join(".codex/skills/bonsai/SKILL.md").exists());
+    assert!(
+        repo.dir
+            .join(".config/opencode/skills/bonsai/SKILL.md")
+            .exists()
+    );
+    assert!(repo.dir.join(".agents/skills/bonsai/SKILL.md").exists());
+}
+
+#[test]
 fn agents_prints_usage_contract() {
     let repo = TestRepo::new();
     repo.bonsai(&repo.dir)

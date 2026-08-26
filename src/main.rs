@@ -50,6 +50,13 @@ fn run(cli: Cli) -> Result<Option<PathBuf>> {
             commands::agents::run();
             return Ok(None);
         }
+        Commands::Skill { action } => {
+            match action {
+                None => commands::skill::show(),
+                Some(cli::SkillAction::Install { all }) => commands::skill::install(*all)?,
+            }
+            return Ok(None);
+        }
         _ => {}
     }
 
@@ -83,7 +90,9 @@ fn run(cli: Cli) -> Result<Option<PathBuf>> {
             fetch,
             path,
         } => commands::add::run(&config, branch, base, fetch, path),
-        Commands::List { all, status } => commands::list::run(&config, all, status).map(|_| None),
+        Commands::List { all, status, json } => {
+            commands::list::run(&config, all, status, json).map(|_| None)
+        }
         Commands::Remove {
             branches,
             delete_branch,
@@ -94,9 +103,13 @@ fn run(cli: Cli) -> Result<Option<PathBuf>> {
             dry_run,
             yes,
             no_fetch,
-        } => commands::clean::run(&config, dry_run, yes, no_fetch),
+            json,
+        } => commands::clean::run(&config, dry_run, yes, no_fetch, json),
         Commands::Cd { query } => commands::cd::run(&config, query),
-        Commands::Init { .. } | Commands::Completions { .. } | Commands::Agents => unreachable!(),
+        Commands::Init { .. }
+        | Commands::Completions { .. }
+        | Commands::Agents
+        | Commands::Skill { .. } => unreachable!(),
     }
 }
 

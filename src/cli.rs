@@ -51,8 +51,8 @@ const LIST_LONG: &str = "\
 List worktrees of the current repo, one per line, tab-separated:
 <branch>\\t<path>\\t<flags>. Flags: main, locked, prunable, dirty (with
 --status). The main checkout is listed first. With --all, list every
-bonsai-managed worktree across all repos (works outside a repo; paths are
-relative to the bonsai root).";
+bonsai-managed worktree across all repos (works outside a repo). --json
+outputs an array of {branch, path, main, locked, prunable, dirty?} instead.";
 
 const REMOVE_LONG: &str = "\
 Remove the worktrees of the given branches. Without arguments, opens a fuzzy
@@ -117,6 +117,33 @@ harnesses read:
 
   bonsai agents >> AGENTS.md";
 
+const SKILL_LONG: &str = "\
+The bonsai Agent Skill (SKILL.md, agentskills.io format) teaches AI coding
+agents the worktree workflow, its invariants, and the destructive-command
+policy.
+
+  bonsai skill              # print SKILL.md to stdout
+  bonsai skill install      # install into every detected harness:
+                            #   Claude Code  ~/.claude/skills/bonsai/
+                            #   Codex        ~/.codex/skills/bonsai/
+                            #   OpenCode     ~/.config/opencode/skills/bonsai/
+                            #   Cursor       ~/.agents/skills/bonsai/
+  bonsai skill install --all  # skip detection, install everywhere
+
+Claude Code users can instead track releases via the plugin marketplace:
+  /plugin marketplace add aymericbeaumet/bonsai
+  /plugin install bonsai@bonsai";
+
+#[derive(Debug, Subcommand)]
+pub enum SkillAction {
+    /// Install SKILL.md into the skill directories of detected AI harnesses
+    Install {
+        /// Install for every known harness, even undetected ones
+        #[arg(long)]
+        all: bool,
+    },
+}
+
 /// Ergonomic git worktree manager.
 #[derive(Debug, Parser)]
 #[command(name = "bonsai", version, about = ABOUT, long_about = LONG_ABOUT)]
@@ -162,6 +189,9 @@ pub enum Commands {
         /// Add a dirty flag (runs git status in each worktree; slower)
         #[arg(long)]
         status: bool,
+        /// Output JSON instead of TSV
+        #[arg(long)]
+        json: bool,
     },
     /// Remove worktrees, keeping their branches unless -d
     #[command(alias = "rm", long_about = REMOVE_LONG)]
@@ -198,6 +228,9 @@ pub enum Commands {
         /// Skip the initial fetch --prune
         #[arg(long)]
         no_fetch: bool,
+        /// Output the plan/result as JSON on stdout
+        #[arg(long)]
+        json: bool,
     },
     /// Jump to a worktree (fuzzy; works across all repos when outside one)
     #[command(long_about = CD_LONG)]
@@ -214,6 +247,12 @@ pub enum Commands {
     /// Print AI-agent usage instructions (bonsai agents >> AGENTS.md)
     #[command(long_about = AGENTS_LONG)]
     Agents,
+    /// Print or install the bonsai Agent Skill (SKILL.md)
+    #[command(long_about = SKILL_LONG)]
+    Skill {
+        #[command(subcommand)]
+        action: Option<SkillAction>,
+    },
     /// Print shell completions
     Completions {
         /// Shell flavor to emit
