@@ -218,13 +218,17 @@ fn add_creates_branch_worktree_and_prints_path() {
 }
 
 #[test]
-fn add_nested_branch_maps_to_nested_dirs() {
+fn add_slugifies_branch_and_preserves_nested_dirs() {
     let repo = TestRepo::new();
-    let path = repo.add("feature/login");
-    assert!(path.ends_with("feature/login"), "path: {}", path.display());
+    let path = repo.add("AB/Fix Login #42");
+    assert!(
+        path.ends_with("ab/fix-login-42"),
+        "path: {}",
+        path.display()
+    );
     assert_eq!(
         repo.git(&path, &["branch", "--show-current"]),
-        "feature/login"
+        "ab/fix-login-42"
     );
 }
 
@@ -249,13 +253,60 @@ fn add_rejects_branch_checked_out_in_main_worktree() {
 #[test]
 fn add_rejects_invalid_branch_name() {
     let repo = TestRepo::new();
-    for bad in ["-oops", "a..b", "a b"] {
+    for bad in ["...", "/foo", "foo//bar"] {
         repo.bonsai(&repo.clone)
             .args(["add", "--", bad])
             .assert()
             .failure()
-            .stderr(predicate::str::contains("invalid branch name"));
+            .stderr(predicate::str::contains("empty after slugifying"));
     }
+}
+
+#[test]
+fn add_fetches_latest_default_branch_by_default() {
+    let repo = TestRepo::new();
+    let publisher = repo.dir.join("publisher");
+    repo.git(
+        &repo.dir,
+        &[
+            "clone",
+            repo.origin.to_str().unwrap(),
+            publisher.to_str().unwrap(),
+        ],
+    );
+    std::fs::write(publisher.join("latest.txt"), "latest\n").unwrap();
+    repo.git(&publisher, &["add", "."]);
+    repo.git(&publisher, &["commit", "-m", "latest"]);
+    repo.git(&publisher, &["push", "origin", "main"]);
+
+    let path = repo.add("feat-latest");
+    assert!(path.join("latest.txt").is_file());
+}
+
+#[test]
+fn add_fetch_can_be_disabled_in_config() {
+    let repo = TestRepo::new();
+    let publisher = repo.dir.join("publisher");
+    repo.git(
+        &repo.dir,
+        &[
+            "clone",
+            repo.origin.to_str().unwrap(),
+            publisher.to_str().unwrap(),
+        ],
+    );
+    std::fs::write(publisher.join("latest.txt"), "latest\n").unwrap();
+    repo.git(&publisher, &["add", "."]);
+    repo.git(&publisher, &["commit", "-m", "latest"]);
+    repo.git(&publisher, &["push", "origin", "main"]);
+    std::fs::write(
+        repo.clone.join(".bonsai.toml"),
+        "[add]\nfetch = false\n",
+    )
+    .unwrap();
+
+    let path = repo.add("feat-stale");
+    assert!(!path.join("latest.txt").exists());
 }
 
 #[test]
@@ -263,7 +314,6 @@ fn add_tracks_remote_only_branch() {
     let repo = TestRepo::new();
     // Publish a branch that exists only on the remote.
     repo.git(&repo.clone, &["push", "origin", "main:remote-feat"]);
-    repo.git(&repo.clone, &["fetch", "origin"]);
     let path = repo.add("remote-feat");
     let upstream = repo.git(
         &path,

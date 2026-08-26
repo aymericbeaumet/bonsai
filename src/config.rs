@@ -63,7 +63,7 @@ pub struct AddConfig {
 impl Default for AddConfig {
     fn default() -> Self {
         Self {
-            fetch: false,
+            fetch: true,
             copy: DEFAULT_COPY.iter().map(|s| s.to_string()).collect(),
             install: true,
             post_add: None,
@@ -254,6 +254,7 @@ mod tests {
             assert_eq!(config.remote.as_deref(), Some("upstream"));
             assert!(!config.clean.fetch);
             assert_eq!(config.add.copy, DEFAULT_COPY);
+            assert!(config.add.fetch);
             assert!(config.add.install);
 
             // Repo config overrides global.

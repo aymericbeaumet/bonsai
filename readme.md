@@ -18,7 +18,7 @@ With [mise](https://mise.jdx.dev) (prebuilt binaries for Linux, macOS, and
 Windows — amd64 and arm64):
 
 ```sh
-mise use -g ubi:aymericbeaumet/bonsai
+mise use -g github:aymericbeaumet/bonsai
 ```
 
 Or build from source:

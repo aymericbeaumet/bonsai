@@ -22,7 +22,7 @@ pub fn run(
         repo.git.interactive(&["fetch", "--prune", &remote])?;
     }
 
-    let branch = match branch {
+    let raw_branch = match branch {
         Some(branch) => branch,
         None => picker::text_with_suggestions(
             "Branch:",
@@ -30,6 +30,7 @@ pub fn run(
             branch_suggestions(&repo, config)?,
         )?,
     };
+    let branch = slugify_branch_input(&raw_branch)?;
     validate_branch_name(&repo.git, &branch)?;
 
     let worktrees = repo.worktrees()?;
@@ -121,6 +122,22 @@ pub fn run(
     crate::workspace::sync_quietly(&repo, config);
 
     Ok(Some(path))
+}
+
+/// Turn a task-like branch input into a stable Git/path slug while keeping
+/// forward slashes as nested branch and directory delimiters.
+fn slugify_branch_input(input: &str) -> Result<String> {
+    input
+        .split('/')
+        .map(|segment| {
+            let slug = slug::slugify(segment);
+            if slug.is_empty() {
+                bail!("branch segment '{segment}' is empty after slugifying '{input}'");
+            }
+            Ok(slug)
+        })
+        .collect::<Result<Vec<_>>>()
+        .map(|segments| segments.join("/"))
 }
 
 /// Branches worth suggesting: locals without a worktree, plus remote branches
@@ -381,5 +398,30 @@ fn run_post_add(config: &Config, branch: &str, path: &std::path::Path) {
             }
         }
         Err(e) => eprintln!("bonsai: post_add hook failed to start: {e}"),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::slugify_branch_input;
+
+    #[test]
+    fn slugifies_branch_segments_without_removing_slashes() {
+        let cases = [
+            ("Fix Parser", "fix-parser"),
+            ("AB/Fix Parser #42", "ab/fix-parser-42"),
+            ("feature/login", "feature/login"),
+            ("Crème brûlée/Über Fix", "creme-brulee/uber-fix"),
+        ];
+        for (input, expected) in cases {
+            assert_eq!(slugify_branch_input(input).unwrap(), expected);
+        }
+    }
+
+    #[test]
+    fn rejects_empty_slug_segments() {
+        for input in ["", "/foo", "foo/", "foo//bar", "foo/💥"] {
+            assert!(slugify_branch_input(input).is_err(), "input: {input:?}");
+        }
     }
 }
