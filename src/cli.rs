@@ -91,14 +91,15 @@ after merging (the GitHub PR flow) — which is why clean fetches with --prune
 first (disable with --no-fetch or [clean] fetch = false).
 
 Never touched: the main checkout, the default branch, locked worktrees,
-dirty worktrees (skipped and reported, even with --yes), branches with
-unpushed commits on a live upstream, and branches matching [clean] protected
-globs. The plan is always printed; without --yes a confirmation
-multi-select opens (terminal only).
+dirty worktrees (skipped and reported, even with --yes/--force), branches
+with unpushed commits on a live upstream, and branches matching [clean]
+protected globs. The plan is always printed; without --yes (alias
+-f/--force) a confirmation multi-select opens (terminal only).
 
 Examples:
   bonsai clean --dry-run        # show what would be removed
-  bonsai clean --yes            # no confirmation (scripts, agents)";
+  bonsai clean --yes            # no confirmation (scripts, agents)
+  bonsai clean -f               # same: --force is an alias of --yes";
 
 const CD_LONG: &str = "\
 Jump to a worktree. With the shell wrapper this cds; without it the target
@@ -239,7 +240,7 @@ pub enum Commands {
         #[arg(long)]
         all: bool,
         /// Do not ask for confirmation
-        #[arg(short = 'y', long)]
+        #[arg(short = 'y', long, visible_short_alias = 'f', visible_alias = "force")]
         yes: bool,
     },
     /// Remove worktrees merged into the default branch (incl. squash-merges)
@@ -249,7 +250,7 @@ pub enum Commands {
         #[arg(short = 'n', long)]
         dry_run: bool,
         /// Do not ask for confirmation (dirty worktrees are still skipped)
-        #[arg(short = 'y', long)]
+        #[arg(short = 'y', long, visible_short_alias = 'f', visible_alias = "force")]
         yes: bool,
         /// Skip the initial fetch --prune
         #[arg(long)]
