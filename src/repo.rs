@@ -204,7 +204,7 @@ pub fn repo_id_from_url(url: &str) -> Option<String> {
     }
     // scp-like syntax (git@github.com:owner/repo.git) has no scheme.
     let rest = if let Some((scheme, rest)) = url.split_once("://") {
-        match scheme {
+        match scheme.to_ascii_lowercase().as_str() {
             "ssh" | "git" | "http" | "https" | "git+ssh" | "ssh+git" => rest,
             _ => return None, // file://, etc: fall back to local id
         }
@@ -225,16 +225,31 @@ pub fn repo_id_from_url(url: &str) -> Option<String> {
 fn finish_repo_id(host: &str, path: &str) -> Option<String> {
     // Strip userinfo, then port.
     let host = host.rsplit_once('@').map_or(host, |(_, h)| h);
-    let host = host.split_once(':').map_or(host, |(h, _)| h);
-    let host = host.to_lowercase();
-    let path = path
-        .trim_matches('/')
-        .trim_end_matches(".git")
-        .trim_end_matches('/');
-    if host.is_empty() || path.is_empty() {
+    // Bracketed IPv6 hosts carry ':', which no directory name can hold
+    // portably: fall back to the local id.
+    if host.starts_with('[') {
         return None;
     }
-    Some(format!("{host}/{path}"))
+    let host = host.split_once(':').map_or(host, |(h, _)| h);
+    let host = host.to_lowercase();
+    // The id becomes filesystem path segments, so normalize defensively:
+    // collapse duplicate slashes, strip a single trailing `.git`, and refuse
+    // anything that could escape or split the per-repo directory.
+    let mut segments: Vec<&str> = path.split('/').filter(|s| !s.is_empty()).collect();
+    if let Some(last) = segments.last_mut() {
+        *last = last.strip_suffix(".git").unwrap_or(last);
+    }
+    segments.retain(|s| !s.is_empty());
+    if segments
+        .iter()
+        .any(|s| *s == "." || *s == ".." || s.contains('\\'))
+    {
+        return None;
+    }
+    if host.is_empty() || host.contains('\\') || segments.is_empty() {
+        return None;
+    }
+    Some(format!("{host}/{}", segments.join("/")))
 }
 
 /// Validate a branch name before it touches the filesystem.
@@ -263,12 +278,16 @@ pub fn dir_collides(path: &Path, worktrees: &[Worktree], branch: &str) -> Option
 mod tests {
     use super::*;
 
+    fn assert_repo_ids(cases: &[(&str, Option<&str>)]) {
+        for (url, expected) in cases {
+            assert_eq!(repo_id_from_url(url).as_deref(), *expected, "url: {url}");
+        }
+    }
+
     #[test]
-    fn repo_id_normalization() {
-        let cases = [
-            (r"C:\Users\me\repo.git", None),
-            ("C:/Users/me/repo.git", None),
-            (r"\\server\share\repo", None),
+    fn repo_id_providers() {
+        assert_repo_ids(&[
+            // GitHub
             (
                 "git@github.com:Owner/Repo.git",
                 Some("github.com/Owner/Repo"),
@@ -279,38 +298,158 @@ mod tests {
                 Some("github.com/Owner/Repo"),
             ),
             (
-                "ssh://git@github.com:22/Owner/Repo.git",
-                Some("github.com/Owner/Repo"),
-            ),
-            (
-                "https://github.com/owner/repo.git/",
+                "https://github.com/owner/repo.git",
                 Some("github.com/owner/repo"),
             ),
+            // Bitbucket
+            (
+                "git@bitbucket.org:team/repo.git",
+                Some("bitbucket.org/team/repo"),
+            ),
+            (
+                "https://user@bitbucket.org/team/repo.git",
+                Some("bitbucket.org/team/repo"),
+            ),
+            // GitLab, including nested groups
+            (
+                "https://gitlab.com/group/subgroup/repo.git",
+                Some("gitlab.com/group/subgroup/repo"),
+            ),
+            (
+                "git@gitlab.com:group/sub/deeper/repo.git",
+                Some("gitlab.com/group/sub/deeper/repo"),
+            ),
+            // Self-hosted, with and without ports
+            (
+                "ssh://git@git.corp.example:2222/team/repo.git",
+                Some("git.corp.example/team/repo"),
+            ),
+            (
+                "http://gitea.local:3000/owner/repo.git",
+                Some("gitea.local/owner/repo"),
+            ),
+            (
+                "git://mirror.internal/owner/repo.git",
+                Some("mirror.internal/owner/repo"),
+            ),
+            // Azure DevOps keeps its `_git`/`v3` path shapes verbatim
+            (
+                "https://dev.azure.com/org/project/_git/repo",
+                Some("dev.azure.com/org/project/_git/repo"),
+            ),
+            (
+                "git@ssh.dev.azure.com:v3/org/project/repo",
+                Some("ssh.dev.azure.com/v3/org/project/repo"),
+            ),
+            // Sourcehut's `~user` owners are valid directory names
+            ("https://git.sr.ht/~user/repo", Some("git.sr.ht/~user/repo")),
+            (
+                "git@codeberg.org:owner/repo.git",
+                Some("codeberg.org/owner/repo"),
+            ),
+        ]);
+    }
+
+    #[test]
+    fn repo_id_schemes() {
+        assert_repo_ids(&[
+            ("git+ssh://git@github.com/o/r", Some("github.com/o/r")),
+            ("ssh+git://git@github.com/o/r", Some("github.com/o/r")),
+            // Schemes match case-insensitively, like git itself
+            ("SSH://git@github.com/o/r", Some("github.com/o/r")),
+            ("Https://github.com/o/r", Some("github.com/o/r")),
+            // Unknown schemes fall back to the local id
+            ("ftp://github.com/o/r", None),
+            ("rsync://github.com/o/r", None),
+            ("file:///home/user/repo", None),
+        ]);
+    }
+
+    #[test]
+    fn repo_id_userinfo_and_ports() {
+        assert_repo_ids(&[
+            // Userinfo is stripped, host is lowercased, path case is kept
             (
                 "https://user:pass@GitHub.com/owner/repo",
                 Some("github.com/owner/repo"),
+            ),
+            ("git@GitHub.com:Owner/Repo", Some("github.com/Owner/Repo")),
+            (
+                "deploy@host.example:apps/repo.git",
+                Some("host.example/apps/repo"),
+            ),
+            // Ports are stripped so ssh:// and scp-like remotes converge
+            (
+                "ssh://git@github.com:22/Owner/Repo.git",
+                Some("github.com/Owner/Repo"),
             ),
             (
                 "http://github.com:8080/owner/repo",
                 Some("github.com/owner/repo"),
             ),
             (
-                "git://github.com/owner/repo.git",
+                "ssh://user:pass@host.example:2222/o/r",
+                Some("host.example/o/r"),
+            ),
+        ]);
+    }
+
+    #[test]
+    fn repo_id_path_normalization() {
+        assert_repo_ids(&[
+            // Trailing slashes and a single `.git` suffix are dropped
+            (
+                "https://github.com/owner/repo.git/",
                 Some("github.com/owner/repo"),
             ),
             (
-                "https://gitlab.com/group/subgroup/repo.git",
-                Some("gitlab.com/group/subgroup/repo"),
+                "git@github.com:/owner/repo.git",
+                Some("github.com/owner/repo"),
             ),
-            ("git+ssh://git@github.com/o/r", Some("github.com/o/r")),
-            ("file:///home/user/repo", None),
+            // `.git` is stripped once, not repeatedly, and case-sensitively
+            (
+                "https://github.com/owner/repo.git.git",
+                Some("github.com/owner/repo.git"),
+            ),
+            (
+                "https://github.com/owner/repo.GIT",
+                Some("github.com/owner/repo.GIT"),
+            ),
+            // Duplicate slashes collapse
+            (
+                "https://github.com/owner//repo",
+                Some("github.com/owner/repo"),
+            ),
+            // Surrounding whitespace is trimmed
+            (
+                "  https://github.com/owner/repo \n",
+                Some("github.com/owner/repo"),
+            ),
+        ]);
+    }
+
+    #[test]
+    fn repo_id_rejects_local_and_unsafe() {
+        assert_repo_ids(&[
+            // Local paths and Windows shapes fall back to the local id
+            (r"C:\Users\me\repo.git", None),
+            ("C:/Users/me/repo.git", None),
+            (r"\\server\share\repo", None),
             ("/home/user/repo", None),
             ("./relative/repo", None),
             ("", None),
+            ("   ", None),
             ("https://github.com/", None),
-        ];
-        for (url, expected) in cases {
-            assert_eq!(repo_id_from_url(url).as_deref(), expected, "url: {url}");
-        }
+            ("https://github.com/.git", None),
+            // The id becomes directory segments: traversal must never survive
+            ("https://evil.example/../../../etc/passwd", None),
+            ("git@host.example:../escape", None),
+            ("https://host.example/owner/..", None),
+            ("https://host.example/./repo", None),
+            (r"https://host.example/owner\repo", None),
+            // Bracketed IPv6 hosts cannot become portable directory names
+            ("ssh://git@[2001:db8::1]/owner/repo", None),
+            ("ssh://[::1]:22/owner/repo", None),
+        ]);
     }
 }
