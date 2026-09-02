@@ -46,7 +46,7 @@ target path, so `cd "$(bonsai add foo)"` composes.
 | `bonsai cd [query]` | Fuzzy-jump between worktrees. Works globally (across all repos) when run outside a repo. |
 | `bonsai workspace` | Refresh and print the repo's `.code-workspace` file: `code "$(bonsai workspace)"`. |
 | `bonsai remove [branch…]` (`rm`) | Remove worktrees (fuzzy multi-pick without arguments). Keeps the branch unless `-d`; `--force` discards uncommitted changes. Safe to run from inside the worktree being removed. |
-| `bonsai clean` | Remove every worktree whose branch is merged into the default branch — including squash-merges and branches whose upstream is gone (the GitHub PR flow). Deletes the branches too. Fetches `--prune` first (`--no-fetch` to skip), always shows the plan, `-n`/`--dry-run`, `-y`/`--yes`. Dirty worktrees are never touched. |
+| `bonsai clean` | Remove every worktree whose branch is merged into the default branch — including squash-merges and branches whose upstream is gone (the GitHub PR flow). Deletes the branches too. Fetches `--prune` first (`--no-fetch` to skip), always shows the plan, `-n`/`--dry-run`, `-y`/`--yes` (alias `-f`/`--force`). Dirty worktrees are never touched. |
 | `bonsai prune` | Clean up stale worktree registrations, orphaned directories, and empty dirs. `--all` sweeps the whole root, including worktrees of repos whose clone was deleted. |
 | `bonsai init <shell>` | Print the shell wrapper (zsh, bash, fish). |
 | `bonsai agents` | Print a usage contract for AI coding agents, ready for `bonsai agents >> AGENTS.md`. |
@@ -137,7 +137,7 @@ shorter usage contract to the cross-harness instructions file.
 **Everything is scriptable**: `path=$(bonsai add feat-x)` prints the worktree
 path and is idempotent; `bonsai list --json` and `bonsai clean --dry-run
 --json` give structured output for a reliable inspect-then-execute loop;
-`clean --yes` / `prune --yes` never prompt; fuzzy pickers only ever appear on
+`clean --yes` / `prune --yes` (alias `-f`/`--force`) never prompt; fuzzy pickers only ever appear on
 a real terminal.
 
 **New worktrees come pre-provisioned**: untracked local config — `.env*`,

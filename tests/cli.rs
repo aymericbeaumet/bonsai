@@ -549,6 +549,39 @@ fn clean_respects_protected_globs() {
 }
 
 #[test]
+fn clean_force_is_an_alias_of_yes() {
+    let repo = TestRepo::new();
+    // A no-commit branch counts as merged, so -f must remove it unprompted.
+    let path = repo.add("feat-forced");
+    repo.bonsai(&repo.clone)
+        .args(["clean", "-f"])
+        .assert()
+        .success();
+    assert!(!path.exists());
+
+    let dirty = repo.add("feat-wip");
+    std::fs::write(dirty.join("wip.txt"), "wip\n").unwrap();
+    repo.bonsai(&repo.clone)
+        .args(["clean", "--force"])
+        .assert()
+        .success()
+        .stderr(predicate::str::contains("skipping 'feat-wip'"));
+    assert!(dirty.exists(), "--force must not touch dirty worktrees");
+}
+
+#[test]
+fn prune_force_is_an_alias_of_yes() {
+    let repo = TestRepo::new();
+    let path = repo.add("feat-gone");
+    std::fs::remove_dir_all(&path).unwrap();
+    repo.bonsai(&repo.clone)
+        .args(["prune", "-f"])
+        .assert()
+        .success();
+    assert!(!repo.worktree_list().contains("feat-gone"));
+}
+
+#[test]
 fn prune_cleans_up_after_manual_deletion() {
     let repo = TestRepo::new();
     let path = repo.add("feat-gone");
