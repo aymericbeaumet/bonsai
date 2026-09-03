@@ -107,7 +107,11 @@ path is printed on stdout. Inside a repo, candidates are that repo's
 worktrees plus its main checkout; outside a repo, every bonsai-managed
 worktree of every repo. An exact branch match wins, then a unique substring
 match; anything ambiguous opens the fuzzy picker pre-filtered with the
-query (terminal only).";
+query (terminal only).
+
+The picker lists worktrees most recently worked-in first, each with a
+last-change age colored by freshness: green = today, yellow = this week,
+dim = older (respects NO_COLOR).";
 
 const INIT_LONG: &str = "\
 Print the shell integration for zsh, bash, or fish. Add to your shell rc:

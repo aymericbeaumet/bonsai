@@ -13,13 +13,38 @@ fn ensure_tty(what: &str) -> Result<()> {
     Ok(())
 }
 
-pub fn select(prompt: &str, options: Vec<String>, initial_filter: Option<&str>) -> Result<String> {
+/// A picker option rendered with ANSI styling while filtering runs on the
+/// plain text, so escape codes never pollute fuzzy matching.
+pub struct StyledOption {
+    pub plain: String,
+    pub styled: String,
+}
+
+impl std::fmt::Display for StyledOption {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(&self.styled)
+    }
+}
+
+/// Like `select`, but returns the picked index and filters on each option's
+/// plain text via inquire's default (fuzzy) scorer.
+pub fn select_styled(
+    prompt: &str,
+    options: Vec<StyledOption>,
+    initial_filter: Option<&str>,
+) -> Result<usize> {
     ensure_tty(prompt)?;
-    let mut select = Select::new(prompt, options);
+    let scorer = |input: &str, option: &StyledOption, _value: &str, idx: usize| {
+        Select::<String>::DEFAULT_SCORER(input, &option.plain, &option.plain, idx)
+    };
+    let mut select = Select::new(prompt, options).with_scorer(&scorer);
     if let Some(filter) = initial_filter {
         select = select.with_starting_filter_input(filter);
     }
-    select.prompt().context("selection cancelled")
+    select
+        .raw_prompt()
+        .map(|picked| picked.index)
+        .context("selection cancelled")
 }
 
 pub fn multi_select_all_checked(prompt: &str, options: Vec<String>) -> Result<Vec<String>> {

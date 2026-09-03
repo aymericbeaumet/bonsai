@@ -43,7 +43,7 @@ target path, so `cd "$(bonsai add foo)"` composes.
 |---|---|
 | `bonsai add [branch]` | Slugify the input (preserving `/` as a nested branch/path delimiter), fetch the remote, then create a worktree under the bonsai root and cd into it. The branch is created from the latest default branch if it doesn't exist, or set up to track its remote counterpart. No argument opens a fuzzy prompt (type a new name to create it). |
 | `bonsai list` (`ls`) | List the current repo's worktrees. `--all` lists every bonsai worktree, `--status` adds a dirty marker. |
-| `bonsai cd [query]` | Fuzzy-jump between worktrees. Works globally (across all repos) when run outside a repo. |
+| `bonsai cd [query]` | Fuzzy-jump between worktrees, listed most recently worked-in first with a color-coded last-change age (green = today, yellow = this week, dim = older). Works globally (across all repos) when run outside a repo. |
 | `bonsai workspace` | Refresh and print the repo's `.code-workspace` file: `code "$(bonsai workspace)"`. |
 | `bonsai remove [branch…]` (`rm`) | Remove worktrees (fuzzy multi-pick without arguments). Keeps the branch unless `-d`; `--force` discards uncommitted changes. Safe to run from inside the worktree being removed. |
 | `bonsai clean` | Remove every worktree whose branch is merged into the default branch — including squash-merges and branches whose upstream is gone (the GitHub PR flow). Deletes the branches too. Fetches `--prune` first (`--no-fetch` to skip), always shows the plan, `-n`/`--dry-run`, `-y`/`--yes` (alias `-f`/`--force`). Dirty worktrees are never touched. |
