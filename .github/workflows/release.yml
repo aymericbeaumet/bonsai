@@ -23,7 +23,7 @@ jobs:
     outputs:
       version: ${{ steps.version.outputs.version }}
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
         with:
           fetch-depth: 0
       - id: version
@@ -60,7 +60,7 @@ jobs:
           - { name: windows-arm64, os: windows-11-arm }
     runs-on: ${{ matrix.os }}
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
       - uses: dtolnay/rust-toolchain@stable
       - uses: Swatinem/rust-cache@v2
       # Stamp the computed version (not committed) so `bonsai --version` reports it.
@@ -79,7 +79,7 @@ jobs:
           else
             tar -C target/release -czf "dist/$ARCHIVE.tar.gz" bonsai
           fi
-      - uses: actions/upload-artifact@v4
+      - uses: actions/upload-artifact@v7
         with:
           name: bonsai-${{ matrix.name }}
           path: dist/*
@@ -89,7 +89,7 @@ jobs:
     needs: [version, build]
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/download-artifact@v4
+      - uses: actions/download-artifact@v8
         with:
           path: dist
           merge-multiple: true

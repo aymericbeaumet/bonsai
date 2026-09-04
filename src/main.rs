@@ -19,6 +19,7 @@ use crate::cli::{Cli, Commands};
 use crate::config::Config;
 
 fn main() {
+    shell::warn_if_stale_integration();
     let cli = Cli::parse();
     match run(cli) {
         Ok(cd_target) => {
@@ -109,6 +110,10 @@ fn run(cli: Cli) -> Result<Option<PathBuf>> {
             json,
         } => commands::clean::run(&config, dry_run, yes, no_fetch, json),
         Commands::Cd { query } => commands::cd::run(&config, query),
+        Commands::Resume { query } => {
+            commands::resume::run(&config, query)?;
+            Ok(None)
+        }
         Commands::Workspace { all } => {
             let file = if all {
                 workspace::sync_global(&config)?

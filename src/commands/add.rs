@@ -4,7 +4,7 @@ use anyhow::{Context, Result, bail};
 
 use crate::config::Config;
 use crate::picker;
-use crate::repo::{Repo, dir_collides, validate_branch_name};
+use crate::repo::{Repo, WorktreeKind, dir_collides, validate_branch_name};
 use crate::worktree::path_for_branch;
 
 pub fn run(
@@ -33,17 +33,22 @@ pub fn run(
     let branch = slugify_branch_input(&raw_branch)?;
     validate_branch_name(&repo.git, &branch)?;
 
-    let worktrees = repo.worktrees()?;
+    let project_worktrees = repo.project_worktrees(config)?;
+    let worktrees = project_worktrees
+        .iter()
+        .map(|entry| entry.worktree.clone())
+        .collect::<Vec<_>>();
     let bonsai_dir = repo.bonsai_dir(config);
 
-    // Idempotent: adding a branch that already has a bonsai worktree just cds
-    // there. A checkout anywhere else (the main worktree, typically) is fatal:
-    // git refuses two checkouts of one branch, and so do we.
-    if let Some(wt) = worktrees
+    // Idempotent: adding a branch that already has a Bonsai worktree just cds
+    // there. A checkout anywhere else is read-only to Bonsai: `add` never
+    // adopts, moves, or creates worktrees outside the configured root.
+    if let Some(entry) = project_worktrees
         .iter()
-        .find(|wt| wt.branch.as_deref() == Some(branch.as_str()))
+        .find(|entry| entry.worktree.branch.as_deref() == Some(branch.as_str()))
     {
-        if wt.path.starts_with(&bonsai_dir) {
+        let wt = &entry.worktree;
+        if entry.kind == WorktreeKind::Managed {
             eprintln!(
                 "bonsai: '{branch}' already has a worktree at {}",
                 wt.path.display()
@@ -61,7 +66,24 @@ pub fn run(
     }
 
     let path = match path_override {
-        Some(p) => std::path::absolute(&p).context("invalid --path")?,
+        Some(p) => {
+            let path = std::path::absolute(&p).context("invalid --path")?;
+            if path
+                .components()
+                .any(|component| component == std::path::Component::ParentDir)
+            {
+                bail!("--path must not contain '..'");
+            }
+            let normalized = crate::paths::canonicalize_lenient(&path);
+            let managed_root = crate::paths::canonicalize_lenient(&bonsai_dir);
+            if !normalized.starts_with(&managed_root) {
+                bail!(
+                    "--path must stay inside this project's Bonsai directory ({})",
+                    bonsai_dir.display()
+                );
+            }
+            path
+        }
         None => path_for_branch(&bonsai_dir, &branch),
     };
     if let Some(other) = dir_collides(&path, &worktrees, &branch) {

@@ -30,21 +30,32 @@ cargo install --git https://github.com/aymericbeaumet/bonsai bonsai-cli
 Then enable the shell integration (auto-cd + completions) in your rc file:
 
 ```sh
-eval "$(bonsai init zsh)"    # or bash
-bonsai init fish | source    # fish
+# zsh — ~/.zshrc
+eval "$(bonsai init zsh)"
+
+# bash — ~/.bashrc
+eval "$(bonsai init bash)"
+
+# fish — ~/.config/fish/config.fish
+bonsai init fish | source
 ```
 
 Without the wrapper everything still works — cd-capable commands print the
 target path, so `cd "$(bonsai add foo)"` composes.
+
+After upgrading Bonsai, an already-running shell may still have an older
+wrapper loaded. The binary detects that mismatch and prints the exact
+`bonsai init` command to re-evaluate it, or you can restart the shell.
 
 ## Commands
 
 | Command | Description |
 |---|---|
 | `bonsai add [branch]` | Slugify the input (preserving `/` as a nested branch/path delimiter), fetch the remote, then create a worktree under the bonsai root and cd into it. The branch is created from the latest default branch if it doesn't exist, or set up to track its remote counterpart. No argument opens a fuzzy prompt (type a new name to create it). |
-| `bonsai list` (`ls`) | List the current repo's worktrees. `--all` lists every bonsai worktree, `--status` adds a dirty marker. |
-| `bonsai cd [query]` | Fuzzy-jump between worktrees, listed most recently worked-in first with a color-coded last-change age (green = today, yellow = this week, dim = older). Works globally (across all repos) when run outside a repo. |
-| `bonsai workspace` | Refresh and print the repo's `.code-workspace` file: `code "$(bonsai workspace)"`. |
+| `bonsai list` (`ls`) | List every Git-registered worktree for the current repo, including external worktrees created by other tools. `--all` lists every Bonsai-managed worktree across projects; `--status` adds a dirty marker. |
+| `bonsai cd [query]` | Fuzzy-jump between registered worktrees, including external ones, listed most recently worked-in first with a color-coded last-change age (green = today, yellow = this week, dim = older). Works globally across Bonsai-managed worktrees when run outside a repo. |
+| `bonsai resume [query]` | Fuzzy-search one recent-first list of resumable top-level Claude Code, Codex, and OpenCode sessions across every registered worktree of the current project, then resume the selected harness in its original directory. |
+| `bonsai workspace` | Refresh and print the repo's `.code-workspace` file, including registered external worktrees: `code "$(bonsai workspace)"`. |
 | `bonsai remove [branch…]` (`rm`) | Remove worktrees (fuzzy multi-pick without arguments). Keeps the branch unless `-d`; `--force` discards uncommitted changes. Safe to run from inside the worktree being removed. |
 | `bonsai clean` | Remove every worktree whose branch is merged into the default branch — including squash-merges and branches whose upstream is gone (the GitHub PR flow). Deletes the branches too. Fetches `--prune` first (`--no-fetch` to skip), always shows the plan, `-n`/`--dry-run`, `-y`/`--yes` (alias `-f`/`--force`). Dirty worktrees are never touched. |
 | `bonsai prune` | Clean up stale worktree registrations, orphaned directories, and empty dirs. `--all` sweeps the whole root, including worktrees of repos whose clone was deleted. |
@@ -61,21 +72,32 @@ it — the confirmation prompt and `--dry-run` are there for a reason.
 
 ## Configuration
 
-Precedence, low to high: defaults < `~/.config/bonsai/config.toml` <
-`<repo>/.bonsai.toml` (checked in, team policy) < `git config bonsai.*`
-(per-clone personal overrides, like `user.email`) < `BONSAI_*` environment
-variables (`__` nests: `BONSAI_CLEAN__FETCH=false`) < CLI flags
-(`--root`, `--remote`).
+For each setting, the first value found in this list wins:
 
-`.bonsai.toml` is read from the worktree you are standing in (your branch's
-version wins), falling back to the main worktree. The git-config layer uses
-the same keys, e.g.:
+1. CLI flags, such as `--root` and `--remote`.
+2. `BONSAI_*` environment variables. Use `__` for nested settings, for
+   example `BONSAI_CLEAN__FETCH=false`.
+3. `git config bonsai.*`. Repository-local values override global Git values.
+4. The project's `.bonsai.toml`.
+5. `$XDG_CONFIG_HOME/bonsai/config.toml`, or
+   `~/.config/bonsai/config.toml` when `XDG_CONFIG_HOME` is unset.
+6. Built-in defaults.
+
+Use `.bonsai.toml` for configuration the team should share. Bonsai first
+looks in the worktree you are currently using, so a branch can test a config
+change before it is merged. If that worktree has no `.bonsai.toml`, Bonsai
+uses the file from the main checkout.
+
+Use `git config bonsai.*` for personal or per-clone overrides without editing
+the shared file:
 
 ```sh
-git config bonsai.root ~/src/worktrees          # this clone only
-git config --global bonsai.clean.fetch false    # everywhere
-git config --add bonsai.add.copy ".env"         # multi-valued
+git config bonsai.root ~/src/worktrees        # this clone only
+git config --global bonsai.clean.fetch false  # all of your clones
+git config --add bonsai.add.copy ".env"       # repeat for list values
 ```
+
+The complete TOML shape, with its defaults and common overrides, is:
 
 ```toml
 root = "~/.bonsai"          # where worktrees live
@@ -114,6 +136,14 @@ New branches are created with `--no-track` (no phantom upstream on
 `origin/main`), so `git push` with `push.autoSetupRemote` does the right
 thing and `bonsai clean` can detect squash-merges reliably.
 
+Worktrees registered with Git but located outside this project's Bonsai
+directory are treated as external. This makes an existing setup from another
+worktree manager immediately usable: `list`, `cd`, `resume`, status checks,
+and the per-project editor workspace include it. External worktrees are
+clearly labelled and remain read-only to Bonsai—`add` will not adopt or move
+one, and `remove`/`clean` never delete one. Even `bonsai add --path` is limited
+to the project's directory under the configured Bonsai root.
+
 ## AI agents (Claude Code, Cursor, Codex, OpenCode, ...)
 
 bonsai is built to work the same across coding harnesses, so switching tools
@@ -146,6 +176,28 @@ a real terminal.
 installed automatically from the lockfile, so whichever harness (or human)
 created the worktree, the others find their setup in place.
 
+## Resume AI sessions
+
+Run `bonsai resume` from any checkout or registered worktree of a project to
+search its resumable top-level Claude Code, Codex, and OpenCode history in one
+picker. The UI shares `bonsai cd`'s keyboard navigation, type-to-filter
+behavior, relative ages, freshness colors, and recent-first ordering. Search
+runs asynchronously as you type; arrow keys and Ctrl-P/N navigate, while
+standard editing keys such as Ctrl-W/A/E/U edit the filter. Session titles,
+providers, IDs, branches, and directories are all searchable. Both pickers
+render inline below the current shell prompt and clear themselves on exit.
+
+```sh
+bonsai resume                 # newest session is selected by default
+bonsai resume parser         # unique matches open; otherwise pre-filter
+bonsai resume <session-id>    # exact IDs resume immediately
+```
+
+The selected harness starts in the session's original directory. If an old
+worktree has been removed, bonsai warns and starts it from the main checkout.
+Standard location overrides are respected: `CLAUDE_CONFIG_DIR`, `CODEX_HOME`,
+`CODEX_SQLITE_HOME`, `XDG_DATA_HOME`, and `OPENCODE_DB`.
+
 ## Desktop editors
 
 The bonsai root is structured so GUI tools get worktrees for free — no
@@ -156,9 +208,10 @@ Windsurf, and every other VS Code derivative): bonsai maintains two
 `.code-workspace` files, kept in sync by add/remove/clean/prune:
 
 - `~/.bonsai/<repo-id>/<repo>.code-workspace` — this repo's main checkout
-  plus every worktree, labelled by branch
+  plus every Git-registered worktree, including external ones
 - `~/.bonsai/bonsai.code-workspace` — every worktree of every repo,
-  labelled `repo · branch`
+  labelled `repo · branch` (Bonsai-managed paths only, because this global
+  view has no current repository from which to discover external worktrees)
 
 Open one and each worktree appears as a root folder in the Explorer's left
 tree, with per-root git status in the Source Control panel. Editors watch
@@ -183,7 +236,8 @@ lists stay readable. Jump from a terminal with `bonsai cd`.
   your system `git`.
 - **zsh/bash/fish**: wrapper + completions via `bonsai init`. The wrapper
   uses a plain `cd`, so `chpwd`-based tools (zoxide, direnv, starship) pick
-  up worktree jumps automatically.
+  up worktree jumps automatically; `resume` bypasses output capture so the
+  selected harness keeps the terminal.
 - **direnv**: `.envrc` files copied by bonsai from your own worktree are
   `direnv allow`ed automatically; tracked ones stay gated by direnv as usual.
 - **package managers** (pnpm, npm, yarn, bun, cargo, uv): new worktrees get
@@ -212,6 +266,8 @@ lists stay readable. Jump from a terminal with `bonsai cd`.
   hash of the repo path when there is no remote. Inputs are slugified per `/`
   segment, and the resulting branch maps to nested directories (`Fix API/Login`
   → branch and directory `fix-api/login`).
+- Git-registered worktrees outside that directory are classified as external
+  and merged into the project's read-only views; Bonsai never creates there.
 - The shell wrapper captures stdout and watches for a sentinel line to cd;
   prompts render on stderr, so fuzzy pickers work even inside `$(...)`.
 

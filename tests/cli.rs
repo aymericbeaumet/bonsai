@@ -50,6 +50,7 @@ impl TestRepo {
             ("HOME", self.dir.clone().into()),
             ("USERPROFILE", self.dir.clone().into()),
             ("XDG_CONFIG_HOME", self.dir.join(".config").into()),
+            ("XDG_DATA_HOME", self.dir.join(".local/share").into()),
             ("GIT_CONFIG_GLOBAL", self.dir.join("gitconfig-empty").into()),
             ("GIT_CONFIG_NOSYSTEM", "1".into()),
             ("GIT_TERMINAL_PROMPT", "0".into()),
@@ -106,6 +107,21 @@ impl TestRepo {
         path
     }
 
+    /// Register a linked worktree outside the configured Bonsai root, as a
+    /// third-party worktree manager would.
+    fn add_external(&self, branch: &str) -> PathBuf {
+        let path = self
+            .dir
+            .join("third-party-worktrees")
+            .join(branch.replace('/', "--"));
+        std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+        self.git(
+            &self.clone,
+            &["worktree", "add", "-b", branch, path.to_str().unwrap()],
+        );
+        canon(&path)
+    }
+
     fn worktree_list(&self) -> String {
         self.git(&self.clone, &["worktree", "list", "--porcelain"])
     }
@@ -155,6 +171,43 @@ impl TestRepo {
 
     fn fake_pm(&self, name: &str) {
         self.fake_pm_with_exit(name, 0);
+    }
+
+    /// A fake interactive harness recording its argv and working directory.
+    fn fake_harness(&self, name: &str) {
+        let dir = self.fake_bin_dir();
+        let args = self.dir.join(format!("{name}-args.txt"));
+        let cwd = self.dir.join(format!("{name}-cwd.txt"));
+        let wrapped = self.dir.join(format!("{name}-wrapped.txt"));
+        if cfg!(windows) {
+            std::fs::write(
+                dir.join(format!("{name}.cmd")),
+                format!(
+                    "@echo %*> \"{}\"\r\n@cd > \"{}\"\r\n@echo %_BONSAI_WRAPPED%> \"{}\"\r\n",
+                    args.display(),
+                    cwd.display(),
+                    wrapped.display()
+                ),
+            )
+            .unwrap();
+        } else {
+            let path = dir.join(name);
+            std::fs::write(
+                &path,
+                format!(
+                    "#!/bin/sh\nprintf '%s' \"$*\" > '{}'\npwd > '{}'\nprintf '%s' \"${{_BONSAI_WRAPPED-unset}}\" > '{}'\n",
+                    args.display(),
+                    cwd.display(),
+                    wrapped.display()
+                ),
+            )
+            .unwrap();
+            #[cfg(unix)]
+            {
+                use std::os::unix::fs::PermissionsExt;
+                std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o755)).unwrap();
+            }
+        }
     }
 
     /// The host PATH with the fake-binary dir prepended (fakes win).
@@ -249,6 +302,21 @@ fn add_rejects_branch_checked_out_in_main_worktree() {
         .assert()
         .failure()
         .stderr(predicate::str::contains("checked out"));
+}
+
+#[test]
+fn add_rejects_paths_outside_the_bonsai_project_directory() {
+    let repo = TestRepo::new();
+    let outside = repo.dir.join("outside-bonsai");
+
+    repo.bonsai(&repo.clone)
+        .args(["add", "feat-outside", "--path", outside.to_str().unwrap()])
+        .assert()
+        .failure()
+        .stderr(predicate::str::contains("must stay inside"));
+
+    assert!(!outside.exists());
+    assert!(!repo.worktree_list().contains("feat-outside"));
 }
 
 #[test]
@@ -353,7 +421,40 @@ fn list_shows_main_and_bonsai_worktrees() {
         .arg("list")
         .assert()
         .success()
-        .stdout(predicate::str::contains("main").and(predicate::str::contains("feat-l")));
+        .stdout(
+            predicate::str::contains("main")
+                .and(predicate::str::contains("main (root)"))
+                .and(predicate::str::contains("feat-l")),
+        );
+}
+
+#[test]
+fn list_aligns_branch_and_directory_columns() {
+    let repo = TestRepo::new();
+    let short = repo.add("x");
+    let long = repo.add("feature/a-much-longer-branch");
+    let output = repo.bonsai(&repo.clone).arg("ls").output().unwrap();
+    assert!(output.status.success());
+    let output = String::from_utf8(output.stdout).unwrap();
+
+    let rows = [
+        ("main (root)", repo.clone.as_path()),
+        ("x", short.as_path()),
+        ("feature/a-much-longer-branch", long.as_path()),
+    ];
+    let directory_columns = rows.map(|(branch, path)| {
+        let line = output
+            .lines()
+            .find(|line| line.starts_with(branch))
+            .unwrap();
+        line.find(path.to_str().unwrap()).unwrap()
+    });
+    assert!(
+        directory_columns
+            .iter()
+            .all(|column| *column == directory_columns[0]),
+        "directory columns are not aligned:\n{output}"
+    );
 }
 
 #[test]
@@ -395,6 +496,78 @@ fn cd_resolves_exact_branch_to_path() {
 }
 
 #[test]
+fn external_worktrees_are_visible_but_not_bonsai_owned() {
+    let repo = TestRepo::new();
+    let external = repo.add_external("feat-external");
+
+    let output = repo
+        .bonsai(&external)
+        .args(["cd", "feat-external"])
+        .output()
+        .unwrap();
+    assert!(output.status.success());
+    assert_eq!(
+        PathBuf::from(String::from_utf8_lossy(&output.stdout).trim()),
+        external
+    );
+
+    let output = repo
+        .bonsai(&external)
+        .args(["list", "--json"])
+        .output()
+        .unwrap();
+    assert!(output.status.success());
+    let entries: serde_json::Value = serde_json::from_slice(&output.stdout).unwrap();
+    let entries = entries.as_array().unwrap();
+    assert_eq!(
+        entries.iter().filter(|entry| entry["main"] == true).count(),
+        1
+    );
+    let entry = entries
+        .iter()
+        .find(|entry| entry["branch"] == "feat-external")
+        .unwrap();
+    assert_eq!(entry["main"], false);
+    assert_eq!(entry["external"], true);
+
+    // Creation/adoption remains exclusive to the configured Bonsai root.
+    repo.bonsai(&external)
+        .args(["add", "feat-external"])
+        .assert()
+        .failure()
+        .stderr(predicate::str::contains("checked out at"));
+
+    // Destructive lifecycle commands continue to target managed worktrees.
+    repo.bonsai(&external)
+        .args(["remove", "feat-external"])
+        .assert()
+        .failure();
+    assert!(external.is_dir());
+}
+
+#[test]
+fn workspace_includes_external_worktrees_without_managed_ones() {
+    let repo = TestRepo::new();
+    let external = repo.add_external("feat-external-workspace");
+
+    let output = repo.bonsai(&repo.clone).arg("workspace").output().unwrap();
+    assert!(output.status.success());
+    let file = PathBuf::from(String::from_utf8_lossy(&output.stdout).trim());
+    let workspace: serde_json::Value =
+        serde_json::from_str(&std::fs::read_to_string(file).unwrap()).unwrap();
+    let folders = workspace["folders"].as_array().unwrap();
+    assert_eq!(folders.len(), 2);
+    let external_folder = folders
+        .iter()
+        .find(|folder| folder["name"] == "feat-external-workspace (external)")
+        .unwrap();
+    assert_eq!(
+        PathBuf::from(external_folder["path"].as_str().unwrap()),
+        external
+    );
+}
+
+#[test]
 fn cd_works_globally_outside_any_repo() {
     let repo = TestRepo::new();
     let path = repo.add("feat-global");
@@ -407,6 +580,235 @@ fn cd_works_globally_outside_any_repo() {
     assert_eq!(
         PathBuf::from(String::from_utf8_lossy(&output.stdout).trim()),
         path
+    );
+}
+
+#[test]
+fn resume_exact_claude_session_runs_in_its_worktree() {
+    let repo = TestRepo::new();
+    let worktree = repo.add("feat-resume");
+    let key: String = worktree
+        .to_string_lossy()
+        .chars()
+        .map(|c| if c.is_ascii_alphanumeric() { c } else { '-' })
+        .collect();
+    let sessions = repo.dir.join(".claude/projects").join(key);
+    std::fs::create_dir_all(&sessions).unwrap();
+    let id = "5f674c63-05f9-48af-9330-4cdd94b31d15";
+    let event = serde_json::json!({
+        "type": "user",
+        "sessionId": id,
+        "cwd": worktree,
+        "gitBranch": "feat-resume",
+        "message": { "role": "user", "content": "Resume the parser work" }
+    });
+    std::fs::write(sessions.join(format!("{id}.jsonl")), format!("{event}\n")).unwrap();
+    repo.fake_harness("claude");
+
+    repo.bonsai(&worktree)
+        .env("PATH", repo.path_with_fakebin())
+        .args(["resume", id])
+        .assert()
+        .success();
+
+    assert_eq!(
+        std::fs::read_to_string(repo.dir.join("claude-args.txt"))
+            .unwrap()
+            .trim(),
+        format!("--resume {id}")
+    );
+    assert_eq!(
+        PathBuf::from(
+            std::fs::read_to_string(repo.dir.join("claude-cwd.txt"))
+                .unwrap()
+                .trim()
+        ),
+        worktree
+    );
+}
+
+#[test]
+fn resume_finds_sessions_in_external_worktrees() {
+    let repo = TestRepo::new();
+    let worktree = repo.add_external("feat-external-resume");
+    let key: String = worktree
+        .to_string_lossy()
+        .chars()
+        .map(|c| if c.is_ascii_alphanumeric() { c } else { '-' })
+        .collect();
+    let sessions = repo.dir.join(".claude/projects").join(key);
+    std::fs::create_dir_all(&sessions).unwrap();
+    let id = "8edac90c-8cc0-40f3-9229-571dd359bc9b";
+    let event = serde_json::json!({
+        "type": "user",
+        "sessionId": id,
+        "cwd": worktree,
+        "gitBranch": "feat-external-resume",
+        "message": { "role": "user", "content": "Continue external work" }
+    });
+    std::fs::write(sessions.join(format!("{id}.jsonl")), format!("{event}\n")).unwrap();
+    repo.fake_harness("claude");
+
+    repo.bonsai(&worktree)
+        .env("PATH", repo.path_with_fakebin())
+        .args(["resume", id])
+        .assert()
+        .success();
+
+    assert_eq!(
+        PathBuf::from(
+            std::fs::read_to_string(repo.dir.join("claude-cwd.txt"))
+                .unwrap()
+                .trim()
+        ),
+        worktree
+    );
+}
+
+#[test]
+fn resume_ignores_sessions_from_other_projects() {
+    let repo = TestRepo::new();
+    let sessions = repo.dir.join(".claude/projects/other");
+    std::fs::create_dir_all(&sessions).unwrap();
+    let event = serde_json::json!({
+        "type": "user",
+        "sessionId": "93a5a661-943d-481c-ac37-90a4ce41773c",
+        "cwd": repo.dir.join("unrelated"),
+        "message": { "role": "user", "content": "Unrelated work" }
+    });
+    std::fs::write(sessions.join("unrelated.jsonl"), format!("{event}\n")).unwrap();
+
+    repo.bonsai(&repo.clone)
+        .arg("resume")
+        .assert()
+        .failure()
+        .stderr(predicate::str::contains("no sessions found"));
+}
+
+#[test]
+fn resume_exact_codex_session_runs_in_its_worktree() {
+    let repo = TestRepo::new();
+    let worktree = repo.add("feat-codex-resume");
+    let codex = repo.dir.join(".codex");
+    std::fs::create_dir_all(&codex).unwrap();
+    let database = rusqlite::Connection::open(codex.join("state_5.sqlite")).unwrap();
+    let schema = "CREATE TABLE threads (
+            id TEXT PRIMARY KEY,
+            cwd TEXT NOT NULL,
+            name TEXT,
+            title TEXT NOT NULL,
+            preview TEXT NOT NULL,
+            updated_at_ms INTEGER,
+            git_branch TEXT,
+            source TEXT NOT NULL,
+            archived INTEGER NOT NULL
+        );";
+    database.execute_batch(schema).unwrap();
+    // A newer but empty compatible state DB must not hide older sessions.
+    rusqlite::Connection::open(codex.join("state_6.sqlite"))
+        .unwrap()
+        .execute_batch(schema)
+        .unwrap();
+    let id = "019a06bd-2888-7781-a54d-ad997a836dbe";
+    database
+        .execute(
+            "INSERT INTO threads VALUES (?1, ?2, NULL, ?3, ?4, ?5, ?6, 'cli', 0)",
+            rusqlite::params![
+                id,
+                worktree.to_string_lossy(),
+                "Codex parser work",
+                "Latest parser prompt",
+                1_788_510_000_000_i64,
+                "feat-codex-resume"
+            ],
+        )
+        .unwrap();
+    drop(database);
+    repo.fake_harness("codex");
+
+    repo.bonsai(&repo.clone)
+        .env("PATH", repo.path_with_fakebin())
+        .args(["resume", id])
+        .assert()
+        .success();
+
+    assert_eq!(
+        std::fs::read_to_string(repo.dir.join("codex-args.txt"))
+            .unwrap()
+            .trim(),
+        format!("resume {id}")
+    );
+    assert_eq!(
+        PathBuf::from(
+            std::fs::read_to_string(repo.dir.join("codex-cwd.txt"))
+                .unwrap()
+                .trim()
+        ),
+        worktree
+    );
+}
+
+#[test]
+fn resume_exact_opencode_session_runs_in_its_worktree() {
+    let repo = TestRepo::new();
+    let worktree = repo.add("feat-opencode-resume");
+    let opencode = repo.dir.join(".local/share/opencode");
+    std::fs::create_dir_all(&opencode).unwrap();
+    let database = rusqlite::Connection::open(opencode.join("opencode.db")).unwrap();
+    database
+        .execute_batch(
+            "CREATE TABLE project (id TEXT PRIMARY KEY, worktree TEXT NOT NULL);
+             CREATE TABLE session (
+                id TEXT PRIMARY KEY,
+                project_id TEXT NOT NULL,
+                parent_id TEXT,
+                directory TEXT NOT NULL,
+                title TEXT NOT NULL,
+                time_updated INTEGER NOT NULL,
+                time_archived INTEGER
+             );",
+        )
+        .unwrap();
+    database
+        .execute(
+            "INSERT INTO project VALUES ('project', ?1)",
+            rusqlite::params![repo.clone.to_string_lossy()],
+        )
+        .unwrap();
+    let id = "ses_53a1e3d19ffeQcBwf5QsSBgLpo";
+    database
+        .execute(
+            "INSERT INTO session VALUES (?1, 'project', NULL, ?2, ?3, ?4, NULL)",
+            rusqlite::params![
+                id,
+                worktree.to_string_lossy(),
+                "OpenCode renderer work",
+                1_788_520_000_000_i64
+            ],
+        )
+        .unwrap();
+    drop(database);
+    repo.fake_harness("opencode");
+
+    repo.bonsai(&repo.clone)
+        .env("PATH", repo.path_with_fakebin())
+        .args(["resume", id])
+        .assert()
+        .success();
+
+    assert_eq!(
+        std::fs::read_to_string(repo.dir.join("opencode-args.txt"))
+            .unwrap()
+            .trim(),
+        format!("--session {id}")
+    );
+    assert_eq!(
+        PathBuf::from(
+            std::fs::read_to_string(repo.dir.join("opencode-cwd.txt"))
+                .unwrap()
+                .trim()
+        ),
+        worktree
     );
 }
 
@@ -787,6 +1189,25 @@ fn init_scripts_are_valid_shell() {
             .output()
             .unwrap();
         assert!(output.status.success());
+        let generated = String::from_utf8_lossy(&output.stdout);
+        assert!(generated.contains("resume"));
+        assert!(generated.contains("command bonsai"));
+        assert!(
+            generated.matches("_BONSAI_WRAPPER_VERSION=").count() >= 2,
+            "{shell} wrapper must stamp captured and direct-resume invocations"
+        );
+        assert!(
+            generated.matches("_BONSAI_WRAPPER_ACTIVE=1").count() >= 2,
+            "{shell} wrapper must identify captured and direct-resume invocations"
+        );
+        assert!(
+            generated.contains(&format!("_BONSAI_WRAPPER_SHELL='{shell}'")),
+            "{shell} wrapper must identify its shell"
+        );
+        assert!(
+            generated.contains(&format!("'{}'", env!("CARGO_PKG_VERSION"))),
+            "{shell} wrapper must carry the generating binary version"
+        );
         let script = repo.dir.join(format!("init.{shell}"));
         std::fs::write(&script, &output.stdout).unwrap();
         let Ok(check) = StdCommand::new(shell_path)
@@ -801,6 +1222,135 @@ fn init_scripts_are_valid_shell() {
             check.status.success(),
             "{shell} rejected init script: {}",
             String::from_utf8_lossy(&check.stderr)
+        );
+    }
+}
+
+#[test]
+fn stale_shell_integration_warns_with_shell_specific_refresh_command() {
+    let repo = TestRepo::new();
+    for (shell, refresh) in [
+        ("zsh", "eval \"$(bonsai init zsh)\""),
+        ("bash", "eval \"$(bonsai init bash)\""),
+        ("fish", "bonsai init fish | source"),
+    ] {
+        repo.bonsai(&repo.clone)
+            .env("_BONSAI_WRAPPED", "1")
+            .env("_BONSAI_WRAPPER_VERSION", "0.0.0-stale")
+            .env("_BONSAI_WRAPPER_SHELL", shell)
+            .arg("list")
+            .assert()
+            .success()
+            .stderr(
+                predicate::str::contains("shell integration is out of sync")
+                    .and(predicate::str::contains(refresh))
+                    .and(predicate::str::contains("restart your shell")),
+            );
+    }
+
+    repo.bonsai(&repo.clone)
+        .env_remove("_BONSAI_WRAPPED")
+        .env("_BONSAI_WRAPPER_ACTIVE", "1")
+        .env("_BONSAI_WRAPPER_VERSION", "0.0.0-stale")
+        .env("_BONSAI_WRAPPER_SHELL", "zsh")
+        .arg("list")
+        .assert()
+        .success()
+        .stderr(
+            predicate::str::contains("shell integration is out of sync")
+                .and(predicate::str::contains("eval \"$(bonsai init zsh)\"")),
+        );
+}
+
+#[test]
+fn pre_stamp_shell_integration_is_detected_from_the_shell_environment() {
+    let repo = TestRepo::new();
+    repo.bonsai(&repo.clone)
+        .env("_BONSAI_WRAPPED", "1")
+        .env_remove("_BONSAI_WRAPPER_VERSION")
+        .env_remove("_BONSAI_WRAPPER_SHELL")
+        .env("SHELL", "/bin/zsh")
+        .arg("list")
+        .assert()
+        .success()
+        .stderr(
+            predicate::str::contains("shell integration is out of sync")
+                .and(predicate::str::contains("eval \"$(bonsai init zsh)\"")),
+        );
+}
+
+#[test]
+fn current_shell_integration_and_direct_binary_use_stay_quiet() {
+    let repo = TestRepo::new();
+    repo.bonsai(&repo.clone)
+        .env("_BONSAI_WRAPPED", "1")
+        .env("_BONSAI_WRAPPER_VERSION", env!("CARGO_PKG_VERSION"))
+        .env("_BONSAI_WRAPPER_SHELL", "zsh")
+        .arg("list")
+        .assert()
+        .success()
+        .stderr(predicate::str::is_empty());
+
+    repo.bonsai(&repo.clone)
+        .env("_BONSAI_WRAPPER_VERSION", "0.0.0-stale")
+        .env("_BONSAI_WRAPPER_SHELL", "zsh")
+        .arg("list")
+        .assert()
+        .success()
+        .stderr(predicate::str::is_empty());
+}
+
+#[cfg(unix)]
+#[test]
+fn shell_wrappers_leave_resume_stdio_uncaptured_with_global_options() {
+    let repo = TestRepo::new();
+    repo.fake_harness("bonsai");
+    for shell in ["zsh", "bash", "fish"] {
+        let Ok(shell_path) = which(shell) else {
+            eprintln!("skipping {shell}: not installed");
+            continue;
+        };
+        let generated = repo
+            .bonsai(&repo.dir)
+            .args(["init", shell])
+            .output()
+            .unwrap();
+        assert!(generated.status.success());
+        let script = repo.dir.join(format!("resume-wrapper.{shell}"));
+        std::fs::write(&script, generated.stdout).unwrap();
+        let mut command = StdCommand::new(shell_path);
+        command
+            .envs(repo.env_vars())
+            .env("PATH", repo.path_with_fakebin())
+            .current_dir(&repo.dir);
+        if shell == "fish" {
+            command.args([
+                "-c",
+                "source \"$argv[1]\"; bonsai --root \"$argv[2]\" resume session-id",
+                script.to_str().unwrap(),
+                repo.root.to_str().unwrap(),
+            ]);
+        } else {
+            command.args([
+                "-c",
+                "source \"$1\"; bonsai --root \"$2\" resume session-id",
+                "_",
+                script.to_str().unwrap(),
+                repo.root.to_str().unwrap(),
+            ]);
+        }
+        let output = command.output().unwrap();
+        assert!(
+            output.status.success(),
+            "{shell} failed: {}",
+            String::from_utf8_lossy(&output.stderr)
+        );
+        assert_eq!(
+            std::fs::read_to_string(repo.dir.join("bonsai-wrapped.txt"))
+                .unwrap()
+                .trim(),
+            "unset",
+            "{shell} wrapper captured resume stdout"
         );
     }
 }
@@ -1168,7 +1718,7 @@ fn workspace_file_tracks_worktrees() {
         .iter()
         .map(|f| f["name"].as_str().unwrap())
         .collect();
-    assert!(names[0].ends_with("(main)"), "names: {names:?}");
+    assert_eq!(names[0], "main (root)", "names: {names:?}");
     assert!(names.contains(&"feat-ws-a"));
     assert!(names.contains(&"feature/ws-b"));
 

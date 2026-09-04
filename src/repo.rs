@@ -7,6 +7,41 @@ use crate::config::Config;
 use crate::git::Git;
 use crate::worktree::Worktree;
 
+/// How a registered worktree relates to this Bonsai project.
+///
+/// Git is the source of truth for the inventory. In particular, `External`
+/// worktrees may have been created by another tool and remain visible to
+/// navigation and session commands without becoming Bonsai-owned.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum WorktreeKind {
+    Main,
+    Managed,
+    External,
+}
+
+impl WorktreeKind {
+    pub fn label(self, branch: Option<&str>) -> String {
+        let branch = branch.unwrap_or("(detached)");
+        match self {
+            Self::Main => format!("{branch} (root)"),
+            Self::Managed => branch.to_string(),
+            Self::External => format!("{branch} (external)"),
+        }
+    }
+}
+
+#[derive(Clone, Debug)]
+pub struct ProjectWorktree {
+    pub worktree: Worktree,
+    pub kind: WorktreeKind,
+}
+
+impl ProjectWorktree {
+    pub fn label(&self) -> String {
+        self.kind.label(self.worktree.branch.as_deref())
+    }
+}
+
 /// The repository the current directory belongs to. All operations are
 /// anchored on the main worktree, so bonsai behaves identically whether run
 /// from the original clone or from any of its linked worktrees.
@@ -47,13 +82,35 @@ impl Repo {
         Ok(Worktree::parse_list(&bytes))
     }
 
-    /// Worktrees managed by bonsai: the ones living under our repo dir.
-    pub fn bonsai_worktrees(&self, config: &Config) -> Result<Vec<Worktree>> {
-        let dir = self.bonsai_dir(config);
+    /// Every worktree registered with Git, classified once for consistent
+    /// use by navigation, session discovery, listings, and editor workspaces.
+    pub fn project_worktrees(&self, config: &Config) -> Result<Vec<ProjectWorktree>> {
+        let main_root = crate::paths::canonicalize_or_self(&self.main_root);
+        let bonsai_dir = crate::paths::canonicalize_or_self(&self.bonsai_dir(config));
         Ok(self
             .worktrees()?
             .into_iter()
-            .filter(|wt| wt.path.starts_with(&dir))
+            .map(|worktree| {
+                let path = crate::paths::canonicalize_or_self(&worktree.path);
+                let kind = if path == main_root {
+                    WorktreeKind::Main
+                } else if path.starts_with(&bonsai_dir) {
+                    WorktreeKind::Managed
+                } else {
+                    WorktreeKind::External
+                };
+                ProjectWorktree { worktree, kind }
+            })
+            .collect())
+    }
+
+    /// Worktrees managed by bonsai: the ones living under our repo dir.
+    pub fn bonsai_worktrees(&self, config: &Config) -> Result<Vec<Worktree>> {
+        Ok(self
+            .project_worktrees(config)?
+            .into_iter()
+            .filter(|entry| entry.kind == WorktreeKind::Managed)
+            .map(|entry| entry.worktree)
             .collect())
     }
 
@@ -277,6 +334,16 @@ pub fn dir_collides(path: &Path, worktrees: &[Worktree], branch: &str) -> Option
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn worktree_labels_use_the_checked_out_branch() {
+        assert_eq!(WorktreeKind::Main.label(Some("trunk")), "trunk (root)");
+        assert_eq!(
+            WorktreeKind::External.label(Some("feature/parser")),
+            "feature/parser (external)"
+        );
+        assert_eq!(WorktreeKind::Managed.label(Some("fix")), "fix");
+    }
 
     fn assert_repo_ids(cases: &[(&str, Option<&str>)]) {
         for (url, expected) in cases {

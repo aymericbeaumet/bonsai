@@ -31,6 +31,7 @@ The branch input is slugified segment-by-segment (`Fix API/Login` becomes
 
 Branch resolution, in order:
   - already checked out in a bonsai worktree: reuse it (idempotent)
+  - checked out in an external worktree: refuse it (external paths are read-only)
   - exists locally: check it out in the new worktree
   - exists on the remote: create a local branch tracking it
   - otherwise: create it from --base, or from the default branch
@@ -57,11 +58,13 @@ Examples:
   cd \"$(bonsai add fix-parser)\"        # without the shell wrapper";
 
 const LIST_LONG: &str = "\
-List worktrees of the current repo, one per line, tab-separated:
-<branch>\\t<path>\\t<flags>. Flags: main, locked, prunable, dirty (with
---status). The main checkout is listed first. With --all, list every
-bonsai-managed worktree across all repos (works outside a repo). --json
-outputs an array of {branch, path, main, locked, prunable, dirty?} instead.";
+List worktrees of the current repo, one per line, in tab-aligned columns:
+<branch>  <path>  <flags>. Root and external worktrees are labelled
+`<branch> (root)` and `<branch> (external)`. Flags: locked, prunable, dirty
+(with --status). The main checkout is listed first. With
+--all, list every Bonsai-managed worktree across all repos (works outside a
+repo). --json outputs an array of
+{branch, path, main, external, locked, prunable, dirty?} instead.";
 
 const REMOVE_LONG: &str = "\
 Remove the worktrees of the given branches. Without arguments, opens a fuzzy
@@ -104,14 +107,37 @@ Examples:
 const CD_LONG: &str = "\
 Jump to a worktree. With the shell wrapper this cds; without it the target
 path is printed on stdout. Inside a repo, candidates are that repo's
-worktrees plus its main checkout; outside a repo, every bonsai-managed
-worktree of every repo. An exact branch match wins, then a unique substring
-match; anything ambiguous opens the fuzzy picker pre-filtered with the
-query (terminal only).
+Git-registered worktrees—including external worktrees created by other
+tools—plus its main checkout. Outside a repo, candidates are every
+Bonsai-managed worktree of every repo. An exact branch match wins, then a
+unique substring match; anything ambiguous opens the fuzzy picker
+pre-filtered with the query (terminal only).
 
 The picker lists worktrees most recently worked-in first, each with a
 last-change age colored by freshness: green = today, yellow = this week,
-dim = older (respects NO_COLOR).";
+dim = older (respects NO_COLOR). It renders inline below the current prompt
+and clears on exit. Filtering is asynchronous. Arrow keys and Ctrl-P/N
+navigate; Ctrl-W/A/E/U and the usual cursor keys edit the query.";
+
+const RESUME_LONG: &str = "\
+Resume an AI coding session from any Git-registered worktree of the current
+project, including external worktrees created by other tools. Bonsai combines
+every resumable top-level Claude Code, Codex, and OpenCode session into one
+fuzzy picker, ordered by the time each session was last used. Rows share
+`bonsai cd`'s compact relative ages, freshness colors, navigation, and query
+editing keys. The picker renders inline below the current prompt and clears
+on exit.
+
+The picker searches provider, title, worktree/directory, and session ID. An
+exact session ID or a unique substring skips the picker; otherwise QUERY is
+used as its starting filter. The selected harness opens in the session's
+original directory, or the main checkout if that historical worktree no
+longer exists.
+
+Session stores are read from the harnesses' standard locations, respecting
+CLAUDE_CONFIG_DIR, CODEX_HOME, CODEX_SQLITE_HOME, XDG_DATA_HOME, and
+OPENCODE_DB. Run this command inside any worktree of the project whose
+sessions you want to search.";
 
 const INIT_LONG: &str = "\
 Print the shell integration for zsh, bash, or fish. Add to your shell rc:
@@ -138,14 +164,17 @@ Cursor, Windsurf, and other derivatives, no extension required. Editors
 watch the file, so the left tree updates live as bonsai adds and removes
 worktrees.
 
-  <root>/<repo-id>/<repo>.code-workspace   per repo: main checkout + worktrees
-  <root>/bonsai.code-workspace             global: every worktree, every repo
+  <root>/<repo-id>/<repo>.code-workspace   per repo: all registered worktrees
+  <root>/bonsai.code-workspace             global: Bonsai-managed worktrees
 
 Both are kept up to date by add/remove/clean/prune (disable with
 `workspace = false`). This command refreshes one and prints its path:
 
   code \"$(bonsai workspace)\"          # this repo's worktrees
   cursor \"$(bonsai workspace --all)\"  # everything under the bonsai root
+
+The per-repo file includes external worktrees registered by other tools. The
+global file cannot discover those paths without a current repo context.
 
 Claude Code and Codex desktop open plain folders: point them at a worktree
 directory (<root>/<repo-id>/<branch>) or use `bonsai cd`.";
@@ -207,7 +236,8 @@ pub enum Commands {
         /// Fetch even when [add] fetch = false
         #[arg(long)]
         fetch: bool,
-        /// Override the worktree path (escape hatch for path collisions)
+        /// Override the worktree path inside this project's Bonsai directory
+        /// (escape hatch for path collisions)
         #[arg(long, value_name = "DIR")]
         path: Option<PathBuf>,
     },
@@ -267,6 +297,12 @@ pub enum Commands {
     #[command(long_about = CD_LONG)]
     Cd {
         /// Branch name or fuzzy query; prints the path without the wrapper
+        query: Option<String>,
+    },
+    /// Resume a Claude Code, Codex, or OpenCode session from this project
+    #[command(long_about = RESUME_LONG)]
+    Resume {
+        /// Session ID or fuzzy query across provider, title, and worktree
         query: Option<String>,
     },
     /// Print the repo's .code-workspace file path (refreshing it first)
