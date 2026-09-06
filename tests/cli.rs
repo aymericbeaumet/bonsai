@@ -442,12 +442,15 @@ fn list_aligns_branch_and_directory_columns() {
         ("x", short.as_path()),
         ("feature/a-much-longer-branch", long.as_path()),
     ];
-    let directory_columns = rows.map(|(branch, path)| {
+    let directory_columns = rows.map(|(branch, _path)| {
         let line = output
             .lines()
             .find(|line| line.starts_with(branch))
             .unwrap();
-        line.find(path.to_str().unwrap()).unwrap()
+        branch.len()
+            + line[branch.len()..]
+                .find(|character: char| !character.is_whitespace())
+                .unwrap()
     });
     assert!(
         directory_columns
