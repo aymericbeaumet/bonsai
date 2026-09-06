@@ -4,10 +4,10 @@ use std::time::SystemTime;
 use anyhow::{Result, bail};
 
 use crate::config::Config;
-use crate::git::Git;
+use crate::parallel;
 use crate::picker;
 use crate::repo::Repo;
-use crate::worktree::{find_worktree_dirs, last_activity};
+use crate::worktree::{current_branch, find_worktree_dirs, last_activity};
 
 struct Candidate {
     label: String,
@@ -69,25 +69,21 @@ fn candidates(config: &Config) -> Result<Vec<Candidate>> {
         return Ok(out);
     }
     let root = config.root_dir();
-    let mut out = Vec::new();
-    for path in find_worktree_dirs(&root) {
-        let rel = path.strip_prefix(&root).unwrap_or(&path);
-        let branch = Git::at(&path)
-            .out(&["branch", "--show-current"])
-            .ok()
-            .filter(|b| !b.is_empty());
+    let paths = find_worktree_dirs(&root);
+    Ok(parallel::map_ordered(&paths, |path| {
+        let rel = path.strip_prefix(&root).unwrap_or(path);
+        let branch = current_branch(path);
         let label = match &branch {
             Some(b) => format!("{} \u{2192} {b}", rel.display()),
             None => rel.display().to_string(),
         };
-        out.push(Candidate {
+        Candidate {
             label,
             branch,
-            last_change: last_activity(&path),
-            path,
-        });
-    }
-    Ok(out)
+            last_change: last_activity(path),
+            path: path.clone(),
+        }
+    }))
 }
 
 fn styled_options(candidates: &[Candidate]) -> Vec<picker::StyledOption> {

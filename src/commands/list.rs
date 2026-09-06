@@ -7,8 +7,9 @@ use tabwriter::TabWriter;
 
 use crate::config::Config;
 use crate::git::Git;
+use crate::parallel;
 use crate::repo::{Repo, WorktreeKind};
-use crate::worktree::{find_worktree_dirs, repo_id_of};
+use crate::worktree::{current_branch, find_worktree_dirs, repo_id_of};
 
 #[derive(Serialize)]
 struct Entry {
@@ -75,49 +76,50 @@ pub fn run(config: &Config, all: bool, status: bool, json: bool) -> Result<()> {
 fn repo_entries(config: &Config, status: bool) -> Result<Vec<Entry>> {
     let repo = Repo::require()?;
     let id = repo.id(config);
-    let mut entries = Vec::new();
-    for project_worktree in repo.project_worktrees(config)? {
+    let worktrees = repo
+        .project_worktrees(config)?
+        .into_iter()
+        .filter(|entry| !entry.worktree.is_bare)
+        .collect::<Vec<_>>();
+    let make_entry = |project_worktree: &crate::repo::ProjectWorktree| {
         let kind = project_worktree.kind;
-        let wt = project_worktree.worktree;
-        if wt.is_bare {
-            continue;
-        }
-        entries.push(Entry {
+        let wt = &project_worktree.worktree;
+        Entry {
             main: kind == WorktreeKind::Main,
             external: kind == WorktreeKind::External,
             dirty: status.then(|| is_dirty(&wt.path)),
             repo: Some(id.clone()),
-            branch: wt.branch,
-            path: wt.path,
+            branch: wt.branch.clone(),
+            path: wt.path.clone(),
             locked: wt.is_locked,
             prunable: wt.is_prunable,
-        });
+        }
+    };
+    if status {
+        Ok(parallel::map_ordered(&worktrees, make_entry))
+    } else {
+        Ok(worktrees.iter().map(make_entry).collect())
     }
-    Ok(entries)
 }
 
 /// Global listing scans the bonsai root on disk (there is no repo context to
 /// ask git from); branch names are read from each checkout.
 fn global_entries(config: &Config, status: bool) -> Result<Vec<Entry>> {
     let root = config.root_dir();
-    let mut entries = Vec::new();
-    for path in find_worktree_dirs(&root) {
-        let branch = Git::at(&path)
-            .out(&["branch", "--show-current"])
-            .ok()
-            .filter(|b| !b.is_empty());
-        entries.push(Entry {
-            repo: repo_id_of(&root, &path, branch.as_deref()),
+    let paths = find_worktree_dirs(&root);
+    Ok(parallel::map_ordered(&paths, |path| {
+        let branch = current_branch(path);
+        Entry {
+            repo: repo_id_of(&root, path, branch.as_deref()),
             branch,
             main: false,
             external: false,
             locked: false,
             prunable: false,
-            dirty: status.then(|| is_dirty(&path)),
-            path,
-        });
-    }
-    Ok(entries)
+            dirty: status.then(|| is_dirty(path)),
+            path: path.clone(),
+        }
+    }))
 }
 
 fn is_dirty(path: &std::path::Path) -> bool {

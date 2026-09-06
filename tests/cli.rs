@@ -546,6 +546,47 @@ fn external_worktrees_are_visible_but_not_bonsai_owned() {
 }
 
 #[test]
+fn registered_worktree_under_bonsai_root_survives_repo_id_changes() {
+    let repo = TestRepo::new();
+    let worktree = repo.add("feat-renamed");
+    repo.git(
+        &repo.clone,
+        &[
+            "remote",
+            "set-url",
+            "origin",
+            "https://github.com/example/renamed-repo.git",
+        ],
+    );
+
+    let output = repo
+        .bonsai(&repo.clone)
+        .args(["list", "--json"])
+        .output()
+        .unwrap();
+    assert!(output.status.success());
+    let entries: serde_json::Value = serde_json::from_slice(&output.stdout).unwrap();
+    let entry = entries
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|entry| entry["branch"] == "feat-renamed")
+        .unwrap();
+    assert_eq!(entry["external"], false);
+
+    let output = repo
+        .bonsai(&repo.clone)
+        .args(["add", "feat-renamed"])
+        .output()
+        .unwrap();
+    assert!(output.status.success());
+    assert_eq!(
+        PathBuf::from(String::from_utf8_lossy(&output.stdout).trim()),
+        worktree
+    );
+}
+
+#[test]
 fn workspace_includes_external_worktrees_without_managed_ones() {
     let repo = TestRepo::new();
     let external = repo.add_external("feat-external-workspace");
@@ -917,6 +958,28 @@ fn clean_dry_run_touches_nothing() {
 }
 
 #[test]
+fn clean_parallel_analysis_has_ordered_branch_contexts() {
+    let repo = TestRepo::new();
+    repo.add("feat-parallel-a");
+    repo.add("feat-parallel-b");
+
+    let output = repo
+        .bonsai(&repo.clone)
+        .args(["clean", "--dry-run"])
+        .output()
+        .unwrap();
+    assert!(output.status.success());
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert!(stderr.contains("bonsai: analyzing 2 worktrees in parallel"));
+    let first = stderr.find("[feat-parallel-a] merged").unwrap();
+    let second = stderr.find("[feat-parallel-b] merged").unwrap();
+    assert!(
+        first < second,
+        "parallel results lost input order:\n{stderr}"
+    );
+}
+
+#[test]
 fn clean_skips_dirty_worktrees_even_with_yes() {
     let repo = TestRepo::new();
     let path = repo.add("feat-wip");
@@ -925,7 +988,9 @@ fn clean_skips_dirty_worktrees_even_with_yes() {
         .args(["clean", "--yes"])
         .assert()
         .success()
-        .stderr(predicate::str::contains("skipping 'feat-wip'"));
+        .stderr(predicate::str::contains(
+            "[feat-wip] skipped (merged): uncommitted changes",
+        ));
     assert!(path.exists());
     repo.git(
         &repo.clone,
@@ -967,7 +1032,9 @@ fn clean_force_is_an_alias_of_yes() {
         .args(["clean", "--force"])
         .assert()
         .success()
-        .stderr(predicate::str::contains("skipping 'feat-wip'"));
+        .stderr(predicate::str::contains(
+            "[feat-wip] skipped (merged): uncommitted changes",
+        ));
     assert!(dirty.exists(), "--force must not touch dirty worktrees");
 }
 
@@ -1009,6 +1076,38 @@ fn prune_deletes_orphaned_directories() {
         .success();
     assert!(!orphan.exists());
     assert!(path.exists(), "registered worktrees must survive prune");
+}
+
+#[test]
+fn prune_parallel_deletion_has_ordered_task_contexts() {
+    let repo = TestRepo::new();
+    let anchor = repo.add("feat-anchor");
+    let bonsai_dir = anchor.parent().unwrap();
+    let orphans = [bonsai_dir.join("orphan-a"), bonsai_dir.join("orphan-b")];
+    for orphan in &orphans {
+        std::fs::create_dir_all(orphan).unwrap();
+        std::fs::write(orphan.join(".git"), "gitdir: /nonexistent\n").unwrap();
+    }
+
+    let output = repo
+        .bonsai(&repo.clone)
+        .args(["prune", "--yes"])
+        .output()
+        .unwrap();
+    assert!(output.status.success());
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert!(stderr.contains("deleting 2 orphaned directories in parallel (2 jobs)"));
+    let first = stderr
+        .find(&format!("[1/2] deleted {}", orphans[0].display()))
+        .unwrap();
+    let second = stderr
+        .find(&format!("[2/2] deleted {}", orphans[1].display()))
+        .unwrap();
+    assert!(
+        first < second,
+        "parallel results lost input order:\n{stderr}"
+    );
+    assert!(orphans.iter().all(|orphan| !orphan.exists()));
 }
 
 #[test]
@@ -1127,11 +1226,20 @@ fn add_installs_multiple_ecosystems() {
     repo.commit_files(&[("Cargo.lock", ""), ("package-lock.json", "{}\n")]);
     repo.fake_pm("cargo");
     repo.fake_pm("npm");
-    let (path, _) = repo.add_with_path("feat-multi", &repo.path_with_fakebin());
+    let (path, stderr) = repo.add_with_path("feat-multi", &repo.path_with_fakebin());
     let cargo_args = std::fs::read_to_string(path.join("cargo-args.txt")).unwrap();
     assert_eq!(cargo_args.trim(), "fetch --locked");
     let npm_args = std::fs::read_to_string(path.join("npm-args.txt")).unwrap();
     assert_eq!(npm_args.trim(), "ci --prefer-offline --no-audit --no-fund");
+    assert!(stderr.contains("bonsai: installing dependencies in parallel (2 jobs):"));
+    let npm = stderr
+        .find("[npm] npm ci --prefer-offline --no-audit --no-fund")
+        .unwrap();
+    let cargo = stderr.find("[cargo] cargo fetch --locked").unwrap();
+    assert!(
+        npm < cargo,
+        "parallel job output lost input order:\n{stderr}"
+    );
 }
 
 #[test]

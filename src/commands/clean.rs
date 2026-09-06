@@ -1,4 +1,4 @@
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::path::PathBuf;
 
 use anyhow::Result;
@@ -6,6 +6,7 @@ use anyhow::Result;
 use crate::commands::remove::remove_worktree;
 use crate::config::Config;
 use crate::git::Git;
+use crate::parallel;
 use crate::picker;
 use crate::repo::Repo;
 use crate::worktree::Worktree;
@@ -120,7 +121,7 @@ fn run_inner(
         _ => default.clone(),
     };
 
-    let merged: Vec<String> = repo
+    let merged: HashSet<String> = repo
         .git
         .out(&["branch", "--merged", &target, "--format=%(refname:short)"])?
         .lines()
@@ -140,25 +141,32 @@ fn run_inner(
         })
         .collect();
 
-    let protected = |branch: &str| {
-        config
-            .clean
-            .protected
-            .iter()
-            .any(|p| glob::Pattern::new(p).is_ok_and(|p| p.matches(branch)))
-    };
+    let protected = config
+        .clean
+        .protected
+        .iter()
+        .filter_map(|pattern| glob::Pattern::new(pattern).ok())
+        .collect::<Vec<_>>();
 
-    let mut candidates: Vec<(Worktree, String, Reason)> = Vec::new();
-    for wt in repo.bonsai_worktrees(config)? {
-        let Some(branch) = wt.branch.clone() else {
-            continue;
-        };
-        if branch == default || wt.is_locked || protected(&branch) {
-            continue;
+    let worktrees = repo.bonsai_worktrees(config)?;
+    let workers = parallel::worker_count(worktrees.len());
+    if workers > 1 {
+        eprintln!(
+            "bonsai: analyzing {} worktrees in parallel ({workers} jobs)",
+            worktrees.len(),
+        );
+    }
+    let checks = parallel::map_ordered(&worktrees, |wt| {
+        let branch = wt.branch.clone()?;
+        if branch == default
+            || wt.is_locked
+            || protected.iter().any(|pattern| pattern.matches(&branch))
+        {
+            return None;
         }
         let track = tracking.get(&branch).map(String::as_str).unwrap_or("");
         let mut facts = BranchFacts {
-            merged: merged.iter().any(|b| b == &branch),
+            merged: merged.contains(&branch),
             upstream_gone: track.contains("[gone]"),
             upstream_ahead: track.contains("ahead"),
             ..Default::default()
@@ -166,12 +174,15 @@ fn run_inner(
         if classify(facts).is_none() && !facts.upstream_ahead {
             facts.squash_merged = is_squash_merged(&repo.git, &target, &branch);
         }
-        let Some(reason) = classify(facts) else {
-            continue;
-        };
-        if is_dirty(&wt) {
+        let reason = classify(facts)?;
+        Some((wt.clone(), branch, reason, is_dirty(wt)))
+    });
+
+    let mut candidates: Vec<(Worktree, String, Reason)> = Vec::new();
+    for (wt, branch, reason, dirty) in checks.into_iter().flatten() {
+        if dirty {
             eprintln!(
-                "bonsai: skipping '{branch}' ({}): uncommitted changes",
+                "bonsai: [{branch}] skipped ({}): uncommitted changes",
                 reason.as_str()
             );
             report.skipped_dirty.push(JsonEntry {
@@ -198,8 +209,24 @@ fn run_inner(
     }
 
     eprintln!("bonsai: worktrees to remove (branches deleted too):");
+    let branch_width = candidates
+        .iter()
+        .map(|(_, branch, _)| branch.chars().count())
+        .max()
+        .unwrap_or(0);
+    let reason_width = candidates
+        .iter()
+        .map(|(_, _, reason)| reason.as_str().chars().count())
+        .max()
+        .unwrap_or(0);
     for (wt, branch, reason) in &candidates {
-        eprintln!("  {branch}\t[{}]\t{}", reason.as_str(), wt.path.display());
+        let branch_padding = " ".repeat(branch_width.saturating_sub(branch.chars().count()));
+        let reason = reason.as_str();
+        let reason_padding = " ".repeat(reason_width.saturating_sub(reason.chars().count()));
+        eprintln!(
+            "  [{branch}]{branch_padding} {reason}{reason_padding}  {}",
+            wt.path.display()
+        );
     }
     if dry_run {
         eprintln!("bonsai: dry run, nothing removed");
@@ -225,6 +252,12 @@ fn run_inner(
     };
     candidates.sort_by_key(|(wt, _, _)| inside(wt));
 
+    if candidates.len() > 1 {
+        eprintln!(
+            "bonsai: removing {} worktrees safely in sequence",
+            candidates.len()
+        );
+    }
     let mut cd_home = false;
     for (wt, branch, _) in &candidates {
         if inside(wt) {
@@ -234,7 +267,7 @@ fn run_inner(
         // -d would refuse gone/squash-merged branches; the checks above are
         // the safety justification for -D.
         repo.git.run(&["branch", "-D", branch])?;
-        eprintln!("bonsai: deleted branch '{branch}'");
+        eprintln!("bonsai: [{branch}] deleted branch");
         report.removed.push(branch.clone());
     }
     crate::workspace::sync_quietly(&repo, config);

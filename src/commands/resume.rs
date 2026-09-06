@@ -11,6 +11,7 @@ use rusqlite::{Connection, OpenFlags};
 use serde_json::Value;
 
 use crate::config::Config;
+use crate::parallel;
 use crate::picker;
 use crate::repo::Repo;
 
@@ -134,9 +135,19 @@ pub fn run(config: &Config, query: Option<String>) -> Result<()> {
     let scope = ProjectScope::new(&repo, config)?;
     let mut sessions = HashMap::new();
 
-    collect_provider("Claude Code", claude_sessions(&scope), &mut sessions);
-    collect_provider("Codex", codex_sessions(&scope), &mut sessions);
-    collect_provider("OpenCode", opencode_sessions(&scope), &mut sessions);
+    let providers = [
+        ("Claude Code", Provider::Claude),
+        ("Codex", Provider::Codex),
+        ("OpenCode", Provider::OpenCode),
+    ];
+    let results = parallel::map_ordered(&providers, |(_, provider)| match provider {
+        Provider::Claude => claude_sessions(&scope),
+        Provider::Codex => codex_sessions(&scope),
+        Provider::OpenCode => opencode_sessions(&scope),
+    });
+    for ((name, _), result) in providers.iter().zip(results) {
+        collect_provider(name, result, &mut sessions);
+    }
 
     let mut sessions = sessions.into_values().collect::<Vec<_>>();
     if sessions.is_empty() {
@@ -192,7 +203,7 @@ fn collect_provider(
                 }
             }
         }
-        Err(error) => eprintln!("bonsai: warning: could not read {name} sessions: {error:#}"),
+        Err(error) => eprintln!("bonsai: [sessions:{name}] could not read sessions: {error:#}"),
     }
 }
 
@@ -288,6 +299,7 @@ fn claude_sessions(scope: &ProjectScope) -> Result<Vec<Session>> {
     let Ok(project_dirs) = fs::read_dir(&projects) else {
         return Ok(sessions);
     };
+    let mut transcripts = Vec::new();
     for project_dir in project_dirs.flatten() {
         let Ok(file_type) = project_dir.file_type() else {
             continue;
@@ -302,11 +314,15 @@ fn claude_sessions(scope: &ProjectScope) -> Result<Vec<Session>> {
             if file.path().extension() != Some(OsStr::new("jsonl")) {
                 continue;
             }
-            if let Ok(Some(session)) = parse_claude_transcript(&file.path(), scope) {
-                sessions.push(session);
-            }
+            transcripts.push(file.path());
         }
     }
+    sessions.extend(
+        parallel::map_ordered(&transcripts, |path| parse_claude_transcript(path, scope))
+            .into_iter()
+            .filter_map(Result::ok)
+            .flatten(),
+    );
     Ok(sessions)
 }
 
@@ -427,8 +443,11 @@ fn codex_sessions(scope: &ProjectScope) -> Result<Vec<Session>> {
     let mut sessions = Vec::new();
     let mut read_database = false;
     let mut last_error = None;
-    for database in &databases {
-        match codex_database_sessions(database, scope) {
+    let database_results = parallel::map_ordered(&databases, |database| {
+        codex_database_sessions(database, scope)
+    });
+    for result in database_results {
+        match result {
             Ok(found) => {
                 read_database = true;
                 sessions.extend(found);
@@ -609,29 +628,30 @@ fn codex_legacy_sessions(root: &Path, scope: &ProjectScope) -> Result<Vec<Sessio
     let ids = history.keys().cloned().collect::<HashSet<_>>();
     let mut files = Vec::new();
     walk_jsonl(&root.join("sessions"), &mut files);
-    let mut sessions = Vec::new();
-    for path in files {
+    let sessions = parallel::map_ordered(&files, |path| -> Result<Option<Session>> {
         let name = path.file_name().unwrap_or_default().to_string_lossy();
         let Some(id) = ids.iter().find(|id| name.contains(id.as_str())) else {
-            continue;
+            return Ok(None);
         };
-        let Some((cwd, branch)) = codex_rollout_metadata(&path, scope)? else {
-            continue;
+        let Some((cwd, branch)) = codex_rollout_metadata(path, scope)? else {
+            return Ok(None);
         };
         let (title, updated) = history
             .get(id)
             .cloned()
             .unwrap_or_else(|| ("Untitled session".to_string(), UNIX_EPOCH));
-        sessions.push(Session {
+        Ok(Some(Session {
             provider: Provider::Codex,
             id: id.clone(),
             title,
             cwd,
             branch,
             updated,
-        });
-    }
-    Ok(sessions)
+        }))
+    })
+    .into_iter()
+    .collect::<Result<Vec<_>>>()?;
+    Ok(sessions.into_iter().flatten().collect())
 }
 
 fn codex_rollout_metadata(

@@ -10,8 +10,9 @@ use crate::worktree::Worktree;
 /// How a registered worktree relates to this Bonsai project.
 ///
 /// Git is the source of truth for the inventory. In particular, `External`
-/// worktrees may have been created by another tool and remain visible to
-/// navigation and session commands without becoming Bonsai-owned.
+/// worktrees live outside the configured Bonsai root and may have been
+/// created by another tool. They remain visible to navigation and session
+/// commands without becoming Bonsai-owned.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum WorktreeKind {
     Main,
@@ -86,7 +87,7 @@ impl Repo {
     /// use by navigation, session discovery, listings, and editor workspaces.
     pub fn project_worktrees(&self, config: &Config) -> Result<Vec<ProjectWorktree>> {
         let main_root = crate::paths::canonicalize_or_self(&self.main_root);
-        let bonsai_dir = crate::paths::canonicalize_or_self(&self.bonsai_dir(config));
+        let bonsai_root = crate::paths::canonicalize_or_self(&config.root_dir());
         Ok(self
             .worktrees()?
             .into_iter()
@@ -94,7 +95,7 @@ impl Repo {
                 let path = crate::paths::canonicalize_or_self(&worktree.path);
                 let kind = if path == main_root {
                     WorktreeKind::Main
-                } else if path.starts_with(&bonsai_dir) {
+                } else if path.starts_with(&bonsai_root) {
                     WorktreeKind::Managed
                 } else {
                     WorktreeKind::External
@@ -104,7 +105,8 @@ impl Repo {
             .collect())
     }
 
-    /// Worktrees managed by bonsai: the ones living under our repo dir.
+    /// Worktrees managed by Bonsai: registered with this repository and
+    /// living anywhere under the configured global root.
     pub fn bonsai_worktrees(&self, config: &Config) -> Result<Vec<Worktree>> {
         Ok(self
             .project_worktrees(config)?

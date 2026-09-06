@@ -66,6 +66,15 @@ wrapper loaded. The binary detects that mismatch and prints the exact
 
 Every subcommand has detailed `--help` with examples.
 
+Independent work is bounded and parallel by default: `clean` analyzes
+worktrees concurrently, `list --status` probes checkouts concurrently,
+`resume` scans provider stores and transcripts concurrently, global `cd` and
+workspace generation probe checkouts concurrently, `prune` deletes confirmed
+independent orphans concurrently, and `add` installs independent ecosystems
+together. Output remains deterministic and identifies concurrent contexts with
+labels such as `[branch]`, `[npm]`, or `[1/3]`. Operations that mutate shared
+Git metadata—worktree removal and branch deletion—remain sequential.
+
 Note: a freshly added worktree with no commits counts as merged (same
 semantics as `git branch --merged`), so `bonsai clean` will offer to remove
 it — the confirmation prompt and `--dry-run` are there for a reason.
@@ -136,13 +145,15 @@ New branches are created with `--no-track` (no phantom upstream on
 `origin/main`), so `git push` with `push.autoSetupRemote` does the right
 thing and `bonsai clean` can detect squash-merges reliably.
 
-Worktrees registered with Git but located outside this project's Bonsai
-directory are treated as external. This makes an existing setup from another
+Worktrees registered with Git but located outside the configured global
+Bonsai root are treated as external. This makes an existing setup from another
 worktree manager immediately usable: `list`, `cd`, `resume`, status checks,
 and the per-project editor workspace include it. External worktrees are
 clearly labelled and remain read-only to Bonsai—`add` will not adopt or move
-one, and `remove`/`clean` never delete one. Even `bonsai add --path` is limited
-to the project's directory under the configured Bonsai root.
+one, and `remove`/`clean` never delete one. Registered worktrees anywhere under
+the global root remain Bonsai-managed even if the main checkout moves or the
+repository ID changes. New worktrees still use the current project's directory,
+and `bonsai add --path` is limited to that directory.
 
 ## AI agents (Claude Code, Cursor, Codex, OpenCode, ...)
 
@@ -266,8 +277,10 @@ lists stay readable. Jump from a terminal with `bonsai cd`.
   hash of the repo path when there is no remote. Inputs are slugified per `/`
   segment, and the resulting branch maps to nested directories (`Fix API/Login`
   → branch and directory `fix-api/login`).
-- Git-registered worktrees outside that directory are classified as external
-  and merged into the project's read-only views; Bonsai never creates there.
+- Git-registered worktrees elsewhere under the configured global root remain
+  managed, so moving the main checkout or changing its repo ID does not orphan
+  them. Registered worktrees outside that root are external and merged into the
+  project's read-only views; Bonsai never creates there.
 - The shell wrapper captures stdout and watches for a sentinel line to cd;
   prompts render on stderr, so fuzzy pickers work even inside `$(...)`.
 

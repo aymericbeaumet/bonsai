@@ -47,9 +47,10 @@ HEAD. Untracked files matching the copy configuration (.env*, .envrc,
 worktree (then the main one) into the new worktree, dependencies are
 installed with the package manager detected from lockfiles (pnpm, npm, yarn,
 bun, cargo, uv — lockfile-frozen, skipped when the tool is missing, disable
-with [add] install = false). Bonsai warns when an actionable package-manager
+with [add] install = false). Independent ecosystems install concurrently with
+their output grouped by tool. Bonsai warns when an actionable package-manager
 setting would make sibling worktree installs substantially faster, then the
-[add] post_add command runs inside the new worktree.
+[add] post_add command runs after every install inside the new worktree.
 
 Examples:
   bonsai add                    # fuzzy-pick a branch, or type a new name
@@ -84,7 +85,8 @@ Housekeeping for the bonsai root: runs `git worktree prune` for the current
 repo, deletes orphaned directories (crash leftovers not registered as
 worktrees, after confirmation), and removes empty directories. With --all,
 sweeps the entire bonsai root instead, including worktrees whose main clone
-has been deleted (their .git file points nowhere).";
+has been deleted (their .git file points nowhere). Confirmed independent
+orphan directories are deleted concurrently with numbered result lines.";
 
 const CLEAN_LONG: &str = "\
 Remove every worktree whose branch is already integrated into the default
@@ -98,6 +100,10 @@ dirty worktrees (skipped and reported, even with --yes/--force), branches
 with unpushed commits on a live upstream, and branches matching [clean]
 protected globs. The plan is always printed; without --yes (alias
 -f/--force) a confirmation multi-select opens (terminal only).
+
+Dirty and merge-equivalence checks run concurrently and retain worktree order
+in the plan. Removal and branch deletion remain sequential because they mutate
+one shared Git repository.
 
 Examples:
   bonsai clean --dry-run        # show what would be removed
@@ -125,8 +131,9 @@ project, including external worktrees created by other tools. Bonsai combines
 every resumable top-level Claude Code, Codex, and OpenCode session into one
 fuzzy picker, ordered by the time each session was last used. Rows share
 `bonsai cd`'s compact relative ages, freshness colors, navigation, and query
-editing keys. The picker renders inline below the current prompt and clears
-on exit.
+editing keys. Provider stores and independent transcript files are scanned
+concurrently. The picker renders inline below the current prompt and clears on
+exit.
 
 The picker searches provider, title, worktree/directory, and session ID. An
 exact session ID or a unique substring skips the picker; otherwise QUERY is
@@ -247,7 +254,7 @@ pub enum Commands {
         /// List every bonsai-managed worktree across all repos
         #[arg(long)]
         all: bool,
-        /// Add a dirty flag (runs git status in each worktree; slower)
+        /// Add a dirty flag (runs git status across worktrees concurrently)
         #[arg(long)]
         status: bool,
         /// Output JSON instead of TSV

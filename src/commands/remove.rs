@@ -1,3 +1,4 @@
+use std::collections::HashMap;
 use std::path::PathBuf;
 
 use anyhow::{Result, bail};
@@ -32,13 +33,14 @@ pub fn run(
         bail!("nothing selected");
     }
 
-    let mut targets = Vec::new();
+    let by_branch = worktrees
+        .iter()
+        .filter_map(|worktree| Some((worktree.branch.as_deref()?, worktree)))
+        .collect::<HashMap<_, _>>();
+    let mut targets = Vec::with_capacity(selected.len());
     for branch in &selected {
-        match worktrees
-            .iter()
-            .find(|wt| wt.branch.as_deref() == Some(branch.as_str()))
-        {
-            Some(wt) => targets.push(wt.clone()),
+        match by_branch.get(branch.as_str()) {
+            Some(worktree) => targets.push((*worktree).clone()),
             None => bail!("no bonsai worktree for branch '{branch}'"),
         }
     }
@@ -56,7 +58,7 @@ pub fn run(
         if delete_branch && let Some(branch) = &wt.branch {
             let flag = if force { "-D" } else { "-d" };
             repo.git.run(&["branch", flag, branch])?;
-            eprintln!("bonsai: deleted branch '{branch}'");
+            eprintln!("bonsai: [{branch}] deleted branch");
         }
     }
     crate::workspace::sync_quietly(&repo, config);
@@ -104,7 +106,8 @@ pub fn remove_worktree(repo: &Repo, config: &Config, wt: &Worktree, force: bool)
         }
         return Err(e.into());
     }
-    eprintln!("bonsai: removed worktree {}", wt.path.display());
+    let label = wt.branch.as_deref().unwrap_or("detached");
+    eprintln!("bonsai: [{label}] removed worktree {}", wt.path.display());
     if let Some(parent) = wt.path.parent() {
         cleanup_empty_dirs(parent, &config.root_dir());
     }

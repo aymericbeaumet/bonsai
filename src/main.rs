@@ -2,6 +2,7 @@ mod cli;
 mod commands;
 mod config;
 mod git;
+mod parallel;
 mod paths;
 mod picker;
 mod pm;
