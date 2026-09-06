@@ -4,9 +4,9 @@ use anyhow::Result;
 use serde_json::json;
 
 use crate::config::Config;
-use crate::git::Git;
-use crate::repo::Repo;
-use crate::worktree::{cleanup_empty_dirs, find_worktree_dirs, repo_id_of};
+use crate::parallel;
+use crate::repo::{Repo, WorktreeKind};
+use crate::worktree::{cleanup_empty_dirs, current_branch, find_worktree_dirs, repo_id_of};
 
 /// Multi-root VS Code workspace file understood by VS Code, Cursor,
 /// Windsurf, and other derivatives: one entry for the main checkout plus one
@@ -26,7 +26,16 @@ pub fn file_path(repo: &Repo, config: &Config) -> PathBuf {
 pub fn sync(repo: &Repo, config: &Config) -> Result<PathBuf> {
     let dir = repo.bonsai_dir(config);
     let file = file_path(repo, config);
-    let mut worktrees = repo.bonsai_worktrees(config)?;
+    let project_worktrees = repo.project_worktrees(config)?;
+    let main_name = project_worktrees
+        .iter()
+        .find(|entry| entry.kind == WorktreeKind::Main)
+        .map(|entry| entry.label())
+        .unwrap_or_else(|| "(detached) (root)".to_string());
+    let mut worktrees = project_worktrees
+        .into_iter()
+        .filter(|entry| entry.kind != WorktreeKind::Main && !entry.worktree.is_bare)
+        .collect::<Vec<_>>();
 
     if worktrees.is_empty() {
         if file.exists() {
@@ -36,17 +45,13 @@ pub fn sync(repo: &Repo, config: &Config) -> Result<PathBuf> {
         return Ok(file);
     }
 
-    worktrees.sort_by(|a, b| a.branch.cmp(&b.branch));
-    let main_name = repo
-        .main_root
-        .file_name()
-        .map(|n| n.to_string_lossy().to_string())
-        .unwrap_or_else(|| "main".to_string());
+    worktrees.sort_by(|a, b| a.worktree.branch.cmp(&b.worktree.branch));
     let mut folders = vec![json!({
-        "name": format!("{main_name} (main)"),
+        "name": main_name,
         "path": repo.main_root,
     })];
-    for wt in &worktrees {
+    for entry in &worktrees {
+        let wt = &entry.worktree;
         // Paths relative to the workspace file where possible.
         let path = wt
             .path
@@ -54,7 +59,7 @@ pub fn sync(repo: &Repo, config: &Config) -> Result<PathBuf> {
             .map(|p| p.to_path_buf())
             .unwrap_or_else(|_| wt.path.clone());
         folders.push(json!({
-            "name": wt.branch.as_deref().unwrap_or("(detached)"),
+            "name": entry.label(),
             "path": path,
         }));
     }
@@ -91,26 +96,20 @@ pub fn sync_global(config: &Config) -> Result<PathBuf> {
     }
 
     // (repo-id, branch label, relative path), sorted for a stable file.
-    let mut entries: Vec<(String, String, PathBuf)> = dirs
-        .into_iter()
-        .map(|path| {
-            let branch = Git::at(&path)
-                .out(&["branch", "--show-current"])
-                .ok()
-                .filter(|b| !b.is_empty());
-            let repo_id = repo_id_of(&root, &path, branch.as_deref())
-                .unwrap_or_else(|| "(unknown)".to_string());
-            let rel = path
-                .strip_prefix(&root)
-                .map(|p| p.to_path_buf())
-                .unwrap_or(path);
-            (
-                repo_id,
-                branch.unwrap_or_else(|| "(detached)".to_string()),
-                rel,
-            )
-        })
-        .collect();
+    let mut entries: Vec<(String, String, PathBuf)> = parallel::map_ordered(&dirs, |path| {
+        let branch = current_branch(path);
+        let repo_id =
+            repo_id_of(&root, path, branch.as_deref()).unwrap_or_else(|| "(unknown)".to_string());
+        let rel = path
+            .strip_prefix(&root)
+            .map(|relative| relative.to_path_buf())
+            .unwrap_or_else(|_| path.clone());
+        (
+            repo_id,
+            branch.unwrap_or_else(|| "(detached)".to_string()),
+            rel,
+        )
+    });
     entries.sort();
 
     // Label with the repo's short name, falling back to the full repo-id
@@ -151,11 +150,15 @@ pub fn sync_quietly(repo: &Repo, config: &Config) {
     if !config.workspace {
         return;
     }
-    if let Err(e) = sync(repo, config) {
-        eprintln!("bonsai: could not update workspace file: {e:#}");
-    }
-    if let Err(e) = sync_global(config) {
-        eprintln!("bonsai: could not update global workspace file: {e:#}");
+    let targets = ["project", "global"];
+    let results = parallel::map_ordered(&targets, |target| match *target {
+        "project" => sync(repo, config),
+        _ => sync_global(config),
+    });
+    for (target, result) in targets.iter().zip(results) {
+        if let Err(error) = result {
+            eprintln!("bonsai: [workspace:{target}] could not update: {error:#}");
+        }
     }
 }
 

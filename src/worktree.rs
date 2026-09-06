@@ -120,31 +120,44 @@ pub fn repo_id_of(root: &Path, path: &Path, branch: Option<&str>) -> Option<Stri
     Some(segments[..keep].join("/"))
 }
 
+/// Current branch read directly from a checkout's Git metadata. Global
+/// commands already discovered linked worktrees from their `.git` files, so
+/// spawning one Git process per checkout would only repeat this lookup.
+pub fn current_branch(worktree: &Path) -> Option<String> {
+    let head = std::fs::read_to_string(git_dir(worktree)?.join("HEAD")).ok()?;
+    head.trim()
+        .strip_prefix("ref: refs/heads/")
+        .filter(|branch| !branch.is_empty())
+        .map(str::to_string)
+}
+
 /// When the git metadata of `worktree` was last touched — a cheap proxy for
 /// "last worked in" that covers commits, staging, and checkouts without
 /// spawning git. Reads the mtime of the git dir's `index` (then `HEAD`),
 /// resolving the `.git` file indirection of linked worktrees; falls back to
 /// the directory's own mtime.
 pub fn last_activity(worktree: &Path) -> Option<std::time::SystemTime> {
-    let dot_git = worktree.join(".git");
-    let git_dir = if dot_git.is_file() {
-        let content = std::fs::read_to_string(&dot_git).ok()?;
-        let target = content.strip_prefix("gitdir:")?.trim();
-        let target = PathBuf::from(target);
-        if target.is_absolute() {
-            target
-        } else {
-            worktree.join(target)
-        }
-    } else {
-        dot_git
-    };
+    let git_dir = git_dir(worktree)?;
     for name in ["index", "HEAD"] {
         if let Ok(mtime) = std::fs::metadata(git_dir.join(name)).and_then(|m| m.modified()) {
             return Some(mtime);
         }
     }
     std::fs::metadata(worktree).and_then(|m| m.modified()).ok()
+}
+
+fn git_dir(worktree: &Path) -> Option<PathBuf> {
+    let dot_git = worktree.join(".git");
+    if !dot_git.is_file() {
+        return Some(dot_git);
+    }
+    let content = std::fs::read_to_string(&dot_git).ok()?;
+    let target = PathBuf::from(content.strip_prefix("gitdir:")?.trim());
+    Some(if target.is_absolute() {
+        target
+    } else {
+        worktree.join(target)
+    })
 }
 
 /// Recursively find worktree checkout dirs (dirs containing a `.git` file)
@@ -246,6 +259,7 @@ mod tests {
         let gitdir = tmp.path().join("meta");
         std::fs::create_dir_all(&gitdir).unwrap();
         std::fs::write(gitdir.join("index"), "x").unwrap();
+        std::fs::write(gitdir.join("HEAD"), "ref: refs/heads/feature/test\n").unwrap();
         let wt = tmp.path().join("wt");
         std::fs::create_dir_all(&wt).unwrap();
         std::fs::write(wt.join(".git"), format!("gitdir: {}\n", gitdir.display())).unwrap();
@@ -254,6 +268,7 @@ mod tests {
             .modified()
             .unwrap();
         assert_eq!(last_activity(&wt), Some(expected));
+        assert_eq!(current_branch(&wt).as_deref(), Some("feature/test"));
 
         // Main checkout: `.git` directory, index missing -> HEAD mtime.
         let main = tmp.path().join("main");

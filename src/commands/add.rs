@@ -1,10 +1,12 @@
+use std::collections::HashSet;
 use std::path::PathBuf;
 
 use anyhow::{Context, Result, bail};
 
 use crate::config::Config;
+use crate::parallel;
 use crate::picker;
-use crate::repo::{Repo, dir_collides, validate_branch_name};
+use crate::repo::{Repo, WorktreeKind, dir_collides, validate_branch_name};
 use crate::worktree::path_for_branch;
 
 pub fn run(
@@ -33,17 +35,22 @@ pub fn run(
     let branch = slugify_branch_input(&raw_branch)?;
     validate_branch_name(&repo.git, &branch)?;
 
-    let worktrees = repo.worktrees()?;
+    let project_worktrees = repo.project_worktrees(config)?;
+    let worktrees = project_worktrees
+        .iter()
+        .map(|entry| entry.worktree.clone())
+        .collect::<Vec<_>>();
     let bonsai_dir = repo.bonsai_dir(config);
 
-    // Idempotent: adding a branch that already has a bonsai worktree just cds
-    // there. A checkout anywhere else (the main worktree, typically) is fatal:
-    // git refuses two checkouts of one branch, and so do we.
-    if let Some(wt) = worktrees
+    // Idempotent: adding a branch that already has a Bonsai worktree just cds
+    // there. A checkout anywhere else is read-only to Bonsai: `add` never
+    // adopts, moves, or creates worktrees outside the configured root.
+    if let Some(entry) = project_worktrees
         .iter()
-        .find(|wt| wt.branch.as_deref() == Some(branch.as_str()))
+        .find(|entry| entry.worktree.branch.as_deref() == Some(branch.as_str()))
     {
-        if wt.path.starts_with(&bonsai_dir) {
+        let wt = &entry.worktree;
+        if entry.kind == WorktreeKind::Managed {
             eprintln!(
                 "bonsai: '{branch}' already has a worktree at {}",
                 wt.path.display()
@@ -61,7 +68,24 @@ pub fn run(
     }
 
     let path = match path_override {
-        Some(p) => std::path::absolute(&p).context("invalid --path")?,
+        Some(p) => {
+            let path = std::path::absolute(&p).context("invalid --path")?;
+            if path
+                .components()
+                .any(|component| component == std::path::Component::ParentDir)
+            {
+                bail!("--path must not contain '..'");
+            }
+            let normalized = crate::paths::canonicalize_lenient(&path);
+            let managed_root = crate::paths::canonicalize_lenient(&bonsai_dir);
+            if !normalized.starts_with(&managed_root) {
+                bail!(
+                    "--path must stay inside this project's Bonsai directory ({})",
+                    bonsai_dir.display()
+                );
+            }
+            path
+        }
         None => path_for_branch(&bonsai_dir, &branch),
     };
     if let Some(other) = dir_collides(&path, &worktrees, &branch) {
@@ -155,7 +179,7 @@ fn slugify_branch_input(input: &str) -> Result<String> {
 /// Branches worth suggesting: locals without a worktree, plus remote branches
 /// without a local counterpart.
 fn branch_suggestions(repo: &Repo, config: &Config) -> Result<Vec<String>> {
-    let checked_out: Vec<String> = repo
+    let checked_out: HashSet<String> = repo
         .worktrees()?
         .into_iter()
         .filter_map(|wt| wt.branch)
@@ -166,11 +190,13 @@ fn branch_suggestions(repo: &Repo, config: &Config) -> Result<Vec<String>> {
         .lines()
         .map(str::to_string)
         .collect();
+    let local_set = locals.iter().cloned().collect::<HashSet<_>>();
     let mut suggestions: Vec<String> = locals
         .iter()
-        .filter(|b| !checked_out.contains(b))
+        .filter(|branch| !checked_out.contains(branch.as_str()))
         .cloned()
         .collect();
+    let mut suggested = suggestions.iter().cloned().collect::<HashSet<_>>();
     if let Some(remote) = repo.remote_name(config) {
         let prefix = format!("{remote}/");
         for r in repo
@@ -184,8 +210,8 @@ fn branch_suggestions(repo: &Repo, config: &Config) -> Result<Vec<String>> {
         {
             if let Some(branch) = r.strip_prefix(&prefix)
                 && branch != "HEAD"
-                && !locals.contains(&branch.to_string())
-                && !suggestions.contains(&branch.to_string())
+                && !local_set.contains(branch)
+                && suggested.insert(branch.to_string())
             {
                 suggestions.push(branch.to_string());
             }
@@ -359,38 +385,64 @@ fn warning_label(color: bool) -> &'static str {
 
 /// Install dependencies with every package manager detected in the new
 /// worktree. Frozen-lockfile flags keep the checkout pristine and each
-/// tool's shared store keeps disk usage low. A missing tool is silently
-/// skipped; failure is reported but does not undo the add. Tool stdout goes
-/// to our stderr so wrapped stdout capture stays clean.
+/// tool's shared store keeps disk usage low. Independent ecosystems run in
+/// parallel and finish before `post_add`. A missing tool is silently skipped;
+/// failure is reported but does not undo the add. Tool output is grouped on
+/// our stderr so wrapped stdout capture stays clean.
 fn install_dependencies(config: &Config, path: &std::path::Path) {
     if !config.add.install {
         return;
     }
-    for pm in crate::pm::detect(path) {
-        let Some(program) = crate::pm::find_program(pm.program()) else {
-            continue; // tool not installed
-        };
-        let display = format!("{} {}", pm.program(), pm.args().join(" "));
-        eprintln!("bonsai: installing dependencies: {display}");
-        let result = std::process::Command::new(&program)
+    let jobs = crate::pm::detect(path)
+        .into_iter()
+        .filter_map(|pm| Some((pm, crate::pm::find_program(pm.program())?)))
+        .collect::<Vec<_>>();
+    if jobs.is_empty() {
+        return;
+    }
+    if parallel::worker_count(jobs.len()) > 1 {
+        eprintln!(
+            "bonsai: installing dependencies in parallel ({} jobs):",
+            jobs.len()
+        );
+    } else {
+        eprintln!("bonsai: installing dependencies (1 job):");
+    }
+    for (pm, _) in &jobs {
+        eprintln!(
+            "  [{}] {} {}",
+            pm.program(),
+            pm.program(),
+            pm.args().join(" ")
+        );
+    }
+
+    let results = parallel::map_ordered(&jobs, |(pm, program)| {
+        std::process::Command::new(program)
             .args(pm.args())
             .current_dir(path)
-            .stdout(std::process::Stdio::piped())
-            .stderr(std::process::Stdio::inherit())
-            .output();
+            .output()
+    });
+    for ((pm, _), result) in jobs.iter().zip(results) {
+        let label = pm.program();
         match result {
             Ok(output) => {
-                use std::io::Write;
-                let _ = std::io::stderr().write_all(&output.stdout);
-                if !output.status.success() {
-                    eprintln!(
-                        "bonsai: '{display}' failed (exit {:?})",
-                        output.status.code()
-                    );
+                print_task_output(label, &output.stdout);
+                print_task_output(label, &output.stderr);
+                if output.status.success() {
+                    eprintln!("  [{label}] done");
+                } else {
+                    eprintln!("  [{label}] failed (exit {:?})", output.status.code());
                 }
             }
-            Err(e) => eprintln!("bonsai: '{display}' failed to start: {e}"),
+            Err(error) => eprintln!("  [{label}] failed to start: {error}"),
         }
+    }
+}
+
+fn print_task_output(label: &str, output: &[u8]) {
+    for line in String::from_utf8_lossy(output).lines() {
+        eprintln!("  [{label}] {line}");
     }
 }
 

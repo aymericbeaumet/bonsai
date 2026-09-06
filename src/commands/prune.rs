@@ -1,26 +1,30 @@
 use std::collections::HashSet;
 use std::path::{Path, PathBuf};
 
-use anyhow::Result;
+use anyhow::{Result, bail};
 
 use crate::config::Config;
+use crate::parallel;
 use crate::picker;
 use crate::repo::Repo;
 use crate::worktree::{cleanup_empty_dirs, find_worktree_dirs};
 
 pub fn run(config: &Config, all: bool, yes: bool) -> Result<()> {
     let root = config.root_dir();
-    let mut orphans: Vec<PathBuf> = Vec::new();
 
-    if all {
+    let orphans: Vec<PathBuf> = if all {
         // Whole-root sweep: a checkout whose `.git` file points at a git dir
         // that no longer exists (the main clone was deleted) is unrecoverable
         // from the git side and can only be found here.
-        for path in find_worktree_dirs(&root) {
-            if gitdir_target(&path).is_none_or(|gitdir| !gitdir.exists()) {
-                orphans.push(path);
-            }
-        }
+        let paths = find_worktree_dirs(&root);
+        parallel::map_ordered(&paths, |path| {
+            gitdir_target(path)
+                .is_none_or(|gitdir| !gitdir.exists())
+                .then(|| path.clone())
+        })
+        .into_iter()
+        .flatten()
+        .collect()
     } else {
         let repo = Repo::require()?;
         repo.git.run(&["worktree", "prune"])?;
@@ -31,27 +35,58 @@ pub fn run(config: &Config, all: bool, yes: bool) -> Result<()> {
             .iter()
             .filter_map(|wt| crate::paths::canonicalize_ok(&wt.path))
             .collect();
-        for path in find_worktree_dirs(&repo.bonsai_dir(config)) {
-            let canonical = crate::paths::canonicalize_or_self(&path);
-            if !registered.contains(&canonical) {
-                orphans.push(path);
-            }
-        }
-    }
+        let paths = find_worktree_dirs(&repo.bonsai_dir(config));
+        parallel::map_ordered(&paths, |path| {
+            let canonical = crate::paths::canonicalize_or_self(path);
+            (!registered.contains(&canonical)).then(|| path.clone())
+        })
+        .into_iter()
+        .flatten()
+        .collect()
+    };
 
     if !orphans.is_empty() {
         eprintln!("bonsai: orphaned directories (not registered as worktrees):");
-        for path in &orphans {
-            eprintln!("  {}", path.display());
+        for (index, path) in orphans.iter().enumerate() {
+            eprintln!("  [{}/{}] {}", index + 1, orphans.len(), path.display());
         }
         // They may contain uncommitted work, hence the confirmation.
         if yes || picker::confirm("Delete these directories?")? {
-            for path in &orphans {
-                std::fs::remove_dir_all(path)?;
-                eprintln!("bonsai: deleted {}", path.display());
-                if let Some(parent) = path.parent() {
-                    cleanup_empty_dirs(parent, &root);
+            let workers = parallel::worker_count(orphans.len());
+            if workers > 1 {
+                eprintln!(
+                    "bonsai: deleting {} orphaned directories in parallel ({workers} jobs)",
+                    orphans.len(),
+                );
+            }
+            let results = parallel::map_ordered(&orphans, |path| std::fs::remove_dir_all(path));
+            let mut failures = 0;
+            for (index, (path, result)) in orphans.iter().zip(results).enumerate() {
+                match result {
+                    Ok(()) => {
+                        eprintln!(
+                            "bonsai: [{}/{}] deleted {}",
+                            index + 1,
+                            orphans.len(),
+                            path.display()
+                        );
+                        if let Some(parent) = path.parent() {
+                            cleanup_empty_dirs(parent, &root);
+                        }
+                    }
+                    Err(error) => {
+                        failures += 1;
+                        eprintln!(
+                            "bonsai: [{}/{}] failed to delete {}: {error}",
+                            index + 1,
+                            orphans.len(),
+                            path.display()
+                        );
+                    }
                 }
+            }
+            if failures > 0 {
+                bail!("failed to delete {failures} orphaned directories");
             }
         }
     }
