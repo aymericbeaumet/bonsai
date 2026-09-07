@@ -158,7 +158,7 @@ directory. It uses a plain `cd`, so chpwd-based tools (zoxide, direnv,
 starship, ...) keep working.";
 
 const AGENTS_LONG: &str = "\
-Print a concise markdown usage contract intended for AI coding agents
+Print the bundled Agent Skill without YAML frontmatter for AI coding agents
 (Claude Code, Cursor, Codex, OpenCode, ...). Append it to the file your
 harnesses read:
 
