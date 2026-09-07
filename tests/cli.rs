@@ -1782,11 +1782,12 @@ fn clean_json_reports_plan_and_removals() {
 #[test]
 fn skill_prints_and_installs_into_detected_harnesses() {
     let repo = TestRepo::new();
+    let skill = include_str!("../skills/bonsai/SKILL.md");
     repo.bonsai(&repo.dir)
         .arg("skill")
         .assert()
         .success()
-        .stdout(predicate::str::starts_with("---\nname: bonsai\n"));
+        .stdout(skill);
 
     // HOME is the temp dir; only Claude Code is "installed".
     std::fs::create_dir_all(repo.dir.join(".claude")).unwrap();
@@ -1794,7 +1795,10 @@ fn skill_prints_and_installs_into_detected_harnesses() {
         .args(["skill", "install"])
         .assert()
         .success();
-    assert!(repo.dir.join(".claude/skills/bonsai/SKILL.md").exists());
+    assert_eq!(
+        std::fs::read_to_string(repo.dir.join(".claude/skills/bonsai/SKILL.md")).unwrap(),
+        skill
+    );
     assert!(!repo.dir.join(".codex").exists());
 
     // --all installs everywhere, detected or not.
@@ -1920,16 +1924,16 @@ fn workspace_file_can_be_disabled() {
 }
 
 #[test]
-fn agents_prints_usage_contract() {
+fn agents_prints_skill_body_without_frontmatter() {
     let repo = TestRepo::new();
+    let skill = repo.bonsai(&repo.dir).arg("skill").assert().success();
+    let skill = String::from_utf8_lossy(&skill.get_output().stdout);
+    let (_, body) = skill.split_once("\n---\n").unwrap();
     repo.bonsai(&repo.dir)
         .arg("agents")
         .assert()
         .success()
-        .stdout(
-            predicate::str::contains("bonsai add")
-                .and(predicate::str::contains("bonsai clean --yes")),
-        );
+        .stdout(body.trim_start().to_owned());
 }
 
 #[test]

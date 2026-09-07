@@ -162,8 +162,9 @@ mid-project costs nothing. It sticks to the two cross-harness standards —
 no per-harness plugins to install or maintain.
 
 **The [Agent Skill](https://agentskills.io)** (`skills/bonsai/SKILL.md`)
-teaches agents the workflow, its invariants, and the destructive-command
-policy. It is embedded in the binary and installs into each harness's
+teaches agents the workflow, its invariants, and how to complete authorized
+operations while preserving cleanup scope and uncommitted work. It is
+embedded in the binary and installs into each harness's
 standard skill directory:
 
 ```sh
@@ -172,8 +173,12 @@ bonsai skill install --all  # or install for every harness unconditionally
 bonsai skill                # or print it and pipe it wherever you want
 ```
 
-**Or the AGENTS.md standard**: `bonsai agents >> AGENTS.md` appends a
-shorter usage contract to the cross-harness instructions file.
+**Or the AGENTS.md standard**: `bonsai agents >> AGENTS.md` appends the same
+skill body without YAML frontmatter to the cross-harness instructions file.
+Both commands use `skills/bonsai/SKILL.md` embedded at build time, so their
+guidance stays in sync. After upgrading bonsai, rerun `bonsai skill install`
+to refresh installed copies, or replace the existing bonsai section in
+`AGENTS.md` with fresh `bonsai agents` output.
 
 **Everything is scriptable**: `path=$(bonsai add feat-x)` prints the worktree
 path and is idempotent; `bonsai list --json` and `bonsai clean --dry-run
