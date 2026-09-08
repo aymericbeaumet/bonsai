@@ -25,6 +25,7 @@ figment = { version = "0.10", features = ["toml", "env"] }
 futures-util = "0.3"
 glob = "0.3"
 inquire = "0.9"
+jsonc-parser = { version = "0.33.1", features = ["cst", "serde", "serde_json"] }
 portable-pty = "0.9"
 rand = "0.9"
 ratatui = "0.30"
@@ -37,13 +38,15 @@ shlex = "1"
 skim = { version = "5.6", default-features = false }
 slug = "0.1"
 tabwriter = "1.4"
-thiserror = "2"
 tempfile = "3"
+thiserror = "2"
 tokio = { version = "1", features = ["full"] }
 toml = "1.1"
 
 [target.'cfg(unix)'.dependencies]
+libc = "0.2"
 nix = { version = "0.30", features = ["signal", "process", "fs", "poll"] }
+signal-hook = "0.3"
 
 [dev-dependencies]
 assert_cmd = "2"

@@ -157,10 +157,7 @@ fn project(config: &Config, common: &Path, source: &Path) -> Result<(Project, Ve
         .first()
         .ok_or_else(|| anyhow::anyhow!("no registered worktrees"))?;
     let main_is_bare = main.is_bare;
-    let repo = Repo {
-        main_root: main.path.clone(),
-        git,
-    };
+    let repo = Repo::from_worktrees(git, registered, Some(source))?;
     let remote = repo
         .remote_name(config)
         .and_then(|name| repo.git.out(&["remote", "get-url", &name]).ok());
@@ -285,8 +282,19 @@ fn candidates(root: &Path, warnings: &mut Vec<String>) -> BTreeSet<PathBuf> {
                 // Workspace files retain references to main/external checkouts
                 // that a scan of managed directories alone cannot discover.
                 if item.metadata().is_ok_and(|m| m.len() <= 2 * 1024 * 1024)
-                    && let Ok(contents) = std::fs::read(&path)
-                    && let Ok(workspace) = serde_json::from_slice::<serde_json::Value>(&contents)
+                    && let Ok(contents) = std::fs::read_to_string(&path)
+                    && let Ok(workspace) = jsonc_parser::parse_to_serde_value::<serde_json::Value>(
+                        &contents,
+                        &jsonc_parser::ParseOptions {
+                            allow_comments: true,
+                            allow_trailing_commas: true,
+                            allow_loose_object_property_names: false,
+                            allow_missing_commas: false,
+                            allow_single_quoted_strings: false,
+                            allow_hexadecimal_numbers: false,
+                            allow_unary_plus_numbers: false,
+                        },
+                    )
                     && let Some(folders) = workspace.get("folders").and_then(|f| f.as_array())
                 {
                     for folder in folders {
@@ -412,6 +420,30 @@ mod tests {
         assert!(candidates.contains(&canonicalize_or_self(&dir.path().join("../main-checkout"))));
         assert_eq!(candidates.len(), 2);
         assert!(warnings.is_empty());
+    }
+
+    #[test]
+    fn scan_discovers_external_checkouts_from_preserved_jsonc_workspaces() {
+        let directory = tempfile::tempdir().unwrap();
+        let root = directory.path().join("managed");
+        let checkout = directory.path().join("external checkout");
+        std::fs::create_dir(&root).unwrap();
+        std::fs::create_dir_all(checkout.join(".git")).unwrap();
+        let contents = r#"{
+            // Keep my editor settings and custom folder name.
+            "folders": [{"name": "My project", "path": "../external checkout",},],
+            "settings": {"example.documentation": "https://example.test/docs",},
+        }"#;
+        let workspace = root.join("bonsai.code-workspace");
+        std::fs::write(&workspace, contents).unwrap();
+
+        let mut warnings = Vec::new();
+        assert_eq!(
+            candidates(&root, &mut warnings),
+            BTreeSet::from([canonicalize_or_self(&checkout)])
+        );
+        assert!(warnings.is_empty());
+        assert_eq!(std::fs::read_to_string(&workspace).unwrap(), contents);
     }
 
     #[cfg(unix)]

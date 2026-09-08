@@ -1,9 +1,9 @@
 use std::collections::{HashMap, HashSet};
 use std::path::PathBuf;
 
-use anyhow::Result;
+use anyhow::{Context, Result};
 
-use crate::commands::remove::remove_worktree;
+use crate::commands::remove::{RemovalFailure, delete_branch_checked, preflight, remove_worktree};
 use crate::config::Config;
 use crate::git::Git;
 use crate::parallel;
@@ -14,7 +14,6 @@ use crate::worktree::Worktree;
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Reason {
     Merged,
-    UpstreamGone,
     SquashMerged,
 }
 
@@ -22,7 +21,6 @@ impl Reason {
     fn as_str(self) -> &'static str {
         match self {
             Reason::Merged => "merged",
-            Reason::UpstreamGone => "upstream gone",
             Reason::SquashMerged => "squash-merged",
         }
     }
@@ -45,8 +43,6 @@ pub fn classify(facts: BranchFacts) -> Option<Reason> {
     }
     if facts.merged {
         Some(Reason::Merged)
-    } else if facts.upstream_gone {
-        Some(Reason::UpstreamGone)
     } else if facts.squash_merged {
         Some(Reason::SquashMerged)
     } else {
@@ -67,10 +63,14 @@ struct JsonReport {
     planned: Vec<JsonEntry>,
     skipped_dirty: Vec<JsonEntry>,
     removed: Vec<String>,
+    deleted_branches: Vec<String>,
+    failures: Vec<String>,
+    recovery: Option<PathBuf>,
 }
 
 pub fn run(
     config: &Config,
+    repo: &Repo,
     dry_run: bool,
     yes: bool,
     no_fetch: bool,
@@ -80,21 +80,32 @@ pub fn run(
         dry_run,
         ..Default::default()
     };
-    let outcome = run_inner(config, dry_run, yes, no_fetch, &mut report);
-    if json && outcome.is_ok() {
-        println!("{}", serde_json::to_string_pretty(&report)?);
+    let outcome = run_inner(config, repo, dry_run, yes, no_fetch, &mut report);
+    if let Ok(recovery) = &outcome {
+        report.recovery = recovery.clone();
+    }
+    if let Err(error) = &outcome {
+        report.failures.push(format!("{error:#}"));
+        if let Some(failure) = error.downcast_ref::<RemovalFailure>() {
+            report.recovery = failure.recovery.clone();
+        }
+    }
+    if json {
+        crate::output::line(format_args!("{}", serde_json::to_string_pretty(&report)?))?;
     }
     outcome
 }
 
 fn run_inner(
     config: &Config,
+    repo: &Repo,
     dry_run: bool,
     yes: bool,
     no_fetch: bool,
     report: &mut JsonReport,
 ) -> Result<Option<PathBuf>> {
-    let repo = Repo::require()?;
+    let _root_lock = crate::paths::lock_root(&config.root_dir(), false)?;
+    let _lock = repo.lock_mutations()?;
     let remote = repo.remote_name(config);
 
     // The gone-upstream check is only as good as the local remote refs, so
@@ -107,7 +118,7 @@ fn run_inner(
     }
 
     let default = repo.default_branch(config)?;
-    let target = match &remote {
+    let target_ref = match &remote {
         Some(remote)
             if repo.git.ok(&[
                 "show-ref",
@@ -120,10 +131,11 @@ fn run_inner(
         }
         _ => default.clone(),
     };
+    let target = repo.git.out(&["rev-parse", "--verify", &target_ref])?;
 
     let merged: HashSet<String> = repo
         .git
-        .out(&["branch", "--merged", &target, "--format=%(refname:short)"])?
+        .out(&["branch", "--merged", &target, "--format=%(objectname)"])?
         .lines()
         .map(str::to_string)
         .collect();
@@ -145,8 +157,11 @@ fn run_inner(
         .clean
         .protected
         .iter()
-        .filter_map(|pattern| glob::Pattern::new(pattern).ok())
-        .collect::<Vec<_>>();
+        .map(|pattern| {
+            glob::Pattern::new(pattern)
+                .with_context(|| format!("invalid protected branch glob '{pattern}'"))
+        })
+        .collect::<Result<Vec<_>>>()?;
 
     let worktrees = repo.bonsai_worktrees(config)?;
     let workers = parallel::worker_count(worktrees.len());
@@ -166,13 +181,13 @@ fn run_inner(
         }
         let track = tracking.get(&branch).map(String::as_str).unwrap_or("");
         let mut facts = BranchFacts {
-            merged: merged.contains(&branch),
+            merged: wt.head.as_ref().is_some_and(|head| merged.contains(head)),
             upstream_gone: track.contains("[gone]"),
             upstream_ahead: track.contains("ahead"),
             ..Default::default()
         };
-        if classify(facts).is_none() && !facts.upstream_ahead {
-            facts.squash_merged = is_squash_merged(&repo.git, &target, &branch);
+        if classify(facts).is_none() && (!facts.upstream_ahead || facts.upstream_gone) {
+            facts.squash_merged = is_squash_merged(&repo.git, &target, wt.head.as_deref()?);
         }
         let reason = classify(facts)?;
         Some((wt.clone(), branch, reason, is_dirty(wt)))
@@ -259,18 +274,38 @@ fn run_inner(
         );
     }
     let mut cd_home = false;
-    for (wt, branch, _) in &candidates {
-        if inside(wt) {
-            cd_home = true;
+    let outcome = (|| -> Result<()> {
+        anyhow::ensure!(
+            repo.git.out(&["rev-parse", "--verify", &target_ref])? == target,
+            "integration target changed since selection; retry"
+        );
+        for (wt, _, _) in &candidates {
+            preflight(repo, config, wt, false)?;
         }
-        remove_worktree(&repo, config, wt, false)?;
-        // -d would refuse gone/squash-merged branches; the checks above are
-        // the safety justification for -D.
-        repo.git.run(&["branch", "-D", branch])?;
-        eprintln!("bonsai: [{branch}] deleted branch");
-        report.removed.push(branch.clone());
+        for (wt, branch, _) in &candidates {
+            preflight(repo, config, wt, false)?;
+            let removed = remove_worktree(repo, config, wt, false);
+            let path_removed = removed.is_ok() || wt.path.try_exists().is_ok_and(|exists| !exists);
+            cd_home |= path_removed && inside(wt);
+            if path_removed {
+                report.removed.push(branch.clone());
+            }
+            removed?;
+            delete_branch_checked(repo, wt)?;
+            report.deleted_branches.push(branch.clone());
+            eprintln!("bonsai: [{branch}] deleted branch");
+        }
+        Ok(())
+    })();
+    crate::workspace::sync_quietly(repo, config);
+    if let Err(error) = outcome {
+        return Err(RemovalFailure {
+            recovery: cd_home.then(|| repo.main_root.clone()),
+            completed: report.removed.clone(),
+            error,
+        }
+        .into());
     }
-    crate::workspace::sync_quietly(&repo, config);
 
     if cd_home {
         eprintln!("bonsai: current directory was removed, returning to the repo root");
@@ -326,7 +361,7 @@ mod tests {
                 upstream_gone: true,
                 ..f()
             }),
-            Some(Reason::UpstreamGone)
+            None
         );
         assert_eq!(
             classify(BranchFacts {
@@ -344,14 +379,14 @@ mod tests {
             }),
             None
         );
-        // ...but not when the upstream is gone (ahead-of-nothing).
+        // A missing upstream never proves that local commits were integrated.
         assert_eq!(
             classify(BranchFacts {
                 upstream_gone: true,
                 upstream_ahead: true,
                 ..f()
             }),
-            Some(Reason::UpstreamGone)
+            None
         );
     }
 }

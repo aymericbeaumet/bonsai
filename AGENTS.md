@@ -34,3 +34,16 @@
 - `BONSAI_*` environment variables are strict configuration keys. Prefix
   internal process/bootstrap/test variables with `_BONSAI_` so they cannot
   make normal commands fail configuration parsing.
+- Repository discovery caches the initial worktree inventory only within one
+  invocation. `Repo::lock_mutations` must invalidate it: an interactive wait or
+  another Bonsai process may have changed the inventory before lock acquisition.
+- Workspace folder ownership lives in `.locks/workspace-*.folders.json`, under
+  the corresponding workspace lock. Preserve unknown entries; commit workspace
+  content before ownership metadata so interruption cannot create false ownership.
+- Cwd recovery belongs to operation outcomes, including partial failures.
+  Unwrapped `clean --json` carries recovery inside its single JSON document;
+  shell-wrapped navigation uses the sentinel protocol.
+- `REQUIRE_TEST_SHELLS=1` makes Bash/Zsh/Fish coverage mandatory.
+- Release PTY checks are in `tests/terminal.py`; scalable disposable benchmarks
+  are in `scripts/benchmark.py`. The two real package-manager CLI tests are
+  ignored in ordinary runs and must be requested with `--ignored`.

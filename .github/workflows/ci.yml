@@ -27,7 +27,11 @@ jobs:
       - run: git diff --exit-code -- dist
       - uses: dtolnay/rust-toolchain@stable
       - uses: Swatinem/rust-cache@v2
-      - run: cargo build --manifest-path ../Cargo.toml
+      - run: cargo build --locked --manifest-path ../Cargo.toml
+      - name: Install tmux for browser runtime tests
+        run: |
+          sudo apt-get update
+          sudo apt-get install --yes tmux
       - run: npx playwright install --with-deps chromium
       - run: npm run test:e2e
 
@@ -50,7 +54,35 @@ jobs:
         with:
           components: rustfmt, clippy
       - uses: Swatinem/rust-cache@v2
+      - name: Install supported shells
+        if: matrix.name == 'linux-amd64'
+        run: |
+          sudo apt-get update
+          sudo apt-get install --yes zsh fish
+          echo "REQUIRE_TEST_SHELLS=1" >> "$GITHUB_ENV"
       - run: cargo fmt --check
         if: matrix.name == 'linux-amd64'
-      - run: cargo clippy --all-targets -- -D warnings
-      - run: cargo test
+      - run: cargo clippy --locked --all-targets -- -D warnings
+      - run: cargo test --locked
+      - uses: actions/setup-node@v7
+        if: matrix.name == 'linux-amd64'
+        with:
+          node-version: '24'
+          package-manager-cache: false
+      - uses: astral-sh/setup-uv@v10
+        if: matrix.name == 'linux-amd64'
+        with:
+          version: '0.11.15'
+          python-version: '3.13'
+          enable-cache: false
+      - name: Real package-manager smoke tests
+        if: matrix.name == 'linux-amd64'
+        run: |
+          uv python install 3.13
+          cargo test --locked --test cli real_package_managers_ -- --ignored
+      - name: Release terminal and benchmark smoke tests
+        if: matrix.name == 'linux-amd64'
+        run: |
+          cargo build --release --locked
+          python3 tests/terminal.py target/release/bonsai
+          python3 scripts/benchmark.py --worktrees 1 --sessions 1000 --runs 3

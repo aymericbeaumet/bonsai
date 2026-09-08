@@ -50,8 +50,20 @@ impl PackageManager {
             Self::Bun => &["install", "--frozen-lockfile"],
             // Populates the shared ~/.cargo registry without building.
             Self::Cargo => &["fetch", "--locked"],
-            Self::Uv => &["sync", "--frozen"],
+            Self::Uv => &["sync", "--locked"],
         }
+    }
+
+    fn has_lockfile(self, dir: &Path) -> bool {
+        let names: &[&str] = match self {
+            Self::Pnpm => &["pnpm-lock.yaml"],
+            Self::Npm => &["package-lock.json", "npm-shrinkwrap.json"],
+            Self::YarnClassic | Self::YarnBerry => &["yarn.lock"],
+            Self::Bun => &["bun.lock", "bun.lockb"],
+            Self::Cargo => &["Cargo.lock"],
+            Self::Uv => &["uv.lock"],
+        };
+        names.iter().any(|name| dir.join(name).is_file())
     }
 
     fn worktree_warning(self, dir: &Path) -> Option<WorktreeWarning> {
@@ -97,18 +109,19 @@ pub fn detect(dir: &Path) -> Vec<PackageManager> {
 
 fn detect_js(dir: &Path) -> Option<PackageManager> {
     if let Some((name, major)) = package_manager_field(dir) {
-        match name.as_str() {
-            "pnpm" => return Some(PackageManager::Pnpm),
-            "npm" => return Some(PackageManager::Npm),
-            "bun" => return Some(PackageManager::Bun),
-            "yarn" => {
-                return Some(match major {
-                    Some(version) if version.major >= 2 => PackageManager::YarnBerry,
-                    Some(_) => PackageManager::YarnClassic,
-                    None => yarn_flavor(dir),
-                });
-            }
-            _ => {} // unknown manager: fall back to lockfiles
+        let selected = match name.as_str() {
+            "pnpm" => Some(PackageManager::Pnpm),
+            "npm" => Some(PackageManager::Npm),
+            "bun" => Some(PackageManager::Bun),
+            "yarn" => Some(match major {
+                Some(version) if version.major >= 2 => PackageManager::YarnBerry,
+                Some(_) => PackageManager::YarnClassic,
+                None => yarn_flavor(dir),
+            }),
+            _ => None,
+        };
+        if let Some(pm) = selected {
+            return pm.has_lockfile(dir).then_some(pm);
         }
     }
     if dir.join("pnpm-lock.yaml").is_file() {
@@ -186,9 +199,14 @@ fn pnpm_worktree_warning(dir: &Path) -> Option<WorktreeWarning> {
         });
     }
     let config = read_yaml::<PnpmConfig>(&dir.join("pnpm-workspace.yaml")).unwrap_or_default();
-    if config.virtual_store_type.as_deref() == Some("global")
-        || config.enable_global_virtual_store == Some(true)
-    {
+    let store_type = std::env::var("npm_config_virtual_store_type")
+        .ok()
+        .or(config.virtual_store_type);
+    let enabled = std::env::var("npm_config_enable_global_virtual_store")
+        .ok()
+        .and_then(|value| parse_bool(&value))
+        .or(config.enable_global_virtual_store);
+    if store_type.as_deref() == Some("global") || (store_type.is_none() && enabled == Some(true)) {
         return None;
     }
     let message = if version.is_some_and(|v| {
@@ -198,10 +216,10 @@ fn pnpm_worktree_warning(dir: &Path) -> Option<WorktreeWarning> {
             patch: 0,
         })
     }) {
-        "pnpm is using a per-worktree virtual store; add 'enableGlobalVirtualStore: true' to pnpm-workspace.yaml"
+        "pnpm: no shared virtual store found in the checked settings; configure 'enableGlobalVirtualStore: true' in pnpm-workspace.yaml if not configured elsewhere"
             .to_string()
     } else {
-        "pnpm is using a per-worktree virtual store; add 'virtualStoreType: global' to pnpm-workspace.yaml"
+        "pnpm: no shared virtual store found in the checked settings; configure 'virtualStoreType: global' (pnpm 11.23+) or 'enableGlobalVirtualStore: true' (10.12.1+) if not configured elsewhere"
             .to_string()
     };
     Some(WorktreeWarning {
@@ -235,13 +253,26 @@ fn bun_worktree_warning(dir: &Path) -> Option<WorktreeWarning> {
         });
     }
     let config = read_toml::<BunConfig>(&dir.join("bunfig.toml")).unwrap_or_default();
-    if config.install.linker.as_deref() == Some("isolated")
-        && config.install.global_store == Some(true)
-    {
+    let global_path = std::env::var_os("XDG_CONFIG_HOME")
+        .filter(|value| !value.is_empty())
+        .map(PathBuf::from)
+        .or_else(std::env::home_dir)
+        .map(|path| path.join(".bunfig.toml"));
+    let global = global_path
+        .as_deref()
+        .and_then(read_toml::<BunConfig>)
+        .unwrap_or_default();
+    let linker = config.install.linker.or(global.install.linker);
+    let enabled = std::env::var("BUN_INSTALL_GLOBAL_STORE")
+        .ok()
+        .and_then(|value| parse_bool(&value))
+        .or(config.install.global_store)
+        .or(global.install.global_store);
+    if linker.as_deref() == Some("isolated") && enabled == Some(true) {
         return None;
     }
     Some(WorktreeWarning {
-        message: "Bun is materializing dependencies in every worktree; set linker = \"isolated\" and globalStore = true under [install] in bunfig.toml"
+        message: "Bun: shared isolated installs are not enabled in the checked settings; consider linker = \"isolated\" and globalStore = true under [install] in bunfig.toml"
             .to_string(),
         docs: BUN_WORKTREE_DOCS,
     })
@@ -256,7 +287,30 @@ struct YarnConfig {
 }
 
 fn yarn_worktree_warning(dir: &Path) -> Option<WorktreeWarning> {
-    let config = read_yaml::<YarnConfig>(&dir.join(".yarnrc.yml")).unwrap_or_default();
+    let mut config = YarnConfig::default();
+    let rc_name = std::env::var("YARN_RC_FILENAME").unwrap_or_else(|_| ".yarnrc.yml".to_string());
+    let mut paths = dir
+        .ancestors()
+        .map(|parent| parent.join(&rc_name))
+        .collect::<Vec<_>>();
+    if let Some(home) = std::env::home_dir() {
+        paths.push(home.join(&rc_name));
+    }
+    for path in paths.into_iter().rev() {
+        if let Some(layer) = read_yaml::<YarnConfig>(&path) {
+            config.enable_global_cache = layer.enable_global_cache.or(config.enable_global_cache);
+            config.node_linker = layer.node_linker.or(config.node_linker);
+            config.nm_mode = layer.nm_mode.or(config.nm_mode);
+        }
+    }
+    config.enable_global_cache = std::env::var("YARN_ENABLE_GLOBAL_CACHE")
+        .ok()
+        .and_then(|value| parse_bool(&value))
+        .or(config.enable_global_cache);
+    config.node_linker = std::env::var("YARN_NODE_LINKER")
+        .ok()
+        .or(config.node_linker);
+    config.nm_mode = std::env::var("YARN_NM_MODE").ok().or(config.nm_mode);
     let version = package_manager_version(dir, "yarn");
     let global_cache = config
         .enable_global_cache
@@ -275,7 +329,9 @@ fn yarn_worktree_warning(dir: &Path) -> Option<WorktreeWarning> {
         "use Yarn PnP or set nmMode: hardlinks-global with the node-modules linker"
     };
     Some(WorktreeWarning {
-        message: format!("Yarn is keeping dependency data per worktree; {setting} in .yarnrc.yml"),
+        message: format!(
+            "Yarn: shared dependency storage is not confirmed by the checked settings; {setting} in .yarnrc.yml if needed"
+        ),
         docs: YARN_CONFIG_DOCS,
     })
 }
@@ -372,6 +428,21 @@ pub fn find_program(name: &str) -> Option<PathBuf> {
     find_program_in(name, &std::env::var_os("PATH")?)
 }
 
+pub fn find_program_at(name: &str, cwd: &Path) -> Option<PathBuf> {
+    std::env::split_paths(&std::env::var_os("PATH")?)
+        .filter(|path| !path.as_os_str().is_empty())
+        .find_map(|path| {
+            find_in_dir(
+                &if path.is_absolute() {
+                    path
+                } else {
+                    cwd.join(path)
+                },
+                name,
+            )
+        })
+}
+
 fn find_program_in(name: &str, path: &std::ffi::OsStr) -> Option<PathBuf> {
     std::env::split_paths(path)
         .filter(|dir| !dir.as_os_str().is_empty())
@@ -440,7 +511,21 @@ mod tests {
         )
         .unwrap();
         touch(tmp.path(), "package-lock.json");
+        touch(tmp.path(), "pnpm-lock.yaml");
         assert_eq!(detect(tmp.path()), vec![PackageManager::Pnpm]);
+    }
+
+    #[test]
+    fn matching_lockfile_is_required_for_pinned_managers() {
+        for field in ["pnpm@10.12.1", "yarn@4.0.0", "bun@1.4.0", "npm@11.0.0"] {
+            let tmp = tempfile::tempdir().unwrap();
+            std::fs::write(
+                tmp.path().join("package.json"),
+                format!(r#"{{"packageManager":"{field}"}}"#),
+            )
+            .unwrap();
+            assert!(detect(tmp.path()).is_empty(), "{field} without lockfile");
+        }
     }
 
     #[test]
@@ -481,6 +566,7 @@ mod tests {
             )
             .unwrap();
             touch(tmp.path(), ".yarnrc.yml");
+            touch(tmp.path(), "yarn.lock");
             assert_eq!(detect(tmp.path()), vec![*expected], "field {field}");
         }
     }
@@ -530,7 +616,7 @@ mod tests {
                 &["install", "--frozen-lockfile"],
             ),
             (PackageManager::Cargo, "cargo", &["fetch", "--locked"]),
-            (PackageManager::Uv, "uv", &["sync", "--frozen"]),
+            (PackageManager::Uv, "uv", &["sync", "--locked"]),
         ];
         for (pm, program, args) in cases {
             assert_eq!(pm.program(), *program);

@@ -20,6 +20,77 @@ fn ensure_tty(what: &str) -> Result<()> {
     Ok(())
 }
 
+#[cfg(unix)]
+struct TerminalGuard {
+    settings: libc::termios,
+    signals: signal_hook::iterator::Handle,
+    worker: Option<std::thread::JoinHandle<()>>,
+}
+
+#[cfg(unix)]
+impl TerminalGuard {
+    fn new() -> Result<Self> {
+        use signal_hook::consts::signal::{SIGHUP, SIGINT, SIGTERM};
+        let mut settings = std::mem::MaybeUninit::<libc::termios>::uninit();
+        // stdin was verified as a terminal; tcgetattr initializes the complete
+        // termios value on success, before either picker enables raw mode.
+        if unsafe { libc::tcgetattr(libc::STDIN_FILENO, settings.as_mut_ptr()) } != 0 {
+            return Err(std::io::Error::last_os_error())
+                .context("could not save terminal settings");
+        }
+        let settings = unsafe { settings.assume_init() };
+        let mut signals = signal_hook::iterator::Signals::new([SIGHUP, SIGINT, SIGTERM])?;
+        let handle = signals.handle();
+        let worker = std::thread::Builder::new().name("terminal-signals".into()).spawn(move || {
+            if let Some(signal) = signals.forever().next() {
+                restore_terminal(&settings);
+                // This runs on a normal thread, never inside a signal handler.
+                let reset = b"\x1b[?1000l\x1b[?1002l\x1b[?1003l\x1b[?1006l\x1b[?2004l\x1b[0m\x1b[?25h\r\n";
+                unsafe { libc::write(libc::STDERR_FILENO, reset.as_ptr().cast(), reset.len()); }
+                let _ = signal_hook::low_level::emulate_default_handler(signal);
+                std::process::exit(128 + signal);
+            }
+        })?;
+        Ok(Self {
+            settings,
+            signals: handle,
+            worker: Some(worker),
+        })
+    }
+}
+
+#[cfg(unix)]
+fn restore_terminal(settings: &libc::termios) {
+    // The borrowed termios snapshot remains valid for this call. Retry when a
+    // resize or a second signal interrupts the restoration syscall.
+    while unsafe { libc::tcsetattr(libc::STDIN_FILENO, libc::TCSANOW, settings) } != 0 {
+        if std::io::Error::last_os_error().kind() != std::io::ErrorKind::Interrupted {
+            break;
+        }
+    }
+}
+
+#[cfg(unix)]
+impl Drop for TerminalGuard {
+    fn drop(&mut self) {
+        restore_terminal(&self.settings);
+        self.signals.close();
+        if let Some(worker) = self.worker.take() {
+            let _ = worker.join();
+        }
+    }
+}
+
+#[cfg(not(unix))]
+struct TerminalGuard;
+
+#[cfg(not(unix))]
+impl TerminalGuard {
+    fn new() -> Result<Self> {
+        Ok(Self)
+    }
+}
+
 /// A picker option whose searchable text is independent from its styled row.
 pub struct StyledOption {
     /// Text searched by the fuzzy scorer. It may include useful hidden fields
@@ -58,6 +129,7 @@ pub fn select_styled(
     initial_filter: Option<&str>,
 ) -> Result<usize> {
     ensure_tty(prompt)?;
+    let _terminal = TerminalGuard::new()?;
     let picker_options = skim_options(prompt, initial_filter, options.len())?;
     let output = Skim::run_items(picker_options, options)
         .map_err(|error| anyhow!("fuzzy picker failed: {error}"))?;
@@ -96,7 +168,7 @@ pub fn recent_options(rows: &[RecentRow]) -> Vec<StyledOption> {
         .map(|column| {
             rows.iter()
                 .filter_map(|row| row.columns.get(column))
-                .map(|value| value.chars().count())
+                .map(|value| Line::from(value.as_str()).width())
                 .max()
                 .unwrap_or(0)
         })
@@ -111,7 +183,7 @@ pub fn recent_options(rows: &[RecentRow]) -> Vec<StyledOption> {
                 .iter()
                 .enumerate()
                 .map(|(column, value)| {
-                    let padding = widths[column].saturating_sub(value.chars().count());
+                    let padding = widths[column].saturating_sub(Line::from(value.as_str()).width());
                     format!("{value}{}", " ".repeat(padding))
                 })
                 .collect::<Vec<_>>()
@@ -163,6 +235,7 @@ fn age_style(elapsed: Duration) -> Style {
 
 pub fn multi_select_all_checked(prompt: &str, options: Vec<String>) -> Result<Vec<String>> {
     ensure_tty(prompt)?;
+    let _terminal = TerminalGuard::new()?;
     let all: Vec<usize> = (0..options.len()).collect();
     MultiSelect::new(prompt, options)
         .with_default(&all)
@@ -172,6 +245,7 @@ pub fn multi_select_all_checked(prompt: &str, options: Vec<String>) -> Result<Ve
 
 pub fn multi_select_none_checked(prompt: &str, options: Vec<String>) -> Result<Vec<String>> {
     ensure_tty(prompt)?;
+    let _terminal = TerminalGuard::new()?;
     MultiSelect::new(prompt, options)
         .prompt()
         .context("selection cancelled")
@@ -179,6 +253,7 @@ pub fn multi_select_none_checked(prompt: &str, options: Vec<String>) -> Result<V
 
 pub fn confirm(prompt: &str) -> Result<bool> {
     ensure_tty(prompt)?;
+    let _terminal = TerminalGuard::new()?;
     Confirm::new(prompt)
         .with_default(false)
         .prompt()
@@ -189,6 +264,7 @@ pub fn confirm(prompt: &str) -> Result<bool> {
 /// (that is how `bonsai add` creates new branches).
 pub fn text_with_suggestions(prompt: &str, help: &str, suggestions: Vec<String>) -> Result<String> {
     ensure_tty(prompt)?;
+    let _terminal = TerminalGuard::new()?;
     let value = Text::new(prompt)
         .with_autocomplete(Suggestions(suggestions))
         .with_help_message(help)
@@ -237,6 +313,19 @@ mod tests {
     use ratatui::style::{Color, Modifier};
     use skim::{binds::parse_key, tui::actions::Action};
     use std::time::Duration;
+
+    #[test]
+    fn recent_columns_use_terminal_display_width() {
+        let rows = ["界", "e\u{301}", "👩‍💻"].map(|name| super::RecentRow {
+            columns: vec![name.into(), "next".into()],
+            search: name.into(),
+            last_change: None,
+        });
+        let options = super::recent_options(&rows);
+        assert_eq!(options[0].display, "界  next");
+        assert_eq!(options[1].display, "e\u{301}   next");
+        assert_eq!(options[2].display, "👩‍💻  next");
+    }
 
     #[test]
     fn fuzzy_subsequence() {

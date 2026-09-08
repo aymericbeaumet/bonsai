@@ -5,8 +5,8 @@ use anyhow::{Context, Result};
 /// The canonical skill, embedded so `cargo install` distributes it.
 pub const SKILL_MD: &str = include_str!("../../skills/bonsai/SKILL.md");
 
-pub fn show() {
-    print!("{SKILL_MD}");
+pub fn show() -> Result<()> {
+    crate::output::write(format_args!("{SKILL_MD}"))
 }
 
 /// Install the skill into the skill directories of every AI harness detected

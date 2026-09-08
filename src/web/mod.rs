@@ -4,7 +4,7 @@ mod security;
 pub(crate) mod terminal;
 mod tui;
 
-use std::io::{IsTerminal, Write};
+use std::io::IsTerminal;
 use std::path::{Path, PathBuf};
 use std::process::{Child, Command, Stdio};
 use std::sync::atomic::{AtomicBool, Ordering};
@@ -86,8 +86,7 @@ async fn serve(
         notice: Arc::new(Mutex::new(None)),
     };
     let url = state.security.launch_url();
-    println!("{url}");
-    std::io::stdout().flush()?;
+    crate::output::line(format_args!("{url}"))?;
     eprintln!("Bonsai is running locally. Press Ctrl-C to stop.");
     if !no_open {
         let notice = Arc::clone(&state.notice);
@@ -527,6 +526,7 @@ mod tests {
     use super::*;
     use axum::body::{Body, to_bytes};
     use axum::http::Method;
+    use std::io::Write;
     use tower::ServiceExt;
 
     #[cfg(unix)]

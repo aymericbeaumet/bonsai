@@ -5,7 +5,6 @@ use std::process::Command;
 use anyhow::{Context, Result, bail, ensure};
 use clap::ValueEnum;
 
-use crate::git::Git;
 use crate::picker;
 use crate::repo::Repo;
 
@@ -44,10 +43,9 @@ impl Provider {
     }
 }
 
-pub fn run(provider: Option<Provider>, prompt: Option<String>) -> Result<()> {
-    Repo::require()?;
+pub fn run(repo: &Repo, provider: Option<Provider>, prompt: Option<String>) -> Result<()> {
     ensure!(
-        Git::new().out(&["rev-parse", "--is-inside-work-tree"])? == "true",
+        repo.current_root.is_some(),
         "start requires a Git worktree, not a bare repository"
     );
     let (provider, program) = select_provider(provider)?;

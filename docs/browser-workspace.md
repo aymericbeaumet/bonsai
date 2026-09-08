@@ -33,7 +33,8 @@ confirmation. Completed command output stays visible until Enter or Ctrl+].
 `src/web/inventory.rs` scans the configured root without descending into
 checkouts. Canonical directory identities let it follow directory symlinks
 without revisiting paths or entering cycles. It also reads folder references
-from `.code-workspace` files and includes the checkout where the server
+from JSONC `.code-workspace` files, preserving their comments and custom
+content, and includes the checkout where the server
 started. Each discovered repository is expanded through Git's registered
 worktrees, exposing its main checkout and external worktrees alongside
 Bonsai-managed worktrees. The canonical common Git directory identifies a

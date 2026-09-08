@@ -114,9 +114,26 @@ impl Config {
         if let Some(dir) = toml_dir {
             figment = figment.merge(Toml::file(dir.join(".bonsai.toml")));
         }
-        figment = figment.merge(Serialized::defaults(git_config_patch(git)));
+        figment = figment.merge(Serialized::defaults(git_config_patch(git)?));
         figment = figment.merge(Env::prefixed("BONSAI_").split("__"));
-        figment.extract().context("invalid bonsai configuration")
+        let config: Config = figment.extract().context("invalid bonsai configuration")?;
+        for pattern in &config.clean.protected {
+            glob::Pattern::new(pattern)
+                .with_context(|| format!("invalid clean.protected glob '{pattern}'"))?;
+        }
+        for pattern in &config.add.copy {
+            glob::Pattern::new(pattern)
+                .with_context(|| format!("invalid add.copy glob '{pattern}'"))?;
+            let path = Path::new(pattern);
+            if path.is_absolute()
+                || path
+                    .components()
+                    .any(|part| part == std::path::Component::ParentDir)
+            {
+                anyhow::bail!("add.copy glob '{pattern}' must stay inside the checkout");
+            }
+        }
+        Ok(config)
     }
 
     /// Canonicalized: git resolves symlinks (e.g. /tmp -> /private/tmp on
@@ -164,41 +181,48 @@ struct GitConfigCleanPatch {
 
 /// Read the effective (system < global < local) `bonsai.*` git config.
 /// Multi-valued keys (`git config --add bonsai.add.copy ...`) accumulate.
-fn git_config_patch(git: &Git) -> GitConfigPatch {
+fn git_config_patch(git: &Git) -> Result<GitConfigPatch> {
     let mut patch = GitConfigPatch::default();
     // Exit code 1 (no matches) and running outside a repo are both fine.
-    let Ok(bytes) = git.out_bytes(&["config", "--get-regexp", "--null", r"^bonsai\."]) else {
-        return patch;
+    let bytes = match git.out_bytes(&["config", "--get-regexp", "--null", r"^bonsai\."]) {
+        Ok(bytes) => bytes,
+        Err(error) if error.status == Some(1) => return Ok(patch),
+        Err(error) => return Err(error.into()),
     };
-    for entry in String::from_utf8_lossy(&bytes).split('\0') {
-        let Some((key, value)) = entry.split_once('\n') else {
-            continue;
-        };
+    for entry in String::from_utf8_lossy(&bytes)
+        .split('\0')
+        .filter(|entry| !entry.is_empty())
+    {
+        let (key, value) = entry.split_once('\n').unwrap_or((entry, ""));
         // git lowercases key sections; accept kebab-case spellings too.
         let key = key.to_lowercase().replace('-', "");
         let value = value.to_string();
+        let boolean = || {
+            git_bool(&value)
+                .with_context(|| format!("invalid boolean for git config {key}: '{value}'"))
+        };
         match key.as_str() {
             "bonsai.root" => patch.root = Some(value),
             "bonsai.remote" => patch.remote = Some(value),
             "bonsai.defaultbranch" => patch.default_branch = Some(value),
-            "bonsai.workspace" => patch.workspace = git_bool(&value),
-            "bonsai.add.fetch" => patch.add.fetch = git_bool(&value),
-            "bonsai.add.install" => patch.add.install = git_bool(&value),
+            "bonsai.workspace" => patch.workspace = Some(boolean()?),
+            "bonsai.add.fetch" => patch.add.fetch = Some(boolean()?),
+            "bonsai.add.install" => patch.add.install = Some(boolean()?),
             "bonsai.add.postadd" => patch.add.post_add = Some(value),
             "bonsai.add.copy" => patch.add.copy.get_or_insert_default().push(value),
-            "bonsai.clean.fetch" => patch.clean.fetch = git_bool(&value),
+            "bonsai.clean.fetch" => patch.clean.fetch = Some(boolean()?),
             "bonsai.clean.protected" => patch.clean.protected.get_or_insert_default().push(value),
             _ => eprintln!("bonsai: ignoring unknown git config key '{key}'"),
         }
     }
-    patch
+    Ok(patch)
 }
 
 fn git_bool(value: &str) -> Option<bool> {
     match value.to_lowercase().as_str() {
         "true" | "yes" | "on" | "1" | "" => Some(true),
         "false" | "no" | "off" | "0" => Some(false),
-        _ => None,
+        _ => value.parse::<i64>().ok().map(|number| number != 0),
     }
 }
 
