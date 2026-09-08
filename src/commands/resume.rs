@@ -10,35 +10,13 @@ use anyhow::{Context, Result, bail};
 use rusqlite::{Connection, OpenFlags};
 use serde_json::Value;
 
+use super::start::Provider;
 use crate::config::Config;
 use crate::parallel;
 use crate::picker;
 use crate::repo::Repo;
 
-#[derive(Clone, Copy, Debug, Eq, Hash, Ord, PartialEq, PartialOrd)]
-enum Provider {
-    Claude,
-    Codex,
-    OpenCode,
-}
-
 impl Provider {
-    fn label(self) -> &'static str {
-        match self {
-            Self::Claude => "Claude",
-            Self::Codex => "Codex",
-            Self::OpenCode => "OpenCode",
-        }
-    }
-
-    fn executable(self) -> &'static str {
-        match self {
-            Self::Claude => "claude",
-            Self::Codex => "codex",
-            Self::OpenCode => "opencode",
-        }
-    }
-
     fn resume_args(self, id: &str) -> Vec<String> {
         match self {
             Self::Claude => vec!["--resume".into(), id.into()],
@@ -272,19 +250,11 @@ fn launch(session: &Session, scope: &ProjectScope) -> Result<()> {
         );
         &scope.main_root
     };
-    let status = Command::new(program)
+    let mut command = Command::new(program);
+    command
         .args(session.provider.resume_args(&session.id))
-        .current_dir(cwd)
-        .status()
-        .with_context(|| format!("failed to launch {}", session.provider.executable()))?;
-    if !status.success() {
-        bail!(
-            "{} exited with status {}",
-            session.provider.executable(),
-            status
-        );
-    }
-    Ok(())
+        .current_dir(cwd);
+    super::start::launch_interactive(command, session.provider)
 }
 
 fn claude_sessions(scope: &ProjectScope) -> Result<Vec<Session>> {

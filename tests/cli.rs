@@ -1413,10 +1413,14 @@ fn current_shell_integration_and_direct_binary_use_stay_quiet() {
 
 #[cfg(unix)]
 #[test]
-fn shell_wrappers_leave_resume_stdio_uncaptured_with_global_options() {
+fn shell_wrappers_leave_interactive_commands_uncaptured_with_global_options() {
     let repo = TestRepo::new();
     repo.fake_harness("bonsai");
-    for shell in ["zsh", "bash", "fish"] {
+    for (shell, subcommand) in ["zsh", "bash", "fish"].into_iter().flat_map(|shell| {
+        ["resume", "start", "hq"]
+            .into_iter()
+            .map(move |subcommand| (shell, subcommand))
+    }) {
         let Ok(shell_path) = which(shell) else {
             eprintln!("skipping {shell}: not installed");
             continue;
@@ -1427,7 +1431,7 @@ fn shell_wrappers_leave_resume_stdio_uncaptured_with_global_options() {
             .output()
             .unwrap();
         assert!(generated.status.success());
-        let script = repo.dir.join(format!("resume-wrapper.{shell}"));
+        let script = repo.dir.join(format!("{subcommand}-wrapper.{shell}"));
         std::fs::write(&script, generated.stdout).unwrap();
         let mut command = StdCommand::new(shell_path);
         command
@@ -1437,17 +1441,19 @@ fn shell_wrappers_leave_resume_stdio_uncaptured_with_global_options() {
         if shell == "fish" {
             command.args([
                 "-c",
-                "source \"$argv[1]\"; bonsai --root \"$argv[2]\" resume session-id",
+                "source \"$argv[1]\"; bonsai --root \"$argv[2]\" $argv[3]",
                 script.to_str().unwrap(),
                 repo.root.to_str().unwrap(),
+                subcommand,
             ]);
         } else {
             command.args([
                 "-c",
-                "source \"$1\"; bonsai --root \"$2\" resume session-id",
+                "source \"$1\"; bonsai --root \"$2\" \"$3\"",
                 "_",
                 script.to_str().unwrap(),
                 repo.root.to_str().unwrap(),
+                subcommand,
             ]);
         }
         let output = command.output().unwrap();
@@ -1461,7 +1467,7 @@ fn shell_wrappers_leave_resume_stdio_uncaptured_with_global_options() {
                 .unwrap()
                 .trim(),
             "unset",
-            "{shell} wrapper captured resume stdout"
+            "{shell} wrapper captured {subcommand} stdout"
         );
     }
 }
@@ -1944,6 +1950,433 @@ fn completions_are_generated() {
         .assert()
         .success()
         .stdout(predicate::str::contains("_bonsai"));
+}
+
+struct BrowserServer {
+    child: std::process::Child,
+    authority: String,
+    token: String,
+}
+
+#[test]
+fn start_launches_fresh_sessions_in_the_current_worktree_directory() {
+    let repo = TestRepo::new();
+    let worktree = repo.add("ab/new-session");
+    let subdir = worktree.join("nested");
+    std::fs::create_dir(&subdir).unwrap();
+    for provider in ["claude", "codex", "opencode"] {
+        repo.fake_harness(provider);
+        repo.bonsai(&subdir)
+            .env("PATH", repo.path_with_fakebin())
+            .args(["start", provider])
+            .assert()
+            .success();
+        assert!(
+            std::fs::read_to_string(repo.dir.join(format!("{provider}-args.txt")))
+                .unwrap()
+                .trim()
+                .is_empty()
+        );
+        assert_eq!(
+            PathBuf::from(
+                std::fs::read_to_string(repo.dir.join(format!("{provider}-cwd.txt")))
+                    .unwrap()
+                    .trim()
+            ),
+            subdir
+        );
+        repo.bonsai(&subdir)
+            .env("PATH", repo.path_with_fakebin())
+            .args(["start", provider, "--prompt", "Fix the failing tests"])
+            .assert()
+            .success();
+        let expected = if provider == "opencode" {
+            "--prompt=Fix the failing tests"
+        } else {
+            "-- Fix the failing tests"
+        };
+        let args = std::fs::read_to_string(repo.dir.join(format!("{provider}-args.txt"))).unwrap();
+        assert_eq!(args.trim().replace('"', ""), expected);
+    }
+}
+
+#[test]
+fn start_auto_selects_a_single_installed_provider() {
+    let repo = TestRepo::new();
+    repo.fake_harness("codex");
+    repo.bonsai(&repo.clone)
+        .env("PATH", repo.restricted_path())
+        .arg("start")
+        .assert()
+        .success();
+    assert!(repo.dir.join("codex-args.txt").is_file());
+}
+
+#[test]
+fn start_requires_a_worktree_and_reports_missing_or_ambiguous_providers() {
+    let repo = TestRepo::new();
+    repo.bonsai(&repo.clone)
+        .env("PATH", repo.restricted_path())
+        .args(["start", "codex"])
+        .assert()
+        .failure()
+        .stderr(predicate::str::contains("codex"));
+    repo.fake_harness("codex");
+    repo.fake_harness("claude");
+    repo.bonsai(&repo.dir)
+        .env("PATH", repo.restricted_path())
+        .args(["start", "codex"])
+        .assert()
+        .failure()
+        .stderr(predicate::str::contains("not inside a git repository"));
+    repo.bonsai(&repo.clone)
+        .env("PATH", repo.restricted_path())
+        .arg("start")
+        .assert()
+        .failure();
+    assert!(!repo.dir.join("codex-args.txt").exists());
+    assert!(!repo.dir.join("claude-args.txt").exists());
+}
+
+#[test]
+fn start_works_in_external_worktrees_without_adopting_them() {
+    let repo = TestRepo::new();
+    let external = repo.add_external("ab/fresh-external");
+    repo.fake_harness("claude");
+    repo.bonsai(&external)
+        .env("PATH", repo.path_with_fakebin())
+        .args(["start", "claude"])
+        .assert()
+        .success();
+    assert_eq!(
+        PathBuf::from(
+            std::fs::read_to_string(repo.dir.join("claude-cwd.txt"))
+                .unwrap()
+                .trim()
+        ),
+        external
+    );
+    repo.bonsai(&repo.clone)
+        .args(["remove", "ab/fresh-external"])
+        .assert()
+        .failure();
+    assert!(external.is_dir());
+}
+
+#[cfg(unix)]
+#[test]
+fn start_keeps_a_harness_that_handles_ctrl_c_attached_to_its_terminal() {
+    use portable_pty::{CommandBuilder, PtySize, native_pty_system};
+    use std::io::{Read, Write};
+    use std::os::unix::fs::PermissionsExt;
+
+    struct ChildGuard(Box<dyn portable_pty::Child + Send + Sync>);
+    impl Drop for ChildGuard {
+        fn drop(&mut self) {
+            let _ = self.0.kill();
+            let _ = self.0.wait();
+        }
+    }
+
+    let repo = TestRepo::new();
+    let program = repo.fake_bin_dir().join("codex");
+    std::fs::write(&program, "#!/bin/sh\ntrap 'printf \"INT_HANDLED\\n\"' INT\nprintf 'PROVIDER_READY\\n'\nwhile :; do\n  IFS= read -r line\n  if [ \"$line\" = proceed ]; then printf 'AFTER_INTERRUPT\\n'; exit 0; fi\ndone\n").unwrap();
+    std::fs::set_permissions(&program, std::fs::Permissions::from_mode(0o755)).unwrap();
+    let pair = native_pty_system()
+        .openpty(PtySize {
+            rows: 24,
+            cols: 100,
+            pixel_width: 0,
+            pixel_height: 0,
+        })
+        .unwrap();
+    let mut command = CommandBuilder::new(assert_cmd::cargo::cargo_bin("bonsai"));
+    command.args(["start", "codex"]);
+    command.cwd(&repo.clone);
+    for (key, value) in repo.env_vars() {
+        command.env(key, value);
+    }
+    command.env("BONSAI_ROOT", &repo.root);
+    command.env("PATH", repo.path_with_fakebin());
+    command.env_remove("_BONSAI_WRAPPED");
+    command.env_remove("GIT_DIR");
+    command.env_remove("GIT_WORK_TREE");
+    let mut child = ChildGuard(pair.slave.spawn_command(command).unwrap());
+    drop(pair.slave);
+    let mut reader = pair.master.try_clone_reader().unwrap();
+    let mut writer = pair.master.take_writer().unwrap();
+    let (send, receive) = std::sync::mpsc::channel();
+    std::thread::spawn(move || {
+        let mut buffer = [0; 1024];
+        while let Ok(count) = reader.read(&mut buffer) {
+            if count == 0 || send.send(buffer[..count].to_vec()).is_err() {
+                break;
+            }
+        }
+    });
+    let mut output = String::new();
+    let mut wait_for = |marker: &str| {
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(5);
+        while !output.contains(marker) {
+            let remaining = deadline.saturating_duration_since(std::time::Instant::now());
+            let bytes = receive
+                .recv_timeout(remaining)
+                .unwrap_or_else(|error| panic!("{marker}: {error}; output: {output}"));
+            output.push_str(&String::from_utf8_lossy(&bytes));
+        }
+    };
+    wait_for("PROVIDER_READY");
+    writer.write_all(b"\x03").unwrap();
+    wait_for("INT_HANDLED");
+    assert!(child.0.try_wait().unwrap().is_none());
+    writer.write_all(b"proceed\n").unwrap();
+    wait_for("AFTER_INTERRUPT");
+    assert!(child.0.wait().unwrap().success());
+}
+
+#[test]
+fn remove_accepts_an_exact_managed_path_for_detached_worktrees() {
+    let repo = TestRepo::new();
+    let worktree = repo.add("ab/detached");
+    repo.git(&worktree, &["checkout", "--detach"]);
+    repo.bonsai(&repo.clone)
+        .arg("remove")
+        .arg(&worktree)
+        .assert()
+        .success();
+    assert!(!worktree.exists());
+    assert!(
+        repo.git(&repo.clone, &["branch", "--list", "ab/detached"])
+            .contains("ab/detached")
+    );
+}
+
+#[test]
+fn remove_by_path_keeps_external_and_dirty_worktree_protections() {
+    let repo = TestRepo::new();
+    let worktree = repo.add("ab/dirty-path");
+    let external = repo.add_external("ab/external-path");
+    std::fs::write(worktree.join("pending"), "keep me").unwrap();
+    for path in [&worktree, &external, &repo.clone] {
+        repo.bonsai(&repo.clone)
+            .arg("remove")
+            .arg(path)
+            .assert()
+            .failure();
+        assert!(path.exists());
+    }
+    assert_eq!(
+        std::fs::read_to_string(worktree.join("pending")).unwrap(),
+        "keep me"
+    );
+}
+
+impl BrowserServer {
+    fn start(repo: &TestRepo, cwd: &Path) -> Self {
+        use std::io::BufRead;
+        let mut child = StdCommand::new(assert_cmd::cargo::cargo_bin("bonsai"))
+            .envs(repo.env_vars())
+            .env("BONSAI_ROOT", &repo.root)
+            .env_remove("_BONSAI_WRAPPED")
+            .env_remove("GIT_DIR")
+            .env_remove("GIT_WORK_TREE")
+            .current_dir(cwd)
+            .args(["hq", "--port", "0", "--no-open"])
+            .stdin(std::process::Stdio::null())
+            .stdout(std::process::Stdio::piped())
+            .stderr(std::process::Stdio::inherit())
+            .spawn()
+            .unwrap();
+        let stdout = child.stdout.take().unwrap();
+        let (send, receive) = std::sync::mpsc::channel();
+        std::thread::spawn(move || {
+            for line in std::io::BufReader::new(stdout)
+                .lines()
+                .map_while(Result::ok)
+            {
+                if let Some(start) = line.find("http://127.0.0.1:") {
+                    let _ = send.send(line[start..].trim().to_string());
+                }
+            }
+        });
+        let mut server = Self {
+            child,
+            authority: String::new(),
+            token: String::new(),
+        };
+        let url = receive
+            .recv_timeout(std::time::Duration::from_secs(20))
+            .expect("server did not print its URL");
+        let (base, token) = url
+            .split_once("#token=")
+            .expect("private link has no token");
+        server.authority = base
+            .trim_start_matches("http://")
+            .trim_end_matches('/')
+            .to_owned();
+        server.token = token.to_owned();
+        server
+    }
+
+    fn get(&self, path: &str, authorized: bool) -> (u16, String) {
+        use std::io::{Read, Write};
+        let mut stream = std::net::TcpStream::connect(&self.authority).unwrap();
+        stream
+            .set_read_timeout(Some(std::time::Duration::from_secs(20)))
+            .unwrap();
+        let auth = if authorized {
+            format!("Authorization: Bearer {}\r\n", self.token)
+        } else {
+            String::new()
+        };
+        write!(
+            stream,
+            "GET {path} HTTP/1.1\r\nHost: {}\r\n{auth}Connection: close\r\n\r\n",
+            self.authority
+        )
+        .unwrap();
+        let mut response = String::new();
+        stream.read_to_string(&mut response).unwrap();
+        let (headers, body) = response.split_once("\r\n\r\n").unwrap();
+        let status = headers.split_whitespace().nth(1).unwrap().parse().unwrap();
+        (status, body.to_owned())
+    }
+
+    fn state(&self) -> serde_json::Value {
+        let (status, body) = self.get("/api/state", true);
+        assert_eq!(status, 200, "{body}");
+        serde_json::from_str(&body).unwrap()
+    }
+}
+
+impl Drop for BrowserServer {
+    fn drop(&mut self) {
+        let _ = self.child.kill();
+        let _ = self.child.wait();
+    }
+}
+
+#[test]
+fn browser_hq_works_outside_a_repo_and_requires_its_private_token() {
+    let repo = TestRepo::new();
+    let server = BrowserServer::start(&repo, &repo.dir);
+    assert_eq!(server.get("/api/state", false).0, 401);
+    assert_eq!(server.get("/", false).0, 200);
+    assert_eq!(server.get("/app.js", false).0, 200);
+    let state = server.state();
+    assert!(state["projects"].as_array().unwrap().is_empty());
+    assert_eq!(state["root"], repo.root.to_string_lossy().as_ref());
+    assert!(state["tmux"]["available"].is_boolean());
+}
+
+#[test]
+fn browser_includes_initial_project_without_managed_worktrees() {
+    let repo = TestRepo::new();
+    let server = BrowserServer::start(&repo, &repo.clone);
+    let state = server.state();
+    let projects = state["projects"].as_array().unwrap();
+    assert_eq!(projects.len(), 1);
+    let worktrees = projects[0]["worktrees"].as_array().unwrap();
+    assert_eq!(worktrees.len(), 1);
+    assert_eq!(worktrees[0]["path"], repo.clone.to_string_lossy().as_ref());
+    assert_eq!(worktrees[0]["main"], true);
+    assert_eq!(worktrees[0]["dirty"], false);
+}
+
+#[test]
+fn browser_bare_projects_use_a_linked_checkout_for_actions() {
+    let repo = TestRepo::new();
+    let output = repo
+        .bonsai(&repo.origin)
+        .args(["add", "ab/bare-hq"])
+        .output()
+        .unwrap();
+    assert!(
+        output.status.success(),
+        "{}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let worktree = String::from_utf8_lossy(&output.stdout).trim().to_string();
+    let server = BrowserServer::start(&repo, &repo.dir);
+    let state = server.state();
+    let projects = state["projects"].as_array().unwrap();
+    assert_eq!(projects.len(), 1);
+    assert_eq!(projects[0]["path"], worktree);
+    assert_eq!(projects[0]["worktrees"][0]["path"], worktree);
+}
+
+#[test]
+fn browser_discovers_every_project_main_external_and_broken_worktree() {
+    let first = TestRepo::new();
+    let first_worktree = first.add("ab/first");
+    let external = first.add_external("ab/external");
+    std::fs::write(first_worktree.join("pending.txt"), "pending\n").unwrap();
+    let second = TestRepo::new();
+    let output = second
+        .bonsai(&second.clone)
+        .env("BONSAI_ROOT", &first.root)
+        .args(["add", "ab/second"])
+        .output()
+        .unwrap();
+    assert!(output.status.success());
+    let second_worktree = PathBuf::from(String::from_utf8_lossy(&output.stdout).trim());
+    let orphan = first.root.join("local/lost/ab/stale");
+    std::fs::create_dir_all(&orphan).unwrap();
+    std::fs::write(orphan.join(".git"), "gitdir: missing\n").unwrap();
+    let server = BrowserServer::start(&first, &first.dir);
+    let state = server.state();
+    let projects = state["projects"].as_array().unwrap();
+    assert_eq!(projects.len(), 3, "{state}");
+    let worktrees: Vec<_> = projects
+        .iter()
+        .flat_map(|p| p["worktrees"].as_array().unwrap())
+        .collect();
+    for path in [
+        &first.clone,
+        &first_worktree,
+        &external,
+        &second.clone,
+        &second_worktree,
+        &orphan,
+    ] {
+        assert!(
+            worktrees
+                .iter()
+                .any(|w| w["path"] == path.to_string_lossy().as_ref()),
+            "missing {} in {state}",
+            path.display()
+        );
+    }
+    let by_path = |path: &Path| {
+        worktrees
+            .iter()
+            .find(|w| w["path"] == path.to_string_lossy().as_ref())
+            .unwrap()
+    };
+    assert_eq!(by_path(&external)["external"], true);
+    assert_eq!(by_path(&first_worktree)["dirty"], true);
+    assert_eq!(by_path(&first_worktree)["untracked"], 1);
+    assert_eq!(by_path(&orphan)["prunable"], true);
+    assert!(by_path(&orphan)["dirty"].is_null());
+    assert!(!state["warnings"].as_array().unwrap().is_empty());
+}
+
+#[test]
+fn browser_hq_help_and_completions_include_options() {
+    let repo = TestRepo::new();
+    repo.bonsai(&repo.dir)
+        .args(["hq", "--help"])
+        .assert()
+        .success()
+        .stdout(predicate::str::contains("--no-open"))
+        .stdout(predicate::str::contains("--no-tui"))
+        .stdout(predicate::str::contains("47831"))
+        .stdout(predicate::str::contains("--port"));
+    repo.bonsai(&repo.dir)
+        .args(["completions", "bash"])
+        .assert()
+        .success()
+        .stdout(predicate::str::contains("start"));
 }
 
 /// Canonicalize without Windows verbatim prefixes (`\\?\C:\...`), which git

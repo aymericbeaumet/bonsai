@@ -8,6 +8,7 @@ mod picker;
 mod pm;
 mod repo;
 mod shell;
+mod web;
 mod workspace;
 mod worktree;
 
@@ -89,6 +90,18 @@ fn run(cli: Cli) -> Result<Option<PathBuf>> {
     }
 
     match cli.command {
+        Commands::Hq {
+            port,
+            no_open,
+            no_tui,
+        } => {
+            web::run(config, port, no_open, no_tui)?;
+            Ok(None)
+        }
+        Commands::Start { provider, prompt } => {
+            commands::start::run(provider, prompt)?;
+            Ok(None)
+        }
         Commands::Add {
             branch,
             base,

@@ -12,6 +12,10 @@ bonsai add fix-parser     # creates branch + worktree, cds into it
 bonsai clean              # removes merged worktrees and their branches
 ```
 
+Run `bonsai hq` for terminal and browser interfaces to all your projects:
+fuzzy navigation, a worktree constellation, Bonsai commands, and shared
+interactive terminals.
+
 ## Install
 
 With [mise](https://mise.jdx.dev) (prebuilt binaries for Linux, macOS, and
@@ -51,12 +55,14 @@ wrapper loaded. The binary detects that mismatch and prints the exact
 
 | Command | Description |
 |---|---|
+| `bonsai hq` | Run persistent headquarters with a TUI and browser workspace sharing worktrees and terminal sessions. `--port` selects the web port (default `47831`, `0` chooses an available port); `--no-open` skips opening the browser; `--no-tui` runs headlessly. |
+| `bonsai start [claude\|codex\|opencode]` | Start a new coding session in the current worktree. Choose among installed providers when omitted; a single installed provider is selected automatically. `--prompt` supplies an initial prompt. |
 | `bonsai add [branch]` | Slugify the input (preserving `/` as a nested branch/path delimiter), fetch the remote, then create a worktree under the bonsai root and cd into it. The branch is created from the latest default branch if it doesn't exist, or set up to track its remote counterpart. No argument opens a fuzzy prompt (type a new name to create it). |
 | `bonsai list` (`ls`) | List every Git-registered worktree for the current repo, including external worktrees created by other tools. `--all` lists every Bonsai-managed worktree across projects; `--status` adds a dirty marker. |
 | `bonsai cd [query]` | Fuzzy-jump between registered worktrees, including external ones, listed most recently worked-in first with a color-coded last-change age (green = today, yellow = this week, dim = older). Works globally across Bonsai-managed worktrees when run outside a repo. |
 | `bonsai resume [query]` | Fuzzy-search one recent-first list of resumable top-level Claude Code, Codex, and OpenCode sessions across every registered worktree of the current project, then resume the selected harness in its original directory. |
 | `bonsai workspace` | Refresh and print the repo's `.code-workspace` file, including registered external worktrees: `code "$(bonsai workspace)"`. |
-| `bonsai remove [branch…]` (`rm`) | Remove worktrees (fuzzy multi-pick without arguments). Keeps the branch unless `-d`; `--force` discards uncommitted changes. Safe to run from inside the worktree being removed. |
+| `bonsai remove [branch-or-path…]` (`rm`) | Remove worktrees (fuzzy multi-pick without arguments). Exact managed paths also support detached worktrees. Keeps the branch unless `-d`; `--force` discards uncommitted changes. Safe to run from inside the worktree being removed. |
 | `bonsai clean` | Remove every worktree whose branch is merged into the default branch — including squash-merges and branches whose upstream is gone (the GitHub PR flow). Deletes the branches too. Fetches `--prune` first (`--no-fetch` to skip), always shows the plan, `-n`/`--dry-run`, `-y`/`--yes` (alias `-f`/`--force`). Dirty worktrees are never touched. |
 | `bonsai prune` | Clean up stale worktree registrations, orphaned directories, and empty dirs. `--all` sweeps the whole root, including worktrees of repos whose clone was deleted. |
 | `bonsai init <shell>` | Print the shell wrapper (zsh, bash, fish). |
@@ -214,6 +220,60 @@ worktree has been removed, bonsai warns and starts it from the main checkout.
 Standard location overrides are respected: `CLAUDE_CONFIG_DIR`, `CODEX_HOME`,
 `CODEX_SQLITE_HOME`, `XDG_DATA_HOME`, and `OPENCODE_DB`.
 
+## Headquarters
+
+```sh
+bonsai hq                              # TUI and browser, shared sessions
+bonsai hq --no-open --port 47831       # TUI with web server on a chosen port
+bonsai hq --no-tui --no-open --port 0  # headless server, print private link
+```
+
+`hq` is a persistent process running both interfaces. `start` opens a new coding session in
+the current worktree, and `resume` finds and restores a past coding session.
+Both session commands are available from headquarters.
+
+The TUI specializes in keyboard navigation; the browser specializes in
+visual exploration. They share inventory and terminal sessions, so a shell
+started in either can be attached from the other. HQ enables the TUI when
+stdin and stdout are terminals; redirected or service use stays headless.
+Use Ctrl+] to detach an attached terminal back to the TUI without ending
+the session.
+
+The graph groups every discovered project with its main checkout and all
+Git-registered worktrees, including external, locked, detached, and stale
+worktrees. Discovery scans the configured Bonsai root and its editor
+workspace files; the project you start from is also included, even before
+its first `bonsai add`. Git status refreshes automatically.
+
+Bonsai tracks worktrees independently of terminal tools. Each checkout shows
+its HQ terminal and tmux activity, including panes in inactive tmux windows
+and worktree subdirectories. Select a checkout to see and attach its sessions;
+worktrees with nothing running stay visible. Tmux is optional and keeps its
+normal shell configuration.
+
+Use the command palette to fuzzy-find projects and branches, switch between
+the graph and list, and select a checkout to inspect its status or open a
+terminal. Worktree forms cover common operations; the command runner exposes
+the CLI arguments and runs commands interactively, including cleanup
+confirmations and `bonsai resume`'s session picker. External worktrees retain
+the CLI's protection against removal and adoption.
+
+Terminal tabs are real pseudoterminals: use your shell, terminal editor,
+Git tools, or coding assistants with normal input, colors, resizing, and
+interactive prompts. Tabs and recent output survive browser reconnection
+while the server runs. With tmux installed, create a persistent session for
+a checkout or attach an existing session. Closing its browser terminal
+detaches the tmux client; the tmux session continues running.
+
+The server binds to `127.0.0.1` (port `47831` by default). Its private launch
+link grants access to the local shell; use that link to connect another
+browser tab. Quitting HQ stops Bonsai and its ordinary terminals. Tmux sessions
+survive a server restart. Browser assets are embedded in the binary, so
+Node.js and an internet connection are unnecessary at runtime.
+
+See [browser architecture and development](docs/browser-workspace.md) for
+the API, terminal lifecycle, and frontend build commands.
+
 ## Desktop editors
 
 The bonsai root is structured so GUI tools get worktrees for free — no
@@ -252,8 +312,8 @@ lists stay readable. Jump from a terminal with `bonsai cd`.
   your system `git`.
 - **zsh/bash/fish**: wrapper + completions via `bonsai init`. The wrapper
   uses a plain `cd`, so `chpwd`-based tools (zoxide, direnv, starship) pick
-  up worktree jumps automatically; `resume` bypasses output capture so the
-  selected harness keeps the terminal.
+  up worktree jumps automatically; `resume`, `start`, and `hq` bypass output capture
+  so interactive output appears immediately.
 - **direnv**: `.envrc` files copied by bonsai from your own worktree are
   `direnv allow`ed automatically; tracked ones stay gated by direnv as usual.
 - **package managers** (pnpm, npm, yarn, bun, cargo, uv): new worktrees get

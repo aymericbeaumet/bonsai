@@ -68,7 +68,8 @@ repo). --json outputs an array of
 {branch, path, main, external, locked, prunable, dirty?} instead.";
 
 const REMOVE_LONG: &str = "\
-Remove the worktrees of the given branches. Without arguments, opens a fuzzy
+Remove worktrees by branch or exact checkout path (including detached
+worktrees). Without arguments, opens a fuzzy
 multi-select of this repo's worktrees (terminal only).
 
 The branch itself is kept unless -d/--delete-branch is passed (use `clean`
@@ -186,6 +187,48 @@ global file cannot discover those paths without a current repo context.
 Claude Code and Codex desktop open plain folders: point them at a worktree
 directory (<root>/<repo-id>/<branch>) or use `bonsai cd`.";
 
+const HQ_LONG: &str = "\
+Run Bonsai headquarters with terminal and browser interfaces for every
+project under the Bonsai root, including
+each project's main checkout and all Git-registered worktrees. The current
+project is included even when it has no Bonsai-managed worktrees yet.
+
+Explore the worktree graph, fuzzy-find branches, run Bonsai commands, and
+open full interactive terminals in any checkout. Attach existing tmux
+sessions or create persistent ones when tmux is installed.
+
+When attached to a terminal, an interactive TUI opens alongside the web
+server. Both interfaces share worktrees and terminal sessions. Use --no-tui
+for a headless server. The server listens on 127.0.0.1 only and prints a
+private browser link. Keep it running while using either interface; quitting
+headquarters stops the server and its plain terminals. Tmux sessions survive.
+The browser interface is bundled in the binary:
+no Node.js installation or internet connection is required.
+
+Examples:
+  bonsai hq                    # start and open the browser
+  bonsai hq --no-open           # TUI, without opening a browser window
+  bonsai hq --no-tui --no-open   # headless; print the private browser link
+  bonsai hq --port 0            # choose an available port
+  bonsai --root ~/trees hq      # explore a different Bonsai root";
+
+const START_LONG: &str = "\
+Start a new Claude Code, Codex, or OpenCode session in the current worktree.
+The harness inherits your terminal and current directory, including when
+you run this from a subdirectory or an external worktree.
+
+Pass a provider explicitly, or omit it to pick from installed providers.
+When only one provider is installed it is selected automatically. Use
+--prompt to supply an initial prompt while staying in an interactive session.
+
+Examples:
+  bonsai start                         # choose an installed coding tool
+  bonsai start codex                   # start a new Codex session here
+  bonsai start claude --prompt 'Fix the failing tests'
+
+Use bonsai resume to find a past session, or bonsai hq to open the browser
+workspace.";
+
 const SKILL_LONG: &str = "\
 The bonsai Agent Skill (SKILL.md, agentskills.io format) teaches AI coding
 agents the worktree workflow, its invariants, and the destructive-command
@@ -229,6 +272,29 @@ pub struct Cli {
 
 #[derive(Debug, Subcommand)]
 pub enum Commands {
+    /// Run headquarters: terminal and browser interfaces with shared sessions
+    #[command(long_about = HQ_LONG)]
+    Hq {
+        /// Local port to listen on (0 chooses an available port)
+        #[arg(long, default_value_t = 47831)]
+        port: u16,
+        /// Print the private URL without opening a browser
+        #[arg(long)]
+        no_open: bool,
+        /// Run the web server without the terminal interface
+        #[arg(long)]
+        no_tui: bool,
+    },
+    /// Start a new coding session in the current worktree
+    #[command(long_about = START_LONG)]
+    Start {
+        /// Coding tool to launch (pick from installed tools when omitted)
+        #[arg(value_enum)]
+        provider: Option<crate::commands::start::Provider>,
+        /// Initial prompt for the new interactive session
+        #[arg(long)]
+        prompt: Option<String>,
+    },
     /// Create a worktree (and its branch) under the bonsai root, then cd into it
     #[command(long_about = ADD_LONG)]
     Add {
@@ -264,7 +330,7 @@ pub enum Commands {
     /// Remove worktrees, keeping their branches unless -d
     #[command(alias = "rm", long_about = REMOVE_LONG)]
     Remove {
-        /// Branches whose worktrees to remove; omit (on a terminal) to
+        /// Branches or exact managed paths to remove; omit (on a terminal) to
         /// fuzzy multi-select
         branches: Vec<String>,
         /// Also delete the branch (refuses unmerged branches unless --force)

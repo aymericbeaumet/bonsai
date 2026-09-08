@@ -23,7 +23,11 @@ pub fn run(
     let selected: Vec<String> = if branches.is_empty() {
         let labels: Vec<String> = worktrees
             .iter()
-            .filter_map(|wt| wt.branch.clone())
+            .map(|wt| {
+                wt.branch
+                    .clone()
+                    .unwrap_or_else(|| wt.path.display().to_string())
+            })
             .collect();
         picker::multi_select_none_checked("Remove worktrees:", labels)?
     } else {
@@ -39,8 +43,21 @@ pub fn run(
         .collect::<HashMap<_, _>>();
     let mut targets = Vec::with_capacity(selected.len());
     for branch in &selected {
-        match by_branch.get(branch.as_str()) {
-            Some(worktree) => targets.push((*worktree).clone()),
+        let by_path = || {
+            let selected_path = crate::paths::canonicalize_ok(std::path::Path::new(branch))?;
+            worktrees
+                .iter()
+                .find(|wt| crate::paths::canonicalize_or_self(&wt.path) == selected_path)
+        };
+        match by_branch.get(branch.as_str()).copied().or_else(by_path) {
+            Some(worktree) => {
+                if !targets
+                    .iter()
+                    .any(|target: &Worktree| target.path == worktree.path)
+                {
+                    targets.push(worktree.clone());
+                }
+            }
             None => bail!("no bonsai worktree for branch '{branch}'"),
         }
     }

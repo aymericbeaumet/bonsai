@@ -76,9 +76,8 @@ fn wrapper_shell() -> Option<Shell> {
 }
 
 /// The wrapper captures stdout, watches for the cd sentinel on the last line,
-/// re-emits everything else, and cds. `resume` bypasses capture so the chosen
-/// harness inherits the terminal; other pickers work because inquire renders
-/// on stderr.
+/// re-emits everything else, and cds. Long-running `resume`, `start`, and `hq`
+/// commands bypass capture so their interactive output appears immediately.
 pub fn init_script(shell: Shell) -> String {
     let template = match shell {
         Shell::Zsh => format!("{POSIX_WRAPPER}{ZSH_COMPLETIONS}"),
@@ -103,7 +102,7 @@ const POSIX_WRAPPER: &str = r#"bonsai() {
       --root=*|--remote=*) ;;
       -*) ;;
         *)
-        if [[ "$arg" == "resume" ]]; then
+        if [[ "$arg" == "resume" || "$arg" == "start" || "$arg" == "hq" ]]; then
           _BONSAI_WRAPPER_ACTIVE=1 _BONSAI_WRAPPER_VERSION='__BONSAI_WRAPPER_VERSION__' _BONSAI_WRAPPER_SHELL='__BONSAI_WRAPPER_SHELL__' command bonsai "$@"
           return
         fi
@@ -147,7 +146,7 @@ const FISH_WRAPPER: &str = r#"function bonsai
             case '--root=*' '--remote=*'
             case '-*'
             case '*'
-                if test "$arg" = resume
+                if contains -- "$arg" resume start hq
                     _BONSAI_WRAPPER_ACTIVE=1 _BONSAI_WRAPPER_VERSION='__BONSAI_WRAPPER_VERSION__' _BONSAI_WRAPPER_SHELL='__BONSAI_WRAPPER_SHELL__' command bonsai $argv
                     return $status
                 end
