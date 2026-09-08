@@ -43,6 +43,10 @@ bonsai init fish | source
 Without the wrapper everything still works — cd-capable commands print the
 target path, so `cd "$(bonsai add foo)"` composes.
 
+Auto-cd applies when stdout is a terminal. Command substitutions, pipes, and
+redirections preserve machine output even after initialization. Use
+`command bonsai` to bypass the wrapper explicitly.
+
 After upgrading Bonsai, an already-running shell may still have an older
 wrapper loaded. The binary detects that mismatch and prints the exact
 `bonsai init` command to re-evaluate it, or you can restart the shell.
@@ -51,13 +55,13 @@ wrapper loaded. The binary detects that mismatch and prints the exact
 
 | Command | Description |
 |---|---|
-| `bonsai add [branch]` | Slugify the input (preserving `/` as a nested branch/path delimiter), fetch the remote, then create a worktree under the bonsai root and cd into it. The branch is created from the latest default branch if it doesn't exist, or set up to track its remote counterpart. No argument opens a fuzzy prompt (type a new name to create it). |
+| `bonsai add [branch]` | Preserve an existing branch name, or slugify a new name (preserving `/`), fetch the remote, then create a worktree under the bonsai root and cd into it. New branches start from the latest default branch; remote branches get a local tracking branch. No argument opens a fuzzy prompt (type a new name to create it). |
 | `bonsai list` (`ls`) | List every Git-registered worktree for the current repo, including external worktrees created by other tools. `--all` lists every Bonsai-managed worktree across projects; `--status` adds a dirty marker. |
 | `bonsai cd [query]` | Fuzzy-jump between registered worktrees, including external ones, listed most recently worked-in first with a color-coded last-change age (green = today, yellow = this week, dim = older). Works globally across Bonsai-managed worktrees when run outside a repo. |
 | `bonsai resume [query]` | Fuzzy-search one recent-first list of resumable top-level Claude Code, Codex, and OpenCode sessions across every registered worktree of the current project, then resume the selected harness in its original directory. |
 | `bonsai workspace` | Refresh and print the repo's `.code-workspace` file, including registered external worktrees: `code "$(bonsai workspace)"`. |
 | `bonsai remove [branch…]` (`rm`) | Remove worktrees (fuzzy multi-pick without arguments). Keeps the branch unless `-d`; `--force` discards uncommitted changes. Safe to run from inside the worktree being removed. |
-| `bonsai clean` | Remove every worktree whose branch is merged into the default branch — including squash-merges and branches whose upstream is gone (the GitHub PR flow). Deletes the branches too. Fetches `--prune` first (`--no-fetch` to skip), always shows the plan, `-n`/`--dry-run`, `-y`/`--yes` (alias `-f`/`--force`). Dirty worktrees are never touched. |
+| `bonsai clean` | Remove worktrees whose branches are merged or squash-merged into the default branch, then delete those branches. A missing upstream alone never proves integration. Fetches `--prune` first (`--no-fetch` to skip), always shows the plan, `-n`/`--dry-run`, `-y`/`--yes` (alias `-f`/`--force`). Dirty worktrees are never touched. |
 | `bonsai prune` | Clean up stale worktree registrations, orphaned directories, and empty dirs. `--all` sweeps the whole root, including worktrees of repos whose clone was deleted. |
 | `bonsai init <shell>` | Print the shell wrapper (zsh, bash, fish). |
 | `bonsai agents` | Print a usage contract for AI coding agents, ready for `bonsai agents >> AGENTS.md`. |
@@ -74,6 +78,14 @@ independent orphans concurrently, and `add` installs independent ecosystems
 together. Output remains deterministic and identifies concurrent contexts with
 labels such as `[branch]`, `[npm]`, or `[1/3]`. Operations that mutate shared
 Git metadata—worktree removal and branch deletion—remain sequential.
+
+Concurrent mutations in the same repository are guarded by an OS lock; a busy
+operation reports that you should retry. Global prune excludes concurrent
+mutations throughout the root. Cleanup revalidates worktree identity and branch
+tips, and uncertain or unreadable state is preserved. `list --status --json`
+uses `dirty: null` when status cannot be read. Cleanup JSON includes completed
+removals, deleted branches, failures, and a recovery directory after partial
+failure; redirected JSON remains a single document.
 
 Note: a freshly added worktree with no commits counts as merged (same
 semantics as `git branch --merged`), so `bonsai clean` will offer to remove
@@ -117,7 +129,7 @@ workspace = true            # maintain a .code-workspace file per repo
 [add]
 fetch = true                # fetch --prune before creating (set false for offline use)
 install = true              # auto-install deps (pnpm/npm/yarn/bun/cargo/uv)
-post_add = "mise install"   # command run inside a new worktree
+post_add = "mise install"   # runs after automatic dependency installation
 # untracked files copied into new worktrees; setting this replaces the
 # defaults: [".env", ".env.*", ".envrc", ".mcp.json", "CLAUDE.local.md",
 #           ".claude/settings.local.json", ".cursor/mcp.json"]
@@ -235,6 +247,11 @@ cursor "$(bonsai workspace --all)"   # everything under the bonsai root
 
 Disable the file maintenance with `workspace = false`.
 
+Refreshes preserve workspace settings, tasks, launch configuration, comments,
+and custom folders. Updates use locking and atomic replacement, and unchanged
+files are not rewritten. Customized files are retained after the last worktree
+is removed.
+
 **Folder-based apps** (Claude Code desktop, Codex desktop): every worktree
 is a plain directory named after its branch under
 `~/.bonsai/<host>/<owner>/<repo>/`, so folder pickers and recent-project
@@ -246,16 +263,18 @@ lists stay readable. Jump from a terminal with `bonsai cd`.
   configurable through `git config bonsai.*`; all operations shell out to
   your system `git`.
 - **zsh/bash/fish**: wrapper + completions via `bonsai init`. The wrapper
-  uses a plain `cd`, so `chpwd`-based tools (zoxide, direnv, starship) pick
-  up worktree jumps automatically; `resume` bypasses output capture so the
+  uses a plain `cd`, so existing directory-change hooks pick up worktree
+  jumps automatically; `resume` bypasses output capture so the
   selected harness keeps the terminal.
 - **direnv**: `.envrc` files copied by bonsai from your own worktree are
   `direnv allow`ed automatically; tracked ones stay gated by direnv as usual.
 - **package managers** (pnpm, npm, yarn, bun, cargo, uv): new worktrees get
   their dependencies installed automatically, keyed on the lockfile (and
-  `package.json`'s `packageManager` field). Installs are lockfile-frozen —
-  the checkout is never dirtied. Before installing, bonsai checks the
-  manager's effective repository configuration and prints an interactive
+  `package.json`'s `packageManager` field). A declared manager must have its
+  matching lockfile. Installs preserve lockfiles; lifecycle scripts can still
+  generate files. uv uses `sync --locked`, checking that the manifest and
+  lockfile agree. Before installing, bonsai inspects supported repository,
+  inherited, and environment settings and prints an interactive
   `WARNING` label with a yellow background (plain text when redirected) plus
   an official setup link when a faster shared worktree layout is available.
   This check still runs with `[add] install = false`.
@@ -267,8 +286,25 @@ lists stay readable. Jump from a terminal with `bonsai cd`.
   | Yarn Berry | Yarn 4's global cache + PnP defaults are optimized; Yarn 2/3 needs `enableGlobalCache: true`, and `node-modules` needs `nmMode: hardlinks-global`. See [Yarn settings](https://yarnpkg.com/configuration/yarnrc/). |
   | npm, Yarn Classic, Cargo, uv | Their default global download/source caches already give Bonsai's frozen install commands the appropriate sharing. uv warns if its cache is explicitly disabled or placed inside the worktree. |
 
-  Missing tools are skipped silently; failures never abort the add. Disable
-  installation with `[add] install = false`.
+  Missing tools and failed installs produce an incomplete-setup summary with
+  the command to retry from the new worktree. Installer and hook output streams
+  on stderr, labelled by tool; cancellation keeps the worktree. Re-adding an
+  existing worktree returns its path without rerunning setup.
+
+  Tool selection uses PATH and its installed shims; `packageManager` selects
+  the manager, while version enforcement belongs to tools such as Corepack.
+  If your project needs mise activation before installation, use the existing
+  hook to control the sequence:
+
+  ```toml
+  [add]
+  install = false
+  post_add = "mise install && mise exec -- pnpm install --frozen-lockfile"
+  ```
+
+  Storage warnings are suggestions based on recognized settings, not a complete
+  package-manager configuration evaluator. Bonsai does not change linker or
+  toolchain configuration.
 
 ## How it works
 
@@ -281,8 +317,26 @@ lists stay readable. Jump from a terminal with `bonsai cd`.
   managed, so moving the main checkout or changing its repo ID does not orphan
   them. Registered worktrees outside that root are external and merged into the
   project's read-only views; Bonsai never creates there.
-- The shell wrapper captures stdout and watches for a sentinel line to cd;
-  prompts render on stderr, so fuzzy pickers work even inside `$(...)`.
+- For interactive cd-capable commands, the shell wrapper watches for a sentinel
+  line to cd. Other commands and captured output pass through directly. Prompts
+  render on stderr, so fuzzy pickers work even inside `$(...)`.
+
+## Development checks
+
+```sh
+cargo test --locked
+cargo clippy --locked --all-targets -- -D warnings
+cargo fmt --check
+cargo build --release --locked
+python3 tests/terminal.py target/release/bonsai
+cargo test --locked --test cli real_package_managers_ -- --ignored
+python3 scripts/benchmark.py --worktrees 1 10 100 --sessions 1000 10000 100000
+```
+
+The PTY checks require Unix. Package-manager smoke tests require npm, uv, and
+Python. CI installs Bash/Zsh/Fish coverage explicitly on Linux. Benchmarks use
+disposable repositories and synthetic session stores, report first-run and warm
+median/p95 latency plus Git process counts, and never access personal sessions.
 
 ## License
 

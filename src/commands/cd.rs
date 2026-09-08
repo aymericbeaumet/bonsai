@@ -16,14 +16,11 @@ struct Candidate {
     last_change: Option<SystemTime>,
 }
 
-pub fn run(config: &Config, query: Option<String>) -> Result<Option<PathBuf>> {
-    let mut candidates = candidates(config)?;
+pub fn run(config: &Config, repo: Option<&Repo>, query: Option<String>) -> Result<Option<PathBuf>> {
+    let mut candidates = candidates(config, repo)?;
     if candidates.is_empty() {
         bail!("no worktrees found");
     }
-    // Most recently worked-in first, so the default pick is the freshest.
-    candidates.sort_by_key(|c| std::cmp::Reverse(c.last_change));
-
     if let Some(query) = &query {
         // Exact label/branch match wins, then a unique substring match;
         // anything ambiguous falls through to the picker pre-filtered.
@@ -42,6 +39,11 @@ pub fn run(config: &Config, query: Option<String>) -> Result<Option<PathBuf>> {
         }
     }
 
+    let activity = parallel::map_ordered(&candidates, |candidate| last_activity(&candidate.path));
+    for (candidate, last_change) in candidates.iter_mut().zip(activity) {
+        candidate.last_change = last_change;
+    }
+    candidates.sort_by_key(|c| std::cmp::Reverse(c.last_change));
     let options = styled_options(&candidates);
     let picked = picker::select_styled("Worktree:", options, query.as_deref())?;
     Ok(Some(candidates.swap_remove(picked).path))
@@ -50,8 +52,8 @@ pub fn run(config: &Config, query: Option<String>) -> Result<Option<PathBuf>> {
 /// Inside a repo: every worktree registered with Git, including worktrees
 /// created outside Bonsai. Outside: every worktree under the Bonsai root,
 /// labelled by repo.
-fn candidates(config: &Config) -> Result<Vec<Candidate>> {
-    if let Some(repo) = Repo::discover()? {
+fn candidates(config: &Config, repo: Option<&Repo>) -> Result<Vec<Candidate>> {
+    if let Some(repo) = repo {
         let mut out = Vec::new();
         for entry in repo.project_worktrees(config)? {
             let label = entry.label();
@@ -62,7 +64,7 @@ fn candidates(config: &Config) -> Result<Vec<Candidate>> {
             out.push(Candidate {
                 label,
                 branch: wt.branch,
-                last_change: last_activity(&wt.path),
+                last_change: None,
                 path: wt.path,
             });
         }
@@ -80,7 +82,7 @@ fn candidates(config: &Config) -> Result<Vec<Candidate>> {
         Candidate {
             label,
             branch,
-            last_change: last_activity(path),
+            last_change: None,
             path: path.clone(),
         }
     }))

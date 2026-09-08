@@ -130,9 +130,14 @@ impl ProjectScope {
     }
 }
 
-pub fn run(config: &Config, query: Option<String>) -> Result<()> {
-    let repo = Repo::require()?;
-    let scope = ProjectScope::new(&repo, config)?;
+pub fn run(config: &Config, repo: Option<&Repo>, query: Option<String>) -> Result<()> {
+    let scope = ProjectScope::new(repo.context("not inside a git repository")?, config)?;
+    if let Some(query) = query.as_deref()
+        && let Ok(root) = codex_home()
+        && let Some(session) = codex_exact_session(&codex_database_root(&root), &scope, query)
+    {
+        return launch(&session, &scope);
+    }
     let mut sessions = HashMap::new();
 
     let providers = [
@@ -289,15 +294,22 @@ fn launch(session: &Session, scope: &ProjectScope) -> Result<()> {
 
 fn claude_sessions(scope: &ProjectScope) -> Result<Vec<Session>> {
     let root = env_path("CLAUDE_CONFIG_DIR").unwrap_or(home_dir()?.join(".claude"));
+    Ok(claude_sessions_from(&root, scope))
+}
+
+fn claude_sessions_from(root: &Path, scope: &ProjectScope) -> Vec<Session> {
     let mut sessions = Vec::new();
     let history = root.join("history.jsonl");
     if history.is_file() {
-        sessions.extend(claude_history(&history, scope)?);
+        match claude_history(&history, scope) {
+            Ok(found) => sessions.extend(found),
+            Err(error) => warn_session_source("Claude", &history, &error),
+        }
     }
 
     let projects = root.join("projects");
-    let Ok(project_dirs) = fs::read_dir(&projects) else {
-        return Ok(sessions);
+    let Some(project_dirs) = session_directory(&projects, "Claude") else {
+        return sessions;
     };
     let mut transcripts = Vec::new();
     for project_dir in project_dirs.flatten() {
@@ -307,7 +319,7 @@ fn claude_sessions(scope: &ProjectScope) -> Result<Vec<Session>> {
         if !file_type.is_dir() {
             continue;
         }
-        let Ok(files) = fs::read_dir(project_dir.path()) else {
+        let Some(files) = session_directory(&project_dir.path(), "Claude") else {
             continue;
         };
         for file in files.flatten() {
@@ -317,20 +329,26 @@ fn claude_sessions(scope: &ProjectScope) -> Result<Vec<Session>> {
             transcripts.push(file.path());
         }
     }
-    sessions.extend(
-        parallel::map_ordered(&transcripts, |path| parse_claude_transcript(path, scope))
-            .into_iter()
-            .filter_map(Result::ok)
-            .flatten(),
-    );
-    Ok(sessions)
+    let results = parallel::map_ordered(&transcripts, |path| parse_claude_transcript(path, scope));
+    let mut failures = 0;
+    for result in results {
+        match result {
+            Ok(Some(session)) => sessions.push(session),
+            Ok(None) => {}
+            Err(_) => failures += 1,
+        }
+    }
+    warn_session_records("Claude", &projects, failures);
+    sessions
 }
 
 fn claude_history(path: &Path, scope: &ProjectScope) -> Result<Vec<Session>> {
     let file = File::open(path)?;
     let mut sessions: HashMap<String, Session> = HashMap::new();
-    for line in BufReader::new(file).lines().map_while(Result::ok) {
+    let mut failures = 0;
+    for line in session_lines(file, path, "Claude") {
         let Ok(value) = serde_json::from_str::<Value>(&line) else {
+            failures += 1;
             continue;
         };
         let Some(id) = json_string(&value, "sessionId") else {
@@ -370,6 +388,7 @@ fn claude_history(path: &Path, scope: &ProjectScope) -> Result<Vec<Session>> {
             }
         }
     }
+    warn_session_records("Claude", path, failures);
     Ok(sessions.into_values().collect())
 }
 
@@ -382,7 +401,7 @@ fn parse_claude_transcript(path: &Path, scope: &ProjectScope) -> Result<Option<S
     let mut cwd = None;
     let mut branch = None;
     let mut title = None;
-    for line in BufReader::new(file).lines().map_while(Result::ok).take(200) {
+    for line in session_lines(file, path, "Claude").take(200) {
         let Ok(value) = serde_json::from_str::<Value>(&line) else {
             continue;
         };
@@ -437,28 +456,75 @@ fn claude_title(value: &Value) -> Option<String> {
 }
 
 fn codex_sessions(scope: &ProjectScope) -> Result<Vec<Session>> {
-    let root = env_path("CODEX_HOME").unwrap_or(home_dir()?.join(".codex"));
-    let database_root = codex_database_root(&root);
-    let databases = codex_state_databases(&database_root);
-    let mut sessions = Vec::new();
-    let mut read_database = false;
-    let mut last_error = None;
+    let root = codex_home()?;
+    Ok(codex_sessions_from(
+        &root,
+        &codex_database_root(&root),
+        scope,
+    ))
+}
+
+fn codex_home() -> Result<PathBuf> {
+    Ok(env_path("CODEX_HOME").unwrap_or(home_dir()?.join(".codex")))
+}
+
+fn codex_sessions_from(root: &Path, database_root: &Path, scope: &ProjectScope) -> Vec<Session> {
+    let databases = codex_state_databases(database_root);
+    let mut sessions = HashMap::new();
     let database_results = parallel::map_ordered(&databases, |database| {
-        codex_database_sessions(database, scope)
+        codex_database_records(database, scope, None)
     });
-    for result in database_results {
+    for (database, result) in databases.iter().zip(database_results) {
         match result {
             Ok(found) => {
-                read_database = true;
-                sessions.extend(found);
+                // The newest store mentioning an ID owns its eligibility,
+                // including exclusions. Empty migrations still permit fallback.
+                for (id, session) in found {
+                    sessions.entry(id).or_insert(session);
+                }
             }
-            Err(error) => last_error = Some(error),
+            Err(error) => warn_session_source("Codex", database, &error),
         }
     }
-    sessions.extend(codex_legacy_sessions(&root, scope)?);
-    match (read_database, sessions.is_empty(), last_error) {
-        (false, true, Some(error)) => Err(error),
-        _ => Ok(sessions),
+    let known = sessions.keys().cloned().collect::<HashSet<_>>();
+    match codex_legacy_sessions_excluding(root, scope, &known) {
+        Ok(found) => {
+            for session in found {
+                sessions.entry(session.id.clone()).or_insert(Some(session));
+            }
+        }
+        Err(error) => warn_session_source("Codex", root, &error),
+    }
+    sessions.into_values().flatten().collect()
+}
+
+fn codex_exact_session(database_root: &Path, scope: &ProjectScope, id: &str) -> Option<Session> {
+    for database in codex_state_databases(database_root) {
+        match codex_database_records(&database, scope, Some(id)) {
+            Ok(mut found) => {
+                if let Some(session) = found.remove(id) {
+                    return session;
+                }
+            }
+            Err(error) => warn_session_source("Codex", &database, &error),
+        }
+    }
+    None
+}
+
+fn warn_session_source(provider: &str, path: &Path, error: &anyhow::Error) {
+    eprintln!(
+        "bonsai: [sessions:{provider}] could not read {}: {error:#}",
+        path.display()
+    );
+}
+
+fn warn_session_records(provider: &str, path: &Path, failures: usize) {
+    if failures != 0 {
+        eprintln!(
+            "bonsai: [sessions:{provider}] skipped {failures} unreadable or malformed records in {}",
+            path.display()
+        );
     }
 }
 
@@ -475,7 +541,7 @@ fn codex_database_root(codex_home: &Path) -> PathBuf {
 }
 
 fn codex_state_databases(root: &Path) -> Vec<PathBuf> {
-    let Ok(entries) = fs::read_dir(root) else {
+    let Some(entries) = session_directory(root, "Codex") else {
         return Vec::new();
     };
     let mut databases = entries
@@ -494,7 +560,11 @@ fn codex_state_databases(root: &Path) -> Vec<PathBuf> {
     databases.into_iter().map(|(_, path)| path).collect()
 }
 
-fn codex_database_sessions(path: &Path, scope: &ProjectScope) -> Result<Vec<Session>> {
+fn codex_database_records(
+    path: &Path,
+    scope: &ProjectScope,
+    exact: Option<&str>,
+) -> Result<HashMap<String, Option<Session>>> {
     let connection = open_database(path)?;
     let columns = table_columns(&connection, "threads")?;
     if !columns.contains("id") || !columns.contains("cwd") {
@@ -516,7 +586,11 @@ fn codex_database_sessions(path: &Path, scope: &ProjectScope) -> Result<Vec<Sess
         timestamps.push("updated_at * 1000");
     }
     timestamps.push("0");
-    let updated = format!("COALESCE({})", timestamps.join(", "));
+    let updated = if timestamps.len() == 1 {
+        "0".to_string()
+    } else {
+        format!("COALESCE({})", timestamps.join(", "))
+    };
     let branch = if columns.contains("git_branch") {
         "git_branch"
     } else {
@@ -532,37 +606,55 @@ fn codex_database_sessions(path: &Path, scope: &ProjectScope) -> Result<Vec<Sess
     } else {
         "NULL"
     };
-    let mut filters = Vec::new();
-    if columns.contains("archived") {
-        filters.push("archived = 0");
-    }
-    if columns.contains("preview") {
-        filters.push("preview <> ''");
-    }
-    let where_clause = if filters.is_empty() {
-        String::new()
+    let archived = if columns.contains("archived") {
+        "COALESCE(archived, 0) != 0"
     } else {
-        format!(" WHERE {}", filters.join(" AND "))
+        "0"
+    };
+    let empty_preview = if columns.contains("preview") {
+        "COALESCE(preview, '') = ''"
+    } else {
+        "0"
+    };
+    let where_clause = if exact.is_some() {
+        " WHERE id = ?1"
+    } else {
+        ""
     };
     let sql = format!(
-        "SELECT id, cwd, {title}, {updated}, {branch}, {source}, {origin} \
+        "SELECT id, cwd, {title}, {updated}, {branch}, {source}, {origin}, {archived}, {empty_preview} \
          FROM threads{where_clause}"
     );
     let mut statement = connection.prepare(&sql)?;
-    let rows = statement.query_map([], |row| {
-        Ok((
-            row.get::<_, String>(0)?,
-            row.get::<_, String>(1)?,
-            row.get::<_, String>(2)?,
-            row.get::<_, i64>(3)?,
-            row.get::<_, Option<String>>(4)?,
-            row.get::<_, String>(5)?,
-            row.get::<_, Option<String>>(6)?,
-        ))
-    })?;
-    let mut sessions = Vec::new();
-    for row in rows {
-        let (id, cwd, title, updated, branch, source, origin) = row?;
+    let mut rows = statement.query(rusqlite::params_from_iter(exact))?;
+    let mut sessions = HashMap::new();
+    let mut failures = 0;
+    while let Some(row) = rows.next()? {
+        let Ok(id) = row.get::<_, String>(0) else {
+            failures += 1;
+            continue;
+        };
+        sessions.insert(id.clone(), None);
+        let parsed = (|| -> rusqlite::Result<_> {
+            Ok((
+                row.get::<_, String>(1)?,
+                row.get::<_, String>(2)?,
+                row.get::<_, i64>(3)?,
+                row.get::<_, Option<String>>(4)?,
+                row.get::<_, String>(5)?,
+                row.get::<_, Option<String>>(6)?,
+                row.get::<_, bool>(7)?,
+                row.get::<_, bool>(8)?,
+            ))
+        })();
+        let Ok((cwd, title, updated, branch, source, origin, archived, empty_preview)) = parsed
+        else {
+            failures += 1;
+            continue;
+        };
+        if archived || empty_preview {
+            continue;
+        }
         if !codex_source_is_interactive(&source) {
             continue;
         }
@@ -583,34 +675,57 @@ fn codex_database_sessions(path: &Path, scope: &ProjectScope) -> Result<Vec<Sess
         if !scope.contains(&cwd) && !origin_matches {
             continue;
         }
-        sessions.push(Session {
-            provider: Provider::Codex,
-            id,
-            title: nonempty_title(&title),
-            cwd,
-            branch,
-            updated: time_from_millis(updated),
-        });
+        sessions.insert(
+            id.clone(),
+            Some(Session {
+                provider: Provider::Codex,
+                id,
+                title: nonempty_title(&title),
+                cwd,
+                branch,
+                updated: time_from_millis(updated),
+            }),
+        );
     }
+    warn_session_records("Codex", path, failures);
     Ok(sessions)
 }
 
+#[cfg(test)]
+fn codex_database_sessions(path: &Path, scope: &ProjectScope) -> Result<Vec<Session>> {
+    Ok(codex_database_records(path, scope, None)?
+        .into_values()
+        .flatten()
+        .collect())
+}
+
+#[cfg(test)]
 fn codex_legacy_sessions(root: &Path, scope: &ProjectScope) -> Result<Vec<Session>> {
+    codex_legacy_sessions_excluding(root, scope, &HashSet::new())
+}
+
+fn codex_legacy_sessions_excluding(
+    root: &Path,
+    scope: &ProjectScope,
+    known: &HashSet<String>,
+) -> Result<Vec<Session>> {
     let history_path = root.join("history.jsonl");
     if !history_path.is_file() {
         return Ok(Vec::new());
     }
     let mut history: HashMap<String, (String, SystemTime)> = HashMap::new();
-    for line in BufReader::new(File::open(history_path)?)
-        .lines()
-        .map_while(Result::ok)
-    {
+    let mut failures = 0;
+    for line in session_lines(File::open(&history_path)?, &history_path, "Codex") {
         let Ok(value) = serde_json::from_str::<Value>(&line) else {
+            failures += 1;
             continue;
         };
         let Some(id) = json_string(&value, "session_id") else {
             continue;
         };
+        if known.contains(&id) {
+            continue;
+        }
         let title = json_string(&value, "text")
             .map(|value| sanitize(&value, 72))
             .filter(|value| !value.is_empty())
@@ -625,53 +740,85 @@ fn codex_legacy_sessions(root: &Path, scope: &ProjectScope) -> Result<Vec<Sessio
             .and_modify(|entry| entry.1 = entry.1.max(updated))
             .or_insert((title, updated));
     }
-    let ids = history.keys().cloned().collect::<HashSet<_>>();
+    warn_session_records("Codex", &history_path, failures);
+    if history.is_empty() {
+        return Ok(Vec::new());
+    }
     let mut files = Vec::new();
     walk_jsonl(&root.join("sessions"), &mut files);
     let sessions = parallel::map_ordered(&files, |path| -> Result<Option<Session>> {
-        let name = path.file_name().unwrap_or_default().to_string_lossy();
-        let Some(id) = ids.iter().find(|id| name.contains(id.as_str())) else {
+        if rollout_filename_id(path).is_some_and(|id| !history.contains_key(id)) {
+            return Ok(None);
+        }
+        let Some((id, cwd, branch)) = codex_rollout_metadata(path, scope)? else {
             return Ok(None);
         };
-        let Some((cwd, branch)) = codex_rollout_metadata(path, scope)? else {
+        let Some((title, updated)) = history.get(&id).cloned() else {
             return Ok(None);
         };
-        let (title, updated) = history
-            .get(id)
-            .cloned()
-            .unwrap_or_else(|| ("Untitled session".to_string(), UNIX_EPOCH));
         Ok(Some(Session {
             provider: Provider::Codex,
-            id: id.clone(),
+            id,
             title,
             cwd,
             branch,
             updated,
         }))
-    })
-    .into_iter()
-    .collect::<Result<Vec<_>>>()?;
-    Ok(sessions.into_iter().flatten().collect())
+    });
+    let mut failures = 0;
+    let sessions = sessions
+        .into_iter()
+        .filter_map(|result| match result {
+            Ok(session) => session,
+            Err(_) => {
+                failures += 1;
+                None
+            }
+        })
+        .collect();
+    warn_session_records("Codex", &root.join("sessions"), failures);
+    Ok(sessions)
+}
+
+fn rollout_filename_id(path: &Path) -> Option<&str> {
+    let name = path.file_stem()?.to_str()?.strip_prefix("rollout-")?;
+    // The timestamp occupies 19 ASCII bytes: YYYY-MM-DDTHH-MM-SS.
+    let timestamp = name.get(..19)?;
+    let separators = [(4, b'-'), (7, b'-'), (10, b'T'), (13, b'-'), (16, b'-')];
+    if !timestamp.bytes().enumerate().all(|(index, byte)| {
+        separators
+            .iter()
+            .find(|(position, _)| *position == index)
+            .map_or_else(|| byte.is_ascii_digit(), |(_, expected)| byte == *expected)
+    }) {
+        return None;
+    }
+    name.get(19..)?
+        .strip_prefix('-')
+        .filter(|id| !id.is_empty())
 }
 
 fn codex_rollout_metadata(
     path: &Path,
     scope: &ProjectScope,
-) -> Result<Option<(PathBuf, Option<String>)>> {
+) -> Result<Option<(String, PathBuf, Option<String>)>> {
     let Some(line) = BufReader::new(File::open(path)?)
         .lines()
-        .map_while(Result::ok)
         .next()
+        .transpose()?
     else {
         return Ok(None);
     };
-    let Ok(value) = serde_json::from_str::<Value>(&line) else {
-        return Ok(None);
-    };
+    let value = serde_json::from_str::<Value>(&line)?;
     if value.get("type").and_then(Value::as_str) != Some("session_meta") {
         return Ok(None);
     }
     let Some(payload) = value.get("payload") else {
+        return Ok(None);
+    };
+    let Some(id) =
+        json_string(payload, "id").or_else(|| rollout_filename_id(path).map(str::to_string))
+    else {
         return Ok(None);
     };
     let Some(cwd) = json_string(payload, "cwd").and_then(|cwd| scope.normalize_if_member(cwd))
@@ -682,7 +829,7 @@ fn codex_rollout_metadata(
         .pointer("/git/branch")
         .and_then(Value::as_str)
         .map(str::to_string);
-    Ok(Some((cwd, branch)))
+    Ok(Some((id, cwd, branch)))
 }
 
 fn opencode_sessions(scope: &ProjectScope) -> Result<Vec<Session>> {
@@ -696,10 +843,14 @@ fn opencode_sessions(scope: &ProjectScope) -> Result<Vec<Session>> {
             }
         })
         .unwrap_or_else(|| data.join("opencode/opencode.db"));
+    opencode_sessions_from(&path, scope)
+}
+
+fn opencode_sessions_from(path: &Path, scope: &ProjectScope) -> Result<Vec<Session>> {
     if !path.is_file() {
         return Ok(Vec::new());
     }
-    let connection = open_database(&path)?;
+    let connection = open_database(path)?;
     let project_ids = opencode_project_ids(&connection, scope)?;
     let columns = table_columns(&connection, "session")?;
     if !columns.contains("id") || !columns.contains("directory") {
@@ -743,8 +894,12 @@ fn opencode_sessions(scope: &ProjectScope) -> Result<Vec<Session>> {
         ))
     })?;
     let mut sessions = Vec::new();
+    let mut failures = 0;
     for row in rows {
-        let (id, directory, title, updated, project_id) = row?;
+        let Ok((id, directory, title, updated, project_id)) = row else {
+            failures += 1;
+            continue;
+        };
         let Some(cwd) = normalized_absolute(Path::new(&directory)) else {
             continue;
         };
@@ -762,11 +917,13 @@ fn opencode_sessions(scope: &ProjectScope) -> Result<Vec<Session>> {
             updated: time_from_millis(updated),
         });
     }
+    warn_session_records("OpenCode", path, failures);
     Ok(sessions)
 }
 
 fn opencode_project_ids(connection: &Connection, scope: &ProjectScope) -> Result<HashSet<String>> {
     let mut matches = HashSet::new();
+    let mut failures = 0;
     let project_columns = table_columns(connection, "project")?;
     if project_columns.contains("id") && project_columns.contains("worktree") {
         let mut statement = connection.prepare("SELECT id, worktree FROM project")?;
@@ -774,7 +931,13 @@ fn opencode_project_ids(connection: &Connection, scope: &ProjectScope) -> Result
             Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?))
         })?;
         for row in rows {
-            let (id, directory) = row?;
+            let (id, directory) = match row {
+                Ok(record) => record,
+                Err(_) => {
+                    failures += 1;
+                    continue;
+                }
+            };
             if normalized_absolute(Path::new(&directory))
                 .is_some_and(|path| scope.contains_project_root(&path))
             {
@@ -790,13 +953,22 @@ fn opencode_project_ids(connection: &Connection, scope: &ProjectScope) -> Result
             Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?))
         })?;
         for row in rows {
-            let (id, directory) = row?;
+            let (id, directory) = match row {
+                Ok(record) => record,
+                Err(_) => {
+                    failures += 1;
+                    continue;
+                }
+            };
             if normalized_absolute(Path::new(&directory))
                 .is_some_and(|path| scope.contains_project_root(&path))
             {
                 matches.insert(id);
             }
         }
+    }
+    if failures != 0 {
+        eprintln!("bonsai: [sessions:OpenCode] skipped {failures} malformed project records");
     }
     Ok(matches)
 }
@@ -823,7 +995,11 @@ fn coalesce_text(columns: &HashSet<String>, candidates: &[&str], fallback: &str)
         .map(|column| format!("NULLIF({column}, '')"))
         .collect::<Vec<_>>();
     expressions.push(fallback.to_string());
-    format!("COALESCE({})", expressions.join(", "))
+    if expressions.len() == 1 {
+        expressions.remove(0)
+    } else {
+        format!("COALESCE({})", expressions.join(", "))
+    }
 }
 
 fn json_string(value: &Value, field: &str) -> Option<String> {
@@ -952,7 +1128,7 @@ fn normalized_absolute(path: &Path) -> Option<PathBuf> {
 }
 
 fn walk_jsonl(root: &Path, files: &mut Vec<PathBuf>) {
-    let Ok(entries) = fs::read_dir(root) else {
+    let Some(entries) = session_directory(root, "Codex") else {
         return;
     };
     for entry in entries.flatten() {
@@ -965,6 +1141,34 @@ fn walk_jsonl(root: &Path, files: &mut Vec<PathBuf>) {
             files.push(entry.path());
         }
     }
+}
+
+fn session_directory(path: &Path, provider: &str) -> Option<fs::ReadDir> {
+    match fs::read_dir(path) {
+        Ok(entries) => Some(entries),
+        Err(error) => {
+            if error.kind() != std::io::ErrorKind::NotFound {
+                warn_session_source(provider, path, &error.into());
+            }
+            None
+        }
+    }
+}
+
+fn session_lines<'a>(
+    file: File,
+    path: &'a Path,
+    provider: &'a str,
+) -> impl Iterator<Item = String> + 'a {
+    BufReader::new(file)
+        .lines()
+        .map_while(move |line| match line {
+            Ok(line) => Some(line),
+            Err(error) => {
+                warn_session_source(provider, path, &error.into());
+                None
+            }
+        })
 }
 
 #[cfg(test)]
@@ -1075,5 +1279,257 @@ mod tests {
         sort_sessions(&mut sessions);
         assert_eq!(sessions.len(), 2);
         assert_eq!(sessions[0].id, "recent");
+    }
+
+    #[test]
+    fn malformed_codex_row_does_not_discard_healthy_rows() {
+        let temporary = tempfile::tempdir().unwrap();
+        let scope = scope(temporary.path());
+        let path = temporary.path().join("state_5.sqlite");
+        let database = Connection::open(&path).unwrap();
+        database
+            .execute_batch(
+                "CREATE TABLE threads (id TEXT, cwd TEXT, title TEXT, updated_at_ms INTEGER);",
+            )
+            .unwrap();
+        database.execute("INSERT INTO threads VALUES ('broken', ?1, 'Broken', 'invalid'), ('healthy', ?1, 'Healthy', 2000)", [scope.main_root.to_string_lossy().as_ref()]).unwrap();
+        let sessions = codex_database_sessions(&path, &scope).unwrap();
+        assert!(sessions.iter().any(|session| session.id == "healthy"));
+    }
+
+    #[test]
+    fn legacy_rollouts_match_metadata_ids_without_substring_collisions() {
+        let temporary = tempfile::tempdir().unwrap();
+        let root = temporary.path();
+        let scope = scope(root);
+        fs::create_dir(root.join("sessions")).unwrap();
+        fs::write(
+            root.join("history.jsonl"),
+            "{\"session_id\":\"short\",\"text\":\"Wrong\"}\n",
+        )
+        .unwrap();
+        let metadata = serde_json::json!({"type": "session_meta", "payload": {"id": "short-long", "cwd": scope.main_root}});
+        fs::write(
+            root.join("sessions/rollout-2026-09-07T10-00-00-short-long.jsonl"),
+            metadata.to_string(),
+        )
+        .unwrap();
+        assert!(codex_legacy_sessions(root, &scope).unwrap().is_empty());
+    }
+
+    fn codex_fixture(
+        root: &Path,
+        version: u32,
+        scope: &ProjectScope,
+        rows: &[(&str, i64, &str, &str)],
+    ) {
+        let database = Connection::open(root.join(format!("state_{version}.sqlite"))).unwrap();
+        database.execute_batch("CREATE TABLE threads (id TEXT PRIMARY KEY, cwd TEXT, title TEXT, updated_at_ms INTEGER, archived INTEGER, source TEXT, preview TEXT);").unwrap();
+        for (id, archived, source, preview) in rows {
+            database
+                .execute(
+                    "INSERT INTO threads VALUES (?1, ?2, ?1, 2000, ?3, ?4, ?5)",
+                    rusqlite::params![
+                        id,
+                        scope.main_root.to_string_lossy(),
+                        archived,
+                        source,
+                        preview
+                    ],
+                )
+                .unwrap();
+        }
+    }
+
+    fn legacy_fixture(root: &Path, scope: &ProjectScope, id: &str) -> PathBuf {
+        fs::create_dir_all(root.join("sessions")).unwrap();
+        fs::write(
+            root.join("history.jsonl"),
+            serde_json::json!({"session_id": id, "text": "Legacy"}).to_string(),
+        )
+        .unwrap();
+        let rollout = root.join(format!("sessions/rollout-2026-09-07T10-00-00-{id}.jsonl"));
+        fs::write(&rollout, serde_json::json!({"type": "session_meta", "payload": {"id": id, "cwd": scope.main_root}}).to_string()).unwrap();
+        rollout
+    }
+
+    #[test]
+    fn newest_codex_store_owns_exclusions_even_with_older_active_rows_and_rollouts() {
+        let temporary = tempfile::tempdir().unwrap();
+        let root = temporary.path();
+        let scope = scope(root);
+        codex_fixture(
+            root,
+            4,
+            &scope,
+            &[
+                ("archived", 0, "cli", "Old"),
+                ("subagent", 0, "cli", "Old"),
+                ("empty", 0, "cli", "Old"),
+                ("older-only", 0, "cli", "Old"),
+            ],
+        );
+        codex_fixture(
+            root,
+            5,
+            &scope,
+            &[
+                ("archived", 1, "cli", "New"),
+                ("subagent", 0, "subagent", "New"),
+                ("empty", 0, "cli", ""),
+                ("healthy", 0, "cli", "New"),
+            ],
+        );
+        legacy_fixture(root, &scope, "archived");
+        let sessions = codex_sessions_from(root, root, &scope);
+        let ids = sessions
+            .iter()
+            .map(|session| session.id.as_str())
+            .collect::<HashSet<_>>();
+        assert_eq!(ids, HashSet::from(["healthy", "older-only"]));
+        let newest =
+            codex_database_records(&root.join("state_5.sqlite"), &scope, Some("archived")).unwrap();
+        assert!(newest.get("archived").unwrap().is_none());
+        assert!(codex_exact_session(root, &scope, "archived").is_none());
+        assert_eq!(
+            codex_exact_session(root, &scope, "older-only").unwrap().id,
+            "older-only"
+        );
+    }
+
+    #[test]
+    fn empty_and_incompatible_codex_migrations_keep_older_sessions() {
+        let temporary = tempfile::tempdir().unwrap();
+        let root = temporary.path();
+        let scope = scope(root);
+        codex_fixture(root, 4, &scope, &[("healthy", 0, "cli", "Old")]);
+        codex_fixture(root, 5, &scope, &[]);
+        fs::write(root.join("state_6.sqlite"), "corrupt database").unwrap();
+        let sessions = codex_sessions_from(root, root, &scope);
+        assert_eq!(sessions.len(), 1);
+        assert_eq!(sessions[0].id, "healthy");
+    }
+
+    #[test]
+    fn minimal_codex_schema_and_exact_lookup_are_supported() {
+        let temporary = tempfile::tempdir().unwrap();
+        let scope = scope(temporary.path());
+        let path = temporary.path().join("state_1.sqlite");
+        let database = Connection::open(&path).unwrap();
+        database
+            .execute_batch("CREATE TABLE threads (id TEXT PRIMARY KEY, cwd TEXT);")
+            .unwrap();
+        database
+            .execute(
+                "INSERT INTO threads VALUES ('requested', ?1), ('other', ?1)",
+                [scope.main_root.to_string_lossy().as_ref()],
+            )
+            .unwrap();
+        let records = codex_database_records(&path, &scope, Some("requested")).unwrap();
+        assert_eq!(records.len(), 1);
+        assert_eq!(records["requested"].as_ref().unwrap().id, "requested");
+    }
+
+    #[test]
+    fn codex_discovery_waits_for_a_transient_database_lock() {
+        let temporary = tempfile::tempdir().unwrap();
+        let root = temporary.path();
+        let scope = scope(root);
+        codex_fixture(root, 5, &scope, &[("healthy", 0, "cli", "Good")]);
+        let database = Connection::open(root.join("state_5.sqlite")).unwrap();
+        database.execute_batch("BEGIN EXCLUSIVE").unwrap();
+        let writer = std::thread::spawn(move || {
+            std::thread::sleep(Duration::from_millis(50));
+            database.execute_batch("COMMIT").unwrap();
+        });
+        let sessions = codex_sessions_from(root, root, &scope);
+        writer.join().unwrap();
+        assert_eq!(sessions.len(), 1);
+        assert_eq!(sessions[0].id, "healthy");
+    }
+
+    #[test]
+    fn malformed_current_record_cannot_revive_an_older_copy() {
+        let temporary = tempfile::tempdir().unwrap();
+        let root = temporary.path();
+        let scope = scope(root);
+        codex_fixture(root, 4, &scope, &[("bad", 0, "cli", "Old")]);
+        codex_fixture(
+            root,
+            5,
+            &scope,
+            &[("bad", 0, "cli", "New"), ("good", 0, "cli", "Good")],
+        );
+        Connection::open(root.join("state_5.sqlite"))
+            .unwrap()
+            .execute(
+                "UPDATE threads SET updated_at_ms = 'invalid' WHERE id = 'bad'",
+                [],
+            )
+            .unwrap();
+        let sessions = codex_sessions_from(root, root, &scope);
+        assert_eq!(sessions.len(), 1);
+        assert_eq!(sessions[0].id, "good");
+    }
+
+    #[test]
+    fn legacy_nonstandard_filename_uses_metadata_id() {
+        let temporary = tempfile::tempdir().unwrap();
+        let root = temporary.path();
+        let scope = scope(root);
+        let rollout = legacy_fixture(root, &scope, "requested");
+        fs::rename(rollout, root.join("sessions/unusual-name.jsonl")).unwrap();
+        let sessions = codex_legacy_sessions(root, &scope).unwrap();
+        assert_eq!(sessions.len(), 1);
+        assert_eq!(sessions[0].id, "requested");
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn unreadable_legacy_record_keeps_healthy_database_results() {
+        use std::os::unix::fs::PermissionsExt;
+        let temporary = tempfile::tempdir().unwrap();
+        let root = temporary.path();
+        let scope = scope(root);
+        codex_fixture(root, 5, &scope, &[("healthy", 0, "cli", "Good")]);
+        let rollout = legacy_fixture(root, &scope, "unreadable");
+        fs::set_permissions(&rollout, fs::Permissions::from_mode(0o0)).unwrap();
+        let sessions = codex_sessions_from(root, root, &scope);
+        assert!(sessions.iter().any(|session| session.id == "healthy"));
+    }
+
+    #[test]
+    fn malformed_opencode_records_keep_healthy_sessions_and_projects() {
+        let temporary = tempfile::tempdir().unwrap();
+        let scope = scope(temporary.path());
+        let path = temporary.path().join("opencode.db");
+        let database = Connection::open(&path).unwrap();
+        database.execute_batch("CREATE TABLE session (id TEXT, directory TEXT, time_updated INTEGER, project_id TEXT); CREATE TABLE project (id TEXT, worktree TEXT);").unwrap();
+        database
+            .execute(
+                "INSERT INTO project VALUES ('broken', NULL), ('project', ?1)",
+                [scope.main_root.to_string_lossy().as_ref()],
+            )
+            .unwrap();
+        database.execute("INSERT INTO session VALUES ('broken', ?1, 'invalid', 'project'), ('healthy', ?1, 2000, 'project')", [scope.main_root.to_string_lossy().as_ref()]).unwrap();
+        let sessions = opencode_sessions_from(&path, &scope).unwrap();
+        assert_eq!(sessions.len(), 1);
+        assert_eq!(sessions[0].id, "healthy");
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn unreadable_claude_history_keeps_healthy_transcripts() {
+        use std::os::unix::fs::PermissionsExt;
+        let temporary = tempfile::tempdir().unwrap();
+        let root = temporary.path();
+        let scope = scope(root);
+        fs::write(root.join("history.jsonl"), "").unwrap();
+        fs::set_permissions(root.join("history.jsonl"), fs::Permissions::from_mode(0o0)).unwrap();
+        fs::create_dir_all(root.join("projects/project")).unwrap();
+        fs::write(root.join("projects/project/healthy.jsonl"), serde_json::json!({"type": "user", "sessionId": "healthy", "cwd": scope.main_root, "message": {"content": "Healthy"}}).to_string()).unwrap();
+        let sessions = claude_sessions_from(root, &scope);
+        assert_eq!(sessions.len(), 1);
+        assert_eq!(sessions[0].id, "healthy");
     }
 }

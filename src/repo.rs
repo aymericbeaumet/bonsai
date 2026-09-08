@@ -1,4 +1,6 @@
+use std::collections::HashMap;
 use std::path::{Path, PathBuf};
+use std::sync::{Mutex, OnceLock};
 
 use anyhow::{Context, Result, anyhow, bail};
 use sha2::{Digest, Sha256};
@@ -48,10 +50,32 @@ impl ProjectWorktree {
 /// from the original clone or from any of its linked worktrees.
 pub struct Repo {
     pub main_root: PathBuf,
+    pub current_root: Option<PathBuf>,
     pub git: Git,
+    initial_worktrees: Mutex<Option<Vec<Worktree>>>,
+    remotes: OnceLock<Vec<String>>,
+    preferred_remote: OnceLock<Option<String>>,
+    remote_urls: Mutex<HashMap<String, Option<String>>>,
 }
 
 impl Repo {
+    /// Coordinate Bonsai mutations across linked checkouts. OS locks release
+    /// automatically after termination; the persistent lock file is harmless.
+    pub fn lock_mutations(&self) -> Result<std::fs::File> {
+        let common = self
+            .git
+            .out(&["rev-parse", "--path-format=absolute", "--git-common-dir"])?;
+        let file = crate::paths::open_lock_file(&Path::new(&common).join("bonsai.lock"))?;
+        file.try_lock().context(
+            "another bonsai mutation is running for this repository; retry when it finishes",
+        )?;
+        self.initial_worktrees
+            .lock()
+            .unwrap_or_else(|error| error.into_inner())
+            .take();
+        Ok(file)
+    }
+
     pub fn discover() -> Result<Option<Repo>> {
         let git = Git::new();
         if !git.ok(&["rev-parse", "--git-dir"]) {
@@ -65,18 +89,38 @@ impl Repo {
             .first()
             .ok_or_else(|| anyhow!("git worktree list returned no entries"))?;
         let main_root = main.path.clone();
+        let cwd = std::env::current_dir()
+            .ok()
+            .and_then(|path| crate::paths::canonicalize_ok(&path));
+        let current_root = cwd.and_then(|cwd| {
+            worktrees
+                .iter()
+                .filter(|worktree| !worktree.is_bare)
+                .filter_map(|worktree| crate::paths::canonicalize_ok(&worktree.path))
+                .filter(|path| cwd.starts_with(path))
+                .max_by_key(|path| path.components().count())
+        });
         Ok(Some(Repo {
             git: Git::at(&main_root),
             main_root,
+            current_root,
+            initial_worktrees: Mutex::new(Some(worktrees)),
+            remotes: OnceLock::new(),
+            preferred_remote: OnceLock::new(),
+            remote_urls: Mutex::new(HashMap::new()),
         }))
-    }
-
-    pub fn require() -> Result<Repo> {
-        Self::discover()?.context("not inside a git repository")
     }
 
     /// All worktrees, main first.
     pub fn worktrees(&self) -> Result<Vec<Worktree>> {
+        if let Some(worktrees) = self
+            .initial_worktrees
+            .lock()
+            .unwrap_or_else(|error| error.into_inner())
+            .take()
+        {
+            return Ok(worktrees);
+        }
         let bytes = self
             .git
             .out_bytes(&["worktree", "list", "--porcelain", "-z"])?;
@@ -129,7 +173,15 @@ impl Repo {
     /// falling back to `local/<dirname>-<hash>` for remote-less repos.
     pub fn id(&self, config: &Config) -> String {
         self.remote_name(config)
-            .and_then(|remote| self.git.out(&["remote", "get-url", &remote]).ok())
+            .and_then(|remote| {
+                let mut urls = self
+                    .remote_urls
+                    .lock()
+                    .unwrap_or_else(|error| error.into_inner());
+                urls.entry(remote.clone())
+                    .or_insert_with(|| self.git.out(&["remote", "get-url", &remote]).ok())
+                    .clone()
+            })
             .and_then(|url| repo_id_from_url(&url))
             .unwrap_or_else(|| self.fallback_id())
     }
@@ -138,21 +190,25 @@ impl Repo {
     /// `checkout.defaultRemote` > "origin" > the only remote when there is
     /// exactly one.
     pub fn remote_name(&self, config: &Config) -> Option<String> {
-        let mut remotes = self
-            .git
-            .out(&["remote"])
-            .unwrap_or_default()
-            .lines()
-            .map(str::to_string)
-            .collect::<Vec<_>>();
+        let remotes = self.remotes.get_or_init(|| {
+            self.git
+                .out(&["remote"])
+                .unwrap_or_default()
+                .lines()
+                .map(str::to_string)
+                .collect::<Vec<_>>()
+        });
         let mut preferred: Vec<String> = Vec::new();
         if let Some(remote) = &config.remote {
             preferred.push(remote.clone());
         }
-        if let Ok(remote) = self.git.out(&["config", "checkout.defaultRemote"])
-            && !remote.is_empty()
-        {
-            preferred.push(remote);
+        if let Some(remote) = self.preferred_remote.get_or_init(|| {
+            self.git
+                .out(&["config", "checkout.defaultRemote"])
+                .ok()
+                .filter(|name| !name.is_empty())
+        }) {
+            preferred.push(remote.clone());
         }
         preferred.push("origin".to_string());
         for candidate in preferred {
@@ -161,7 +217,7 @@ impl Repo {
             }
         }
         if remotes.len() == 1 {
-            return Some(remotes.remove(0));
+            return Some(remotes[0].clone());
         }
         None
     }

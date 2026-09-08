@@ -1,8 +1,8 @@
 /// Markdown usage contract for AI coding agents, ready to append to the
 /// cross-harness AGENTS.md (read by Codex, Cursor, OpenCode, Claude Code,
 /// Amp, Gemini CLI, ...): `bonsai agents >> AGENTS.md`.
-pub fn run() {
-    print!("{AGENTS_SNIPPET}");
+pub fn run() -> anyhow::Result<()> {
+    crate::output::write(format_args!("{AGENTS_SNIPPET}"))
 }
 
 const AGENTS_SNIPPET: &str = r#"## Git worktrees (bonsai)
@@ -13,8 +13,9 @@ branches in place.
 
 - Create (or get) a worktree: `path=$(bonsai add <branch>)`. Prints the
   worktree's absolute path on stdout; creates the branch from the default
-  branch when it does not exist. Inputs are slugified while `/` remains a
-  nested branch/path delimiter. The remote is fetched first by default.
+  branch when it does not exist. Existing names are preserved; new inputs are
+  slugified while `/` remains a nested delimiter. The remote is fetched first
+  by default.
   Idempotent: re-running returns the existing path. Run all subsequent
   commands inside that directory.
 - Stack on the current checkout: `bonsai add <branch> --base HEAD`.
@@ -24,7 +25,7 @@ branches in place.
   the branch; `--force` discards uncommitted changes).
 - Remove merged/squash-merged worktrees: inspect with
   `bonsai clean --dry-run --json`, then execute with `bonsai clean --yes`
-  (dirty worktrees are never touched).
+  (dirty worktrees are never touched; a missing upstream alone is not merge evidence).
 
 Notes for non-interactive use:
 

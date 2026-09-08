@@ -11,17 +11,16 @@ use crate::worktree::path_for_branch;
 
 pub fn run(
     config: &Config,
+    repo: &Repo,
     branch: Option<String>,
     base: Option<String>,
     fetch: bool,
     path_override: Option<PathBuf>,
 ) -> Result<Option<PathBuf>> {
-    let repo = Repo::require()?;
-
     let fetch_enabled = fetch || config.add.fetch;
-    let fetched_before_prompt = fetch_enabled && branch.is_none();
-    if fetched_before_prompt {
-        fetch_remote(&repo, config)?;
+    let mut fetched = fetch_enabled && branch.is_none();
+    if fetched {
+        fetch_remote(repo, config)?;
     }
 
     let raw_branch = match branch {
@@ -29,10 +28,19 @@ pub fn run(
         None => picker::text_with_suggestions(
             "Branch:",
             "pick an existing branch or type a new name to create it",
-            branch_suggestions(&repo, config)?,
+            branch_suggestions(repo, config)?,
         )?,
     };
-    let branch = slugify_branch_input(&raw_branch)?;
+    let _root_lock = crate::paths::lock_root(&config.root_dir(), false)?;
+    let _mutation_lock = repo.lock_mutations()?;
+    let mut branch = resolve_branch_input(repo, config, &raw_branch)?;
+    // A newly published exact ref takes precedence over reusing a slugified
+    // name, even when that normalized branch already has a worktree.
+    if fetch_enabled && !fetched && branch != raw_branch {
+        fetch_remote(repo, config)?;
+        fetched = true;
+        branch = resolve_branch_input(repo, config, &raw_branch)?;
+    }
     validate_branch_name(&repo.git, &branch)?;
 
     let project_worktrees = repo.project_worktrees(config)?;
@@ -40,7 +48,7 @@ pub fn run(
         .iter()
         .map(|entry| entry.worktree.clone())
         .collect::<Vec<_>>();
-    let bonsai_dir = repo.bonsai_dir(config);
+    let bonsai_dir = crate::paths::ensure_contained(&repo.bonsai_dir(config), &config.root_dir())?;
 
     // Idempotent: adding a branch that already has a Bonsai worktree just cds
     // there. A checkout anywhere else is read-only to Bonsai: `add` never
@@ -63,8 +71,12 @@ pub fn run(
         );
     }
 
-    if fetch_enabled && !fetched_before_prompt {
-        fetch_remote(&repo, config)?;
+    if fetch_enabled && !fetched {
+        fetch_remote(repo, config)?;
+        branch = resolve_branch_input(repo, config, &raw_branch)?;
+    }
+    if branch != raw_branch {
+        eprintln!("bonsai: using branch '{branch}' for '{raw_branch}'");
     }
 
     let path = match path_override {
@@ -76,18 +88,12 @@ pub fn run(
             {
                 bail!("--path must not contain '..'");
             }
-            let normalized = crate::paths::canonicalize_lenient(&path);
-            let managed_root = crate::paths::canonicalize_lenient(&bonsai_dir);
-            if !normalized.starts_with(&managed_root) {
-                bail!(
-                    "--path must stay inside this project's Bonsai directory ({})",
-                    bonsai_dir.display()
-                );
-            }
             path
         }
         None => path_for_branch(&bonsai_dir, &branch),
     };
+    let path = crate::paths::ensure_contained(&path, &bonsai_dir)
+        .context("worktree path must stay inside this project's Bonsai directory")?;
     if let Some(other) = dir_collides(&path, &worktrees, &branch) {
         bail!(
             "path {} collides with the worktree for branch '{other}' (case-insensitive filesystem); use --path to pick another location",
@@ -106,6 +112,8 @@ pub fn run(
     if let Some(parent) = path.parent() {
         std::fs::create_dir_all(parent)?;
     }
+    crate::paths::ensure_contained(&path, &config.root_dir())?;
+    crate::paths::ensure_contained(&path, &bonsai_dir)?;
 
     let path_str = path.to_string_lossy().into_owned();
     if repo.git.ok(&[
@@ -116,7 +124,7 @@ pub fn run(
     ]) {
         repo.git.run(&["worktree", "add", &path_str, &branch])?;
         eprintln!("bonsai: added worktree for '{branch}' at {path_str}");
-    } else if let Some(remote_ref) = remote_ref_for(&repo, config, &branch)? {
+    } else if let Some(remote_ref) = remote_ref_for(repo, config, &branch)? {
         repo.git.run(&[
             "worktree",
             "add",
@@ -128,7 +136,7 @@ pub fn run(
         ])?;
         eprintln!("bonsai: added worktree for '{branch}' (tracking {remote_ref}) at {path_str}");
     } else {
-        let (base_display, base_ref) = resolve_base(&repo, config, base)?;
+        let (base_display, base_ref) = resolve_base(repo, config, base)?;
         // --no-track: git would otherwise set the upstream to the base
         // (e.g. origin/main), which misleads `git push` and defeats clean's
         // gone-upstream detection once the branch gets its own upstream.
@@ -144,13 +152,28 @@ pub fn run(
         eprintln!("bonsai: created branch '{branch}' from {base_display}, worktree at {path_str}");
     }
 
-    copy_files(&repo, config, &path);
+    copy_files(repo, config, &path);
     warn_package_manager_config(&path);
-    install_dependencies(config, &path);
-    run_post_add(config, &branch, &path);
-    crate::workspace::sync_quietly(&repo, config);
+    let cancellation = crate::process::Cancellation::new()?;
+    install_dependencies(config, &path, &cancellation)?;
+    run_post_add(config, &branch, &path, &cancellation)?;
+    crate::workspace::sync_quietly(repo, config);
 
     Ok(Some(path))
+}
+
+fn resolve_branch_input(repo: &Repo, config: &Config, input: &str) -> Result<String> {
+    if validate_branch_name(&repo.git, input).is_ok()
+        && (repo.git.ok(&[
+            "show-ref",
+            "--verify",
+            "--quiet",
+            &format!("refs/heads/{input}"),
+        ]) || remote_ref_for(repo, config, input)?.is_some())
+    {
+        return Ok(input.to_string());
+    }
+    slugify_branch_input(input)
 }
 
 fn fetch_remote(repo: &Repo, config: &Config) -> Result<()> {
@@ -302,8 +325,8 @@ fn copy_files(repo: &Repo, config: &Config, dest: &std::path::Path) {
         return;
     }
     let mut sources: Vec<PathBuf> = Vec::new();
-    if let Ok(top) = crate::git::Git::new().out(&["rev-parse", "--show-toplevel"]) {
-        sources.push(PathBuf::from(top));
+    if let Some(top) = &repo.current_root {
+        sources.push(top.clone());
     }
     if !sources.contains(&repo.main_root) {
         sources.push(repo.main_root.clone());
@@ -321,6 +344,10 @@ fn copy_files(repo: &Repo, config: &Config, dest: &std::path::Path) {
                     continue;
                 };
                 let target = dest.join(rel);
+                if let Err(error) = crate::paths::ensure_contained(&target, dest) {
+                    eprintln!("bonsai: refusing copy to {}: {error:#}", target.display());
+                    continue;
+                }
                 // Also what makes the current worktree win over the main one.
                 if target.exists() {
                     continue;
@@ -386,19 +413,22 @@ fn warning_label(color: bool) -> &'static str {
 /// Install dependencies with every package manager detected in the new
 /// worktree. Frozen-lockfile flags keep the checkout pristine and each
 /// tool's shared store keeps disk usage low. Independent ecosystems run in
-/// parallel and finish before `post_add`. A missing tool is silently skipped;
-/// failure is reported but does not undo the add. Tool output is grouped on
-/// our stderr so wrapped stdout capture stays clean.
-fn install_dependencies(config: &Config, path: &std::path::Path) {
+/// parallel and finish before `post_add`. Failures preserve the worktree and
+/// explain how to finish setup. Live child output stays on stderr.
+fn install_dependencies(
+    config: &Config,
+    path: &std::path::Path,
+    cancellation: &crate::process::Cancellation,
+) -> Result<()> {
     if !config.add.install {
-        return;
+        return Ok(());
     }
     let jobs = crate::pm::detect(path)
         .into_iter()
-        .filter_map(|pm| Some((pm, crate::pm::find_program(pm.program())?)))
+        .map(|pm| (pm, crate::pm::find_program_at(pm.program(), path)))
         .collect::<Vec<_>>();
     if jobs.is_empty() {
-        return;
+        return Ok(());
     }
     if parallel::worker_count(jobs.len()) > 1 {
         eprintln!(
@@ -417,41 +447,69 @@ fn install_dependencies(config: &Config, path: &std::path::Path) {
         );
     }
 
-    let results = parallel::map_ordered(&jobs, |(pm, program)| {
-        std::process::Command::new(program)
-            .args(pm.args())
-            .current_dir(path)
-            .output()
-    });
+    let results =
+        parallel::map_ordered(&jobs, |(pm, program)| -> Result<std::process::ExitStatus> {
+            let program = program
+                .as_ref()
+                .with_context(|| format!("{} is not on PATH", pm.program()))?;
+            crate::process::run(
+                std::process::Command::new(program)
+                    .args(pm.args())
+                    .current_dir(path),
+                pm.program(),
+                cancellation,
+            )
+        });
+    let mut incomplete = false;
     for ((pm, _), result) in jobs.iter().zip(results) {
         let label = pm.program();
         match result {
-            Ok(output) => {
-                print_task_output(label, &output.stdout);
-                print_task_output(label, &output.stderr);
-                if output.status.success() {
+            Ok(status) => {
+                if status.success() {
                     eprintln!("  [{label}] done");
                 } else {
-                    eprintln!("  [{label}] failed (exit {:?})", output.status.code());
+                    eprintln!("  [{label}] failed (exit {:?})", status.code());
+                    incomplete = true;
+                    print_retry(pm, path);
                 }
             }
-            Err(error) => eprintln!("  [{label}] failed to start: {error}"),
+            Err(error) => {
+                eprintln!("  [{label}] setup incomplete: {error:#}");
+                incomplete = true;
+                print_retry(pm, path);
+            }
         }
     }
+    if incomplete {
+        eprintln!(
+            "bonsai: worktree created at {}; dependency setup is incomplete",
+            path.display()
+        );
+    }
+    cancellation.check()
 }
 
-fn print_task_output(label: &str, output: &[u8]) {
-    for line in String::from_utf8_lossy(output).lines() {
-        eprintln!("  [{label}] {line}");
-    }
+fn print_retry(pm: &crate::pm::PackageManager, path: &std::path::Path) {
+    eprintln!(
+        "  [{}] after activating the project's tools in {}, run: {} {}",
+        pm.program(),
+        path.display(),
+        pm.program(),
+        pm.args().join(" ")
+    );
 }
 
 /// Run the post_add hook inside the new worktree. Failure is reported but
 /// does not undo the add. Hook stdout goes to our stderr so wrapped stdout
 /// capture stays clean.
-fn run_post_add(config: &Config, branch: &str, path: &std::path::Path) {
+fn run_post_add(
+    config: &Config,
+    branch: &str,
+    path: &std::path::Path,
+    cancellation: &crate::process::Cancellation,
+) -> Result<()> {
     let Some(hook) = &config.add.post_add else {
-        return;
+        return Ok(());
     };
     eprintln!("bonsai: running post_add hook");
     let (shell, flag) = if cfg!(windows) {
@@ -459,28 +517,32 @@ fn run_post_add(config: &Config, branch: &str, path: &std::path::Path) {
     } else {
         ("sh", "-c")
     };
-    let result = std::process::Command::new(shell)
-        .arg(flag)
-        .arg(hook)
-        .current_dir(path)
-        .env("BONSAI_BRANCH", branch)
-        .env("BONSAI_WORKTREE", path)
-        .stdout(std::process::Stdio::piped())
-        .stderr(std::process::Stdio::inherit())
-        .output();
+    let result = crate::process::run(
+        std::process::Command::new(shell)
+            .arg(flag)
+            .arg(hook)
+            .current_dir(path)
+            .env("BONSAI_BRANCH", branch)
+            .env("BONSAI_WORKTREE", path),
+        "post_add",
+        cancellation,
+    );
     match result {
-        Ok(output) => {
-            use std::io::Write;
-            let _ = std::io::stderr().write_all(&output.stdout);
-            if !output.status.success() {
+        Ok(status) => {
+            if !status.success() {
+                eprintln!("bonsai: post_add hook failed (exit {:?})", status.code());
                 eprintln!(
-                    "bonsai: post_add hook failed (exit {:?})",
-                    output.status.code()
+                    "bonsai: setup incomplete at {}; rerun the configured post_add hook there",
+                    path.display()
                 );
             }
         }
-        Err(e) => eprintln!("bonsai: post_add hook failed to start: {e}"),
+        Err(e) => eprintln!(
+            "bonsai: setup incomplete at {}; post_add failed: {e:#}",
+            path.display()
+        ),
     }
+    cancellation.check()
 }
 
 #[cfg(test)]

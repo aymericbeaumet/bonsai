@@ -259,6 +259,368 @@ impl TestRepo {
 const SENTINEL: &str = "__bonsai_cd\u{1f}";
 
 #[test]
+fn audit_add_preserves_existing_branch_identity() {
+    let repo = TestRepo::new();
+    repo.git(&repo.clone, &["branch", "ab/Existing_CASE"]);
+    let path = repo.add("ab/Existing_CASE");
+    assert_eq!(
+        repo.git(&path, &["branch", "--show-current"]),
+        "ab/Existing_CASE"
+    );
+}
+
+#[test]
+fn audit_add_preserves_newly_fetched_remote_branch_identity() {
+    let repo = TestRepo::new();
+    repo.git(&repo.origin, &["branch", "ab/Remote_CASE", "main"]);
+    let path = repo.add("ab/Remote_CASE");
+    assert_eq!(
+        repo.git(&path, &["branch", "--show-current"]),
+        "ab/Remote_CASE"
+    );
+    assert_eq!(
+        repo.git(&path, &["rev-parse", "--abbrev-ref", "@{upstream}"]),
+        "origin/ab/Remote_CASE"
+    );
+}
+
+#[test]
+fn audit_new_remote_identity_wins_over_an_existing_normalized_worktree() {
+    let repo = TestRepo::new();
+    let normalized = repo.add("ab/remote-case");
+    repo.git(&repo.origin, &["branch", "ab/Remote_CASE", "main"]);
+    let exact = repo.add("ab/Remote_CASE");
+    assert_ne!(exact, normalized);
+    assert_eq!(
+        repo.git(&exact, &["branch", "--show-current"]),
+        "ab/Remote_CASE"
+    );
+}
+
+#[test]
+fn audit_clean_current_worktree_keeps_json_valid() {
+    let repo = TestRepo::new();
+    let path = repo.add("ab/json-recovery");
+    let output = repo
+        .bonsai(&path)
+        .args(["clean", "--yes", "--no-fetch", "--json"])
+        .output()
+        .unwrap();
+    assert!(
+        output.status.success(),
+        "{}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let report: serde_json::Value = serde_json::from_slice(&output.stdout).unwrap();
+    assert_eq!(report["recovery"], repo.clone.to_str().unwrap());
+    assert_eq!(report["deleted_branches"][0], "ab/json-recovery");
+}
+
+#[cfg(unix)]
+#[test]
+fn audit_default_add_refuses_symlink_escape() {
+    let repo = TestRepo::new();
+    let seed = repo.add("ab/seed");
+    let outside = repo.dir.join("outside");
+    std::fs::create_dir(&outside).unwrap();
+    std::os::unix::fs::symlink(&outside, seed.parent().unwrap().join("escape")).unwrap();
+    repo.bonsai(&repo.clone)
+        .args(["add", "ab/escape/new"])
+        .assert()
+        .failure();
+    assert!(!outside.join("new").exists());
+}
+
+#[test]
+fn audit_package_manager_requires_its_own_lockfile() {
+    let repo = TestRepo::new();
+    repo.commit_files(&[
+        ("package.json", "{\"packageManager\":\"yarn@4.0.0\"}"),
+        ("package-lock.json", "{}"),
+    ]);
+    repo.fake_pm("yarn");
+    repo.fake_pm("npm");
+    let (path, _) = repo.add_with_path("ab/no-yarn-lock", &repo.path_with_fakebin());
+    assert!(!path.join("yarn-args.txt").exists());
+    assert!(!path.join("npm-args.txt").exists());
+}
+
+#[test]
+fn audit_bun_environment_overrides_store_configuration() {
+    let repo = TestRepo::new();
+    repo.commit_files(&[
+        ("bun.lock", ""),
+        (
+            "bunfig.toml",
+            "[install]\nlinker = 'isolated'\nglobalStore = false\n",
+        ),
+    ]);
+    repo.bonsai(&repo.clone)
+        .env("BONSAI_ADD__INSTALL", "false")
+        .env("BUN_INSTALL_GLOBAL_STORE", "1")
+        .args(["add", "ab/bun-env"])
+        .assert()
+        .success()
+        .stderr(predicate::str::contains("shared isolated installs").not());
+    repo.bonsai(&repo.clone)
+        .env("BONSAI_ADD__INSTALL", "false")
+        .env("BUN_INSTALL_GLOBAL_STORE", "0")
+        .args(["add", "ab/bun-env-disabled"])
+        .assert()
+        .success()
+        .stderr(predicate::str::contains("shared isolated installs"));
+}
+
+#[test]
+fn audit_yarn_reads_inherited_and_environment_settings() {
+    let repo = TestRepo::new();
+    repo.commit_files(&[
+        ("yarn.lock", ""),
+        ("package.json", "{\"packageManager\":\"yarn@4.0.0\"}"),
+    ]);
+    std::fs::write(
+        repo.dir.join(".yarnrc.yml"),
+        "enableGlobalCache: true\nnodeLinker: node-modules\nnmMode: hardlinks-global\n",
+    )
+    .unwrap();
+    repo.bonsai(&repo.clone)
+        .env("BONSAI_ADD__INSTALL", "false")
+        .args(["add", "ab/yarn-inherited"])
+        .assert()
+        .success()
+        .stderr(predicate::str::contains("shared dependency storage").not());
+    repo.bonsai(&repo.clone)
+        .env("BONSAI_ADD__INSTALL", "false")
+        .env("YARN_ENABLE_GLOBAL_CACHE", "false")
+        .args(["add", "ab/yarn-env-disabled"])
+        .assert()
+        .success()
+        .stderr(predicate::str::contains("shared dependency storage"));
+}
+
+#[test]
+fn audit_invalid_git_boolean_is_rejected() {
+    let repo = TestRepo::new();
+    repo.git(&repo.clone, &["config", "bonsai.add.install", "flase"]);
+    repo.bonsai(&repo.clone)
+        .args(["add", "ab/invalid-config"])
+        .assert()
+        .failure()
+        .stderr(predicate::str::contains("bonsai.add.install"));
+    assert_eq!(
+        repo.git(&repo.clone, &["branch", "--list", "ab/invalid-config"]),
+        ""
+    );
+}
+
+#[test]
+fn audit_invalid_protection_glob_is_rejected() {
+    let repo = TestRepo::new();
+    repo.git(
+        &repo.clone,
+        &["config", "bonsai.clean.protected", "[invalid"],
+    );
+    repo.bonsai(&repo.clone)
+        .args(["clean", "--dry-run", "--no-fetch"])
+        .assert()
+        .failure()
+        .stderr(predicate::str::contains("protected"));
+}
+
+#[cfg(unix)]
+#[test]
+fn audit_hook_output_is_visible_before_completion() {
+    use std::io::{BufRead, BufReader};
+    use std::process::Stdio;
+    use std::time::Duration;
+    let repo = TestRepo::new();
+    let release = repo.dir.join("release-hook");
+    let hook = format!(
+        "printf 'hook-ready\\n'; while [ ! -f '{}' ]; do sleep 0.05; done",
+        release.display()
+    );
+    std::fs::write(
+        repo.clone.join(".bonsai.toml"),
+        format!(
+            "[add]\npost_add = {}\n",
+            serde_json::to_string(&hook).unwrap()
+        ),
+    )
+    .unwrap();
+    let mut command = StdCommand::new(assert_cmd::cargo::cargo_bin!("bonsai"));
+    let mut child = command
+        .envs(repo.env_vars())
+        .env("BONSAI_ROOT", &repo.root)
+        .env_remove("_BONSAI_WRAPPED")
+        .current_dir(&repo.clone)
+        .args(["add", "ab/stream-hook"])
+        .stdout(Stdio::null())
+        .stderr(Stdio::piped())
+        .spawn()
+        .unwrap();
+    let stderr = child.stderr.take().unwrap();
+    let (sender, receiver) = std::sync::mpsc::channel();
+    let reader = std::thread::spawn(move || {
+        for line in BufReader::new(stderr).lines().map_while(Result::ok) {
+            if line.contains("hook-ready") {
+                let _ = sender.send(());
+            }
+        }
+    });
+    let visible = receiver.recv_timeout(Duration::from_secs(5)).is_ok();
+    std::fs::write(release, "").unwrap();
+    assert!(child.wait().unwrap().success());
+    reader.join().unwrap();
+    assert!(visible, "hook output was buffered until the hook exited");
+}
+
+#[cfg(unix)]
+#[test]
+fn audit_cancellation_reaches_descendants_after_hook_exits() {
+    use std::io::{BufRead, BufReader};
+    use std::process::Stdio;
+    use std::time::{Duration, Instant};
+    let repo = TestRepo::new();
+    let hook = "sleep 30 & printf 'child-ready\\n'";
+    std::fs::write(
+        repo.clone.join(".bonsai.toml"),
+        format!(
+            "[add]\npost_add = {}\n",
+            serde_json::to_string(hook).unwrap()
+        ),
+    )
+    .unwrap();
+    let mut child = StdCommand::new(assert_cmd::cargo::cargo_bin!("bonsai"))
+        .envs(repo.env_vars())
+        .env("BONSAI_ROOT", &repo.root)
+        .env_remove("_BONSAI_WRAPPED")
+        .current_dir(&repo.clone)
+        .args(["add", "ab/cancel-hook"])
+        .stdout(Stdio::null())
+        .stderr(Stdio::piped())
+        .spawn()
+        .unwrap();
+    let stderr = child.stderr.take().unwrap();
+    let (sender, receiver) = std::sync::mpsc::channel();
+    let reader = std::thread::spawn(move || {
+        for line in BufReader::new(stderr).lines().map_while(Result::ok) {
+            if line.contains("child-ready") {
+                let _ = sender.send(());
+            }
+        }
+    });
+    let ready = receiver.recv_timeout(Duration::from_secs(5)).is_ok();
+    unsafe {
+        libc::kill(child.id() as i32, libc::SIGTERM);
+    }
+    let start = Instant::now();
+    let status = loop {
+        if let Some(status) = child.try_wait().unwrap() {
+            break status;
+        }
+        if start.elapsed() > Duration::from_secs(4) {
+            let _ = child.kill();
+            let _ = child.wait();
+            panic!("cancelled provisioning did not exit promptly");
+        }
+        std::thread::sleep(Duration::from_millis(20));
+    };
+    reader.join().unwrap();
+    assert!(ready, "hook never started");
+    assert_eq!(status.code(), Some(128 + libc::SIGTERM));
+    assert!(
+        !repo
+            .git(&repo.clone, &["branch", "--list", "ab/cancel-hook"])
+            .is_empty()
+    );
+}
+
+#[test]
+#[ignore = "requires real npm; run in the package-manager smoke job"]
+fn real_package_managers_npm_preserves_lockfile() {
+    which("npm").expect("npm must be installed for smoke tests");
+    let repo = TestRepo::new();
+    let lock = r#"{"name":"bonsai-smoke","version":"1.0.0","lockfileVersion":3,"requires":true,"packages":{"":{"name":"bonsai-smoke","version":"1.0.0"}}}"#;
+    repo.commit_files(&[
+        (
+            "package.json",
+            r#"{"name":"bonsai-smoke","version":"1.0.0","private":true}"#,
+        ),
+        ("package-lock.json", lock),
+        (".gitignore", "node_modules/\n"),
+    ]);
+    let output = repo
+        .bonsai(&repo.clone)
+        .env("npm_config_cache", repo.dir.join("npm-cache"))
+        .args(["add", "ab/npm-smoke"])
+        .output()
+        .unwrap();
+    assert!(output.status.success());
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert!(stderr.contains("[npm] done"), "{stderr}");
+    let path = PathBuf::from(String::from_utf8_lossy(&output.stdout).trim());
+    assert_eq!(
+        std::fs::read_to_string(path.join("package-lock.json")).unwrap(),
+        lock
+    );
+    assert!(repo.git(&path, &["status", "--porcelain"]).is_empty());
+}
+
+#[test]
+#[ignore = "requires real uv and Python; run in the package-manager smoke job"]
+fn real_package_managers_uv_rejects_stale_manifest() {
+    let uv = which("uv").expect("uv must be installed for smoke tests");
+    let interpreter = StdCommand::new(&uv)
+        .args(["python", "find", "--offline"])
+        .output()
+        .unwrap();
+    assert!(
+        interpreter.status.success(),
+        "Python must be installed for smoke tests"
+    );
+    let python = String::from_utf8(interpreter.stdout)
+        .unwrap()
+        .trim()
+        .to_string();
+    let repo = TestRepo::new();
+    let manifest = "[project]\nname = 'bonsai-smoke'\nversion = '0.1.0'\nrequires-python = '>=3.10'\ndependencies = []\n";
+    std::fs::write(repo.clone.join("pyproject.toml"), manifest).unwrap();
+    let output = StdCommand::new(uv)
+        .envs(repo.env_vars())
+        .env("UV_PYTHON", &python)
+        .env("UV_PYTHON_DOWNLOADS", "never")
+        .current_dir(&repo.clone)
+        .args(["lock", "--offline"])
+        .output()
+        .unwrap();
+    assert!(
+        output.status.success(),
+        "{}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let lock = std::fs::read_to_string(repo.clone.join("uv.lock")).unwrap();
+    let stale = manifest.replace(
+        "dependencies = []",
+        "dependencies = ['bonsai-nonexistent-audit-package==0.0.1']",
+    );
+    repo.commit_files(&[("pyproject.toml", &stale), ("uv.lock", &lock)]);
+    let output = repo
+        .bonsai(&repo.clone)
+        .env("UV_PYTHON", &python)
+        .env("UV_OFFLINE", "true")
+        .env("UV_PYTHON_DOWNLOADS", "never")
+        .args(["add", "ab/uv-stale"])
+        .output()
+        .unwrap();
+    assert!(output.status.success());
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert!(stderr.contains("[uv] failed"), "{stderr}");
+    assert!(stderr.contains("setup is incomplete"));
+    let path = PathBuf::from(String::from_utf8_lossy(&output.stdout).trim());
+    assert_eq!(std::fs::read_to_string(path.join("uv.lock")).unwrap(), lock);
+}
+
+#[test]
 fn add_creates_branch_worktree_and_prints_path() {
     let repo = TestRepo::new();
     let path = repo.add("feat-x");
@@ -1189,7 +1551,7 @@ fn add_installs_with_pnpm_when_lockfile_present() {
     let (path, stderr) = repo.add_with_path("feat-pnpm", &repo.path_with_fakebin());
     let args = std::fs::read_to_string(path.join("pnpm-args.txt")).unwrap();
     assert_eq!(args.trim(), "install --frozen-lockfile --prefer-offline");
-    assert!(stderr.contains("warning: pnpm is using a per-worktree virtual store"));
+    assert!(stderr.contains("warning: pnpm: no shared virtual store"));
     assert!(stderr.contains("https://pnpm.io/git-worktrees"));
     assert!(!stderr.contains("\x1b["), "captured stderr must be plain");
 }
@@ -1214,6 +1576,7 @@ fn add_install_honors_package_manager_field() {
     repo.commit_files(&[
         ("package.json", "{\"packageManager\": \"yarn@4.0.0\"}\n"),
         ("package-lock.json", "{}\n"),
+        ("yarn.lock", ""),
     ]);
     repo.fake_pm("yarn");
     repo.fake_pm("npm");
@@ -1257,15 +1620,23 @@ fn add_install_disabled_via_config() {
 }
 
 #[test]
-fn add_install_skips_silently_when_pm_missing() {
+fn add_install_reports_missing_package_manager() {
     let repo = TestRepo::new();
     repo.commit_files(&[("pnpm-lock.yaml", "")]);
     // Empty fakebin + only the host dirs containing git: pnpm is absent.
     let (path, stderr) = repo.add_with_path("feat-nopm", &repo.restricted_path());
     assert!(!path.join("pnpm-args.txt").exists());
     assert!(
-        !stderr.contains("installing dependencies"),
-        "expected silent skip, got: {stderr}"
+        stderr.contains("pnpm is not on PATH"),
+        "missing diagnosis: {stderr}"
+    );
+    assert!(
+        stderr.contains("setup is incomplete"),
+        "missing summary: {stderr}"
+    );
+    assert!(
+        stderr.contains("run: pnpm install --frozen-lockfile"),
+        "missing retry: {stderr}"
     );
 }
 
@@ -1291,6 +1662,10 @@ fn init_scripts_are_valid_shell() {
         ("fish", vec!["--no-execute"]),
     ] {
         let Ok(shell_path) = which(shell) else {
+            assert!(
+                std::env::var_os("REQUIRE_TEST_SHELLS").is_none(),
+                "required shell {shell} is not installed"
+            );
             eprintln!("skipping {shell}: not installed");
             continue;
         };
@@ -1301,7 +1676,6 @@ fn init_scripts_are_valid_shell() {
             .unwrap();
         assert!(output.status.success());
         let generated = String::from_utf8_lossy(&output.stdout);
-        assert!(generated.contains("resume"));
         assert!(generated.contains("command bonsai"));
         assert!(
             generated.matches("_BONSAI_WRAPPER_VERSION=").count() >= 2,

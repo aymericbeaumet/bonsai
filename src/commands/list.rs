@@ -1,7 +1,7 @@
 use std::io::{self, Write};
 use std::path::PathBuf;
 
-use anyhow::Result;
+use anyhow::{Context, Result};
 use serde::Serialize;
 use tabwriter::TabWriter;
 
@@ -22,18 +22,25 @@ struct Entry {
     /// Repo identifier (`github.com/owner/repo`), for grouping in UIs.
     #[serde(skip_serializing_if = "Option::is_none")]
     repo: Option<String>,
+    /// Omitted when not requested, null when Git could not determine status.
     #[serde(skip_serializing_if = "Option::is_none")]
-    dirty: Option<bool>,
+    dirty: Option<Option<bool>>,
 }
 
-pub fn run(config: &Config, all: bool, status: bool, json: bool) -> Result<()> {
+pub fn run(
+    config: &Config,
+    repo: Option<&Repo>,
+    all: bool,
+    status: bool,
+    json: bool,
+) -> Result<()> {
     let entries = if all {
         global_entries(config, status)?
     } else {
-        repo_entries(config, status)?
+        repo_entries(config, repo.context("not inside a git repository")?, status)?
     };
     if json {
-        println!("{}", serde_json::to_string_pretty(&entries)?);
+        crate::output::line(format_args!("{}", serde_json::to_string_pretty(&entries)?))?;
         return Ok(());
     }
     let stdout = io::stdout();
@@ -46,8 +53,10 @@ pub fn run(config: &Config, all: bool, status: bool, json: bool) -> Result<()> {
         if e.prunable {
             flags.push("prunable");
         }
-        if e.dirty == Some(true) {
+        if e.dirty == Some(Some(true)) {
             flags.push("dirty");
+        } else if e.dirty == Some(None) {
+            flags.push("status unknown");
         }
         let kind = if e.main {
             WorktreeKind::Main
@@ -73,8 +82,7 @@ pub fn run(config: &Config, all: bool, status: bool, json: bool) -> Result<()> {
     Ok(())
 }
 
-fn repo_entries(config: &Config, status: bool) -> Result<Vec<Entry>> {
-    let repo = Repo::require()?;
+fn repo_entries(config: &Config, repo: &Repo, status: bool) -> Result<Vec<Entry>> {
     let id = repo.id(config);
     let worktrees = repo
         .project_worktrees(config)?
@@ -122,9 +130,42 @@ fn global_entries(config: &Config, status: bool) -> Result<Vec<Entry>> {
     }))
 }
 
-fn is_dirty(path: &std::path::Path) -> bool {
-    Git::at(path)
-        .out(&["status", "--porcelain"])
-        .map(|s| !s.is_empty())
-        .unwrap_or(false)
+fn is_dirty(path: &std::path::Path) -> Option<bool> {
+    match Git::at(path).out(&["status", "--porcelain"]) {
+        Ok(status) => Some(!status.is_empty()),
+        Err(error) => {
+            eprintln!(
+                "bonsai: status unavailable for {}: {error:#}",
+                path.display()
+            );
+            None
+        }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    #[test]
+    fn missing_worktree_status_is_unknown() {
+        let temporary = tempfile::tempdir().unwrap();
+        assert_eq!(super::is_dirty(&temporary.path().join("missing")), None);
+    }
+
+    #[test]
+    fn unknown_status_is_explicitly_null_in_json() {
+        let mut entry = super::Entry {
+            branch: None,
+            path: "/missing".into(),
+            main: false,
+            external: false,
+            locked: false,
+            prunable: false,
+            repo: None,
+            dirty: Some(None),
+        };
+        let json = serde_json::to_value(&entry).unwrap();
+        assert!(json.get("dirty").unwrap().is_null());
+        entry.dirty = None;
+        assert!(serde_json::to_value(&entry).unwrap().get("dirty").is_none());
+    }
 }

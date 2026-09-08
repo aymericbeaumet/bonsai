@@ -26,8 +26,9 @@ BONSAI_* environment variables, command-line flags.";
 
 const ADD_LONG: &str = "\
 Create a worktree and cd into it (prints the path without the shell wrapper).
-The branch input is slugified segment-by-segment (`Fix API/Login` becomes
-`fix-api/login`); `/` remains the branch and directory delimiter.
+Existing branch names are preserved exactly. New branch inputs are slugified
+segment-by-segment (`Fix API/Login` becomes `fix-api/login`); `/` remains the
+branch and directory delimiter.
 
 Branch resolution, in order:
   - already checked out in a bonsai worktree: reuse it (idempotent)
@@ -46,9 +47,9 @@ HEAD. Untracked files matching the copy configuration (.env*, .envrc,
 .mcp.json, CLAUDE.local.md, ... by default) are copied from your current
 worktree (then the main one) into the new worktree, dependencies are
 installed with the package manager detected from lockfiles (pnpm, npm, yarn,
-bun, cargo, uv — lockfile-frozen, skipped when the tool is missing, disable
+bun, cargo, uv — lockfile-preserving, reported when the tool is missing, disable
 with [add] install = false). Independent ecosystems install concurrently with
-their output grouped by tool. Bonsai warns when an actionable package-manager
+live output labelled by tool. Bonsai warns when an actionable package-manager
 setting would make sibling worktree installs substantially faster, then the
 [add] post_add command runs after every install inside the new worktree.
 
@@ -65,7 +66,8 @@ List worktrees of the current repo, one per line, in tab-aligned columns:
 (with --status). The main checkout is listed first. With
 --all, list every Bonsai-managed worktree across all repos (works outside a
 repo). --json outputs an array of
-{branch, path, main, external, locked, prunable, dirty?} instead.";
+{branch, path, main, external, locked, prunable, dirty?} instead. With --status,
+dirty is null when Git cannot determine status; errors are never shown as clean.";
 
 const REMOVE_LONG: &str = "\
 Remove the worktrees of the given branches. Without arguments, opens a fuzzy
@@ -90,10 +92,10 @@ orphan directories are deleted concurrently with numbered result lines.";
 
 const CLEAN_LONG: &str = "\
 Remove every worktree whose branch is already integrated into the default
-branch, then delete those branches. Detects three cases: regular merges,
-squash-merges (content comparison), and branches whose upstream was deleted
-after merging (the GitHub PR flow) — which is why clean fetches with --prune
-first (disable with --no-fetch or [clean] fetch = false).
+branch, then delete those branches. Detects regular merges and squash-merges
+(content comparison), including branches whose upstream was deleted after
+merging. A missing upstream alone never proves integration. Fetches with
+--prune first (disable with --no-fetch or [clean] fetch = false).
 
 Never touched: the main checkout, the default branch, locked worktrees,
 dirty worktrees (skipped and reported, even with --yes/--force), branches
@@ -154,8 +156,9 @@ Print the shell integration for zsh, bash, or fish. Add to your shell rc:
   bonsai init fish | source     # fish
 
 The wrapper makes add/cd/remove/clean move your shell into the right
-directory. It uses a plain `cd`, so chpwd-based tools (zoxide, direnv,
-starship, ...) keep working.";
+directory when stdout is a terminal. Substitutions, pipes, and redirections
+preserve the raw path; `command bonsai` always bypasses the wrapper. It uses
+a plain `cd`, so directory-change hooks keep working.";
 
 const AGENTS_LONG: &str = "\
 Print a concise markdown usage contract intended for AI coding agents
@@ -169,7 +172,8 @@ bonsai maintains multi-root VS Code workspace files — the native, standard
 way to get every worktree as a root folder in the Explorer of VS Code,
 Cursor, Windsurf, and other derivatives, no extension required. Editors
 watch the file, so the left tree updates live as bonsai adds and removes
-worktrees.
+worktrees. Workspace settings, tasks, launch configuration, comments, and
+custom folders are preserved when Bonsai refreshes its folders.
 
   <root>/<repo-id>/<repo>.code-workspace   per repo: all registered worktrees
   <root>/bonsai.code-workspace             global: Bonsai-managed worktrees
@@ -232,7 +236,7 @@ pub enum Commands {
     /// Create a worktree (and its branch) under the bonsai root, then cd into it
     #[command(long_about = ADD_LONG)]
     Add {
-        /// Branch input to slugify and check out; created if it does not exist.
+        /// Existing branch to check out, or a new branch input to slugify.
         /// Slashes remain nested branch/path delimiters. Omit it (on a
         /// terminal) to fuzzy-pick or type a new name
         branch: Option<String>,

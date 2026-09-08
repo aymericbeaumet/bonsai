@@ -11,8 +11,8 @@ description: Manage git worktrees with the bonsai CLI - create isolated per-bran
   (default root `~/.bonsai`). Branch names nest: `feat/x` → `feat/x/`.
 - Run bonsai from anywhere inside the repo — the main checkout or any
   worktree — it always operates on the repository as a whole.
-- `add` slugifies branch inputs segment-by-segment while preserving `/` as a
-  nested branch/path delimiter, creates branches automatically, and fetches
+- `add` preserves existing branch names and slugifies new inputs segment-by-segment
+  while preserving `/` as a nested branch/path delimiter, creates branches automatically, and fetches
   the remote default branch first. Missing arguments open fuzzy pickers on a
   real terminal only; in non-interactive use, always pass arguments or the
   command exits with an error.
@@ -25,7 +25,7 @@ cd "$path"                      # then work inside the worktree
 bonsai add <branch> --base HEAD # stack on the checkout you run it from
 bonsai list --json              # this repo's worktrees, machine-readable
 bonsai remove <branch> [-d]     # drop the worktree (keep branch unless -d)
-bonsai clean --dry-run --json   # inspect merged/squash-merged/gone branches
+bonsai clean --dry-run --json   # inspect merged/squash-merged branches
 bonsai clean --yes              # then execute
 ```
 
@@ -34,15 +34,19 @@ bonsai clean --yes              # then execute
 - `--base` resolves against the directory bonsai runs from, not the main
   checkout: `--base HEAD` inside a worktree stacks on that worktree.
 - New branches carry no upstream (`--no-track`) until first push.
+- A deleted upstream alone never proves a branch is safe to clean.
 - A fresh worktree with zero commits already counts as "merged", so `clean`
   will list it — read the plan before executing.
 - Untracked local config (`.env*`, `.envrc`, `.mcp.json`, `CLAUDE.local.md`,
   ...) is copied into new worktrees automatically.
 - Dependencies are installed automatically in new worktrees when a lockfile
-  is present (pnpm/npm/yarn/bun/cargo/uv, lockfile-frozen); a missing tool is
-  skipped and an install failure never aborts `add` — check stderr before
+  is present (pnpm/npm/yarn/bun/cargo/uv, lockfiles preserved). Missing tools
+  and failed installs leave the worktree available and print an incomplete-setup
+  summary with a retry command. Re-adding does not rerun setup. Check stderr before
   assuming deps are in place. Follow any linked package-manager configuration
   warning to enable its worktree-optimized shared store.
+- Shell auto-cd applies only to terminal stdout; substitutions and redirections
+  preserve paths. `command bonsai` bypasses the wrapper explicitly.
 
 ## Destructive-command policy
 

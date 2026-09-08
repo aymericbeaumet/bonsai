@@ -81,7 +81,8 @@ pub fn path_for_branch(repo_dir: &Path, branch: &str) -> PathBuf {
 /// A directory is a linked worktree checkout iff it contains a `.git` *file*
 /// (the main worktree has a `.git` directory; intermediate dirs have neither).
 pub fn is_worktree_dir(path: &Path) -> bool {
-    path.join(".git").is_file()
+    std::fs::symlink_metadata(path.join(".git"))
+        .is_ok_and(|metadata| metadata.file_type().is_file())
 }
 
 /// After removing `removed`, delete now-empty parent directories walking up
@@ -91,6 +92,9 @@ pub fn cleanup_empty_dirs(removed: &Path, root: &Path) {
     let mut dir = removed.to_path_buf();
     loop {
         if !dir.starts_with(root) || dir == root {
+            break;
+        }
+        if crate::paths::ensure_contained(&dir, root).is_err() {
             break;
         }
         match std::fs::remove_dir(&dir) {
@@ -163,15 +167,35 @@ fn git_dir(worktree: &Path) -> Option<PathBuf> {
 /// Recursively find worktree checkout dirs (dirs containing a `.git` file)
 /// under `root`, without descending into checkouts themselves.
 pub fn find_worktree_dirs(root: &Path) -> Vec<PathBuf> {
+    match find_worktree_dirs_checked(root) {
+        Ok(found) => found,
+        Err(error) => {
+            eprintln!("bonsai: could not scan {}: {error}", root.display());
+            Vec::new()
+        }
+    }
+}
+
+pub fn find_worktree_dirs_checked(root: &Path) -> std::io::Result<Vec<PathBuf>> {
     let mut found = Vec::new();
-    let mut stack = vec![root.to_path_buf()];
+    let root = match std::fs::canonicalize(root) {
+        Ok(root) => root,
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(found),
+        Err(error) => return Err(error),
+    };
+    let mut stack = vec![root.clone()];
     while let Some(dir) = stack.pop() {
-        let Ok(entries) = std::fs::read_dir(&dir) else {
+        if !std::fs::symlink_metadata(&dir)?.is_dir() {
             continue;
-        };
-        for entry in entries.flatten() {
+        }
+        for entry in std::fs::read_dir(&dir)? {
+            let entry = entry?;
             let path = entry.path();
-            if !path.is_dir() || path.file_name().is_some_and(|n| n == ".git") {
+            if !entry.file_type()?.is_dir()
+                || path
+                    .file_name()
+                    .is_some_and(|n| n == ".git" || n == ".locks")
+            {
                 continue;
             }
             if is_worktree_dir(&path) {
@@ -182,7 +206,7 @@ pub fn find_worktree_dirs(root: &Path) -> Vec<PathBuf> {
         }
     }
     found.sort();
-    found
+    Ok(found)
 }
 
 #[cfg(test)]
