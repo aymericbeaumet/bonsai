@@ -1,5 +1,8 @@
 mod activity;
+pub(crate) mod agents;
+pub(crate) mod integrations;
 pub(crate) mod inventory;
+mod notifications;
 mod security;
 pub(crate) mod terminal;
 mod tui;
@@ -36,6 +39,8 @@ struct AppState {
     initial_repo: Option<PathBuf>,
     security: Security,
     terminals: Arc<TerminalManager>,
+    agents: Arc<agents::AgentManager>,
+    notifications: Arc<notifications::AttentionNotifier>,
     inventory_cache: Arc<Mutex<Option<CachedInventory>>>,
     notice: Arc<Mutex<Option<String>>>,
 }
@@ -78,6 +83,8 @@ async fn serve(
         .map(|byte| format!("{byte:02x}"))
         .collect::<String>();
     let state = AppState {
+        agents: Arc::new(agents::AgentManager::new(&config)),
+        notifications: Arc::new(notifications::AttentionNotifier::new(&config.hq)),
         config,
         initial_repo,
         security: Security::new(port, token),
@@ -105,6 +112,27 @@ async fn serve(
     }
 
     let stopped = Arc::new(AtomicBool::new(false));
+    let inventory_worker = {
+        let state = state.clone();
+        let stopped = Arc::clone(&stopped);
+        tokio::task::spawn_blocking(move || {
+            while !stopped.load(Ordering::Acquire) {
+                if let Err(error) = snapshot_value(&state) {
+                    *state
+                        .notice
+                        .lock()
+                        .unwrap_or_else(|error| error.into_inner()) =
+                        Some(format!("Workspace refresh failed: {error}"));
+                }
+                for _ in 0..20 {
+                    if stopped.load(Ordering::Acquire) {
+                        break;
+                    }
+                    std::thread::sleep(Duration::from_millis(100));
+                }
+            }
+        })
+    };
     let (tui_done, finished) = tokio::sync::oneshot::channel();
     let tui_worker = if use_tui {
         let state = state.clone();
@@ -132,6 +160,9 @@ async fn serve(
         .await;
     stopped.store(true, Ordering::Release);
     tokio::task::spawn_blocking(move || terminals.shutdown()).await?;
+    inventory_worker
+        .await
+        .context("the workspace refresh worker stopped unexpectedly")?;
     if let Some(worker) = tui_worker {
         worker
             .await
@@ -147,6 +178,19 @@ fn router(state: AppState) -> Router {
         .route("/app.js", get(javascript))
         .route("/app.css", get(stylesheet))
         .route("/api/state", get(workspace_state))
+        .route(
+            "/api/agents/{id}/actions",
+            axum::routing::post(agent_action),
+        )
+        .route(
+            "/api/attention/{id}/acknowledge",
+            axum::routing::post(acknowledge_attention),
+        )
+        .route("/api/visits", axum::routing::post(record_visit))
+        .route(
+            "/api/integrations/{provider}/actions",
+            axum::routing::post(integration_action),
+        )
         .route("/api/terminals", get(list_terminals).post(create_terminal))
         .route("/api/terminals/{id}", delete(close_terminal))
         .route("/api/terminals/{id}/ws", get(attach_terminal))
@@ -238,7 +282,9 @@ fn snapshot_value(state: &AppState) -> Result<Value> {
     };
     drop(cache);
     value["terminals"] = serde_json::to_value(state.terminals.list())?;
-    Ok(activity::annotate(value))
+    let value = state.agents.annotate(activity::annotate(value));
+    state.notifications.observe(&value);
+    Ok(value)
 }
 
 async fn list_terminals(State(state): State<AppState>) -> Json<Vec<terminal::TerminalSummary>> {
@@ -247,10 +293,128 @@ async fn list_terminals(State(state): State<AppState>) -> Json<Vec<terminal::Ter
 
 #[derive(Deserialize)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
+struct AgentAction {
+    action: String,
+    text: Option<String>,
+    request_id: Option<String>,
+}
+
+async fn agent_action(
+    State(state): State<AppState>,
+    RoutePath(id): RoutePath<String>,
+    payload: Result<Json<AgentAction>, JsonRejection>,
+) -> Result<Json<Value>, ApiError> {
+    let Json(request) =
+        payload.map_err(|error| ApiError::new(error.status(), error.body_text()))?;
+    if !["reply", "interrupt", "approve", "reject"].contains(&request.action.as_str()) {
+        return Err(ApiError::bad_request("unknown agent action"));
+    }
+    if request
+        .text
+        .as_ref()
+        .is_some_and(|text| text.len() > 32 * 1024 || text.contains('\0'))
+    {
+        return Err(ApiError::bad_request(
+            "reply is too large or contains a NUL byte",
+        ));
+    }
+    if request.action == "reply"
+        && request
+            .text
+            .as_ref()
+            .is_none_or(|text| text.trim().is_empty())
+    {
+        return Err(ApiError::bad_request("a reply is required"));
+    }
+    let result = tokio::task::spawn_blocking(move || {
+        state.agents.action(
+            &id,
+            &request.action,
+            request.text.as_deref(),
+            request.request_id.as_deref(),
+        )
+    })
+    .await
+    .map_err(ApiError::internal)?
+    .map_err(|error| ApiError::new(StatusCode::CONFLICT, error.to_string()))?;
+    Ok(Json(result))
+}
+
+async fn acknowledge_attention(
+    State(state): State<AppState>,
+    RoutePath(id): RoutePath<String>,
+) -> Result<StatusCode, ApiError> {
+    tokio::task::spawn_blocking(move || state.agents.acknowledge(&id))
+        .await
+        .map_err(ApiError::internal)?
+        .map_err(|error| ApiError::new(StatusCode::CONFLICT, error.to_string()))?;
+    Ok(StatusCode::NO_CONTENT)
+}
+
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+struct Visit {
+    path: PathBuf,
+}
+
+async fn record_visit(
+    State(state): State<AppState>,
+    payload: Result<Json<Visit>, JsonRejection>,
+) -> Result<StatusCode, ApiError> {
+    let Json(request) =
+        payload.map_err(|error| ApiError::new(error.status(), error.body_text()))?;
+    tokio::task::spawn_blocking(move || {
+        let path = terminal_path(
+            &state,
+            &CreateTerminal {
+                path: request.path,
+                args: None,
+                tmux: None,
+                tmux_pane: None,
+                new_tmux: false,
+            },
+        )?;
+        state.agents.visit(&path).map_err(ApiError::internal)
+    })
+    .await
+    .map_err(ApiError::internal)??;
+    Ok(StatusCode::NO_CONTENT)
+}
+
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+struct IntegrationAction {
+    action: String,
+}
+
+async fn integration_action(
+    State(state): State<AppState>,
+    RoutePath(provider): RoutePath<String>,
+    payload: Result<Json<IntegrationAction>, JsonRejection>,
+) -> Result<StatusCode, ApiError> {
+    let Json(request) =
+        payload.map_err(|error| ApiError::new(error.status(), error.body_text()))?;
+    if !["claude", "codex", "opencode"].contains(&provider.as_str())
+        || !["install", "repair", "disable", "uninstall"].contains(&request.action.as_str())
+    {
+        return Err(ApiError::bad_request("unknown integration or action"));
+    }
+    tokio::task::spawn_blocking(move || {
+        state.agents.integration_action(&provider, &request.action)
+    })
+    .await
+    .map_err(ApiError::internal)?
+    .map_err(|error| ApiError::new(StatusCode::CONFLICT, error.to_string()))?;
+    Ok(StatusCode::NO_CONTENT)
+}
+
+#[derive(Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
 struct CreateTerminal {
     path: PathBuf,
     args: Option<Vec<String>>,
     tmux: Option<String>,
+    tmux_pane: Option<String>,
     #[serde(default)]
     new_tmux: bool,
 }
@@ -273,19 +437,35 @@ fn spawn_terminal(
 ) -> Result<terminal::TerminalSummary, ApiError> {
     validate_terminal_request(&request)?;
     let path = terminal_path(state, &request)?;
-    state
+    let visit_path = canonical_directory(&request.path).unwrap_or_else(|_| path.clone());
+    let summary = state
         .terminals
         .spawn(
             &path,
             request.args,
             request.tmux,
+            request.tmux_pane,
             request.new_tmux,
             &state.config,
         )
-        .map_err(ApiError::internal)
+        .map_err(ApiError::internal)?;
+    if let Err(error) = state.agents.visit(&visit_path) {
+        *state
+            .notice
+            .lock()
+            .unwrap_or_else(|error| error.into_inner()) = Some(format!(
+            "Terminal opened, but recent use could not be saved: {error}"
+        ));
+    }
+    Ok(summary)
 }
 
 fn validate_terminal_request(request: &CreateTerminal) -> Result<(), ApiError> {
+    if request.tmux_pane.is_some() && request.tmux.is_none() {
+        return Err(ApiError::bad_request(
+            "a pane target requires a tmux session",
+        ));
+    }
     if request.tmux.is_some() && (request.args.is_some() || request.new_tmux) {
         return Err(ApiError::bad_request(
             "attach a tmux session without args or newTmux",
@@ -335,7 +515,7 @@ fn validate_bonsai_args(args: &[String]) -> Result<(), ApiError> {
             }
             Err(error) => return Err(ApiError::bad_request(error.to_string())),
         };
-    if matches!(cli.command, Commands::Hq { .. }) {
+    if matches!(cli.command, Commands::Hq { .. } | Commands::HqEvent { .. }) {
         return Err(ApiError::bad_request(
             "the browser server is already running",
         ));
@@ -345,13 +525,27 @@ fn validate_bonsai_args(args: &[String]) -> Result<(), ApiError> {
 
 fn terminal_path(state: &AppState, request: &CreateTerminal) -> Result<PathBuf, ApiError> {
     if let Some(name) = &request.tmux {
-        let session = terminal::tmux_inventory()
+        let inventory = terminal::tmux_inventory();
+        let session = inventory
             .sessions
-            .into_iter()
+            .iter()
             .find(|session| session.name == *name)
             .ok_or_else(|| {
                 ApiError::bad_request("tmux session no longer exists; refresh and try again")
             })?;
+        if let Some(id) = &request.tmux_pane {
+            let pane = inventory
+                .panes
+                .iter()
+                .find(|pane| pane.id == *id && pane.session == *name)
+                .ok_or_else(|| {
+                    ApiError::new(
+                        StatusCode::CONFLICT,
+                        "tmux pane no longer exists in the selected session",
+                    )
+                })?;
+            return tmux_client_directory(Path::new(&pane.path), &state.config.root_dir());
+        }
         return tmux_client_directory(Path::new(&session.path), &state.config.root_dir());
     }
 
@@ -386,7 +580,7 @@ fn terminal_path(state: &AppState, request: &CreateTerminal) -> Result<PathBuf, 
             return Ok(path);
         }
         return Err(ApiError::bad_request(
-            "choose an existing worktree from the workspace graph",
+            "choose an existing worktree from the workspace",
         ));
     }
     Ok(path)
@@ -558,11 +752,18 @@ mod tests {
     }
 
     fn state(root: &Path) -> AppState {
-        AppState {
-            config: Config {
-                root: root.to_string_lossy().into_owned(),
-                ..Config::default()
+        let config = Config {
+            root: root.to_string_lossy().into_owned(),
+            hq: crate::config::HqConfig {
+                auto_setup: false,
+                ..Default::default()
             },
+            ..Config::default()
+        };
+        AppState {
+            agents: Arc::new(agents::AgentManager::new(&config)),
+            notifications: Arc::new(notifications::AttentionNotifier::new(&config.hq)),
+            config,
             initial_repo: None,
             security: Security::new(4837, "secret".into()),
             terminals: Arc::new(TerminalManager::new()),
@@ -626,6 +827,68 @@ mod tests {
                 .await
                 .unwrap();
             assert_eq!(response.status(), StatusCode::NOT_FOUND);
+        }
+    }
+
+    #[tokio::test]
+    async fn agent_mutations_require_authentication_and_exact_origin() {
+        let root = tempfile::tempdir().unwrap();
+        for (path, body) in [
+            ("/api/agents/missing/actions", r#"{"action":"interrupt"}"#),
+            ("/api/attention/missing/acknowledge", "{}"),
+            ("/api/visits", r#"{"path":"/tmp"}"#),
+            (
+                "/api/integrations/claude/actions",
+                r#"{"action":"disable"}"#,
+            ),
+        ] {
+            let mut req = request(Method::POST, path, Body::from(body));
+            req.headers_mut().remove(header::AUTHORIZATION);
+            assert_eq!(
+                app(root.path()).oneshot(req).await.unwrap().status(),
+                StatusCode::UNAUTHORIZED
+            );
+            let mut req = request(Method::POST, path, Body::from(body));
+            req.headers_mut().insert(
+                header::ORIGIN,
+                HeaderValue::from_static("http://untrusted.example"),
+            );
+            assert_eq!(
+                app(root.path()).oneshot(req).await.unwrap().status(),
+                StatusCode::FORBIDDEN
+            );
+        }
+    }
+
+    #[tokio::test]
+    async fn rejects_unknown_controls_and_unregistered_visits() {
+        let root = tempfile::tempdir().unwrap();
+        for (path, body) in [
+            ("/api/agents/missing/actions", r#"{"action":"launch"}"#),
+            (
+                "/api/agents/missing/actions",
+                r#"{"action":"reply","text":" "}"#,
+            ),
+            (
+                "/api/integrations/unknown/actions",
+                r#"{"action":"install"}"#,
+            ),
+            (
+                "/api/integrations/claude/actions",
+                r#"{"action":"execute"}"#,
+            ),
+            ("/api/visits", r#"{"path":"relative"}"#),
+            ("/api/terminals", r#"{"path":"/tmp","tmuxPane":"%4"}"#),
+        ] {
+            assert_eq!(
+                app(root.path())
+                    .oneshot(request(Method::POST, path, Body::from(body)))
+                    .await
+                    .unwrap()
+                    .status(),
+                StatusCode::BAD_REQUEST,
+                "{path}: {body}"
+            );
         }
     }
 
@@ -727,6 +990,7 @@ mod tests {
             path: root.path().join("."),
             args: None,
             tmux: None,
+            tmux_pane: None,
             new_tmux: false,
         };
         assert_eq!(
@@ -761,6 +1025,7 @@ mod tests {
             path: project.path().to_path_buf(),
             args: Some(vec!["add".into(), "ab/new-worktree".into()]),
             tmux: None,
+            tmux_pane: None,
             new_tmux: false,
         };
         assert_eq!(
@@ -788,6 +1053,7 @@ mod tests {
             path: alias,
             args: None,
             tmux: None,
+            tmux_pane: None,
             new_tmux: false,
         };
         assert!(terminal_path(&state(root.path()), &request).is_err());

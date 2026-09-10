@@ -1,3 +1,49 @@
+export type Provider = "claude" | "codex" | "opencode" | "unknown";
+export type Priority = "needs-you" | "working" | "recent" | "older";
+export interface Agent {
+  id: string;
+  provider: Provider;
+  sessionId: string | null;
+  parentId: string | null;
+  worktreePath: string | null;
+  cwd: string;
+  title: string;
+  model: string | null;
+  state: "unknown" | "running" | "waiting" | "idle" | "completed" | "failed" | "stopped";
+  waitingReason: string | null;
+  updatedAt: number | null;
+  observedAt: number;
+  live: boolean;
+  stale: boolean;
+  target: { terminalId?: string; tmuxSession?: string; tmuxPane?: string } | null;
+  capabilities: string[];
+}
+export interface Attention {
+  requestId?: string;
+  id: string;
+  agentId: string;
+  kind: "question" | "approval" | "error" | "completed";
+  summary: string;
+  createdAt: number;
+}
+export interface Quota {
+  id: string;
+  provider: Provider;
+  accountLabel?: string;
+  label: string;
+  usedPercent: number | null;
+  resetsAt: number | null;
+  observedAt: number;
+  stale: boolean;
+  unavailableReason?: string;
+}
+export interface Integration {
+  provider: Provider;
+  status: "unavailable" | "installed" | "awaiting-activation" | "connected" | "disabled" | "error";
+  message: string;
+  capabilities: string[];
+}
+
 export interface Worktree {
   path: string;
   branch: string | null;
@@ -13,6 +59,9 @@ export interface Worktree {
   untracked: number;
   ahead: number;
   behind: number;
+  lastActivity?: number | null;
+  priority?: Priority;
+  agentIds?: string[];
   activity?: {
     terminals: {
       id: string;
@@ -77,6 +126,10 @@ export interface Project {
 }
 
 export interface WorkspaceState {
+  agents?: Agent[];
+  attention?: Attention[];
+  quotas?: Quota[];
+  integrations?: Integration[];
   root: string;
   projects: Project[];
   warnings: string[];
@@ -253,4 +306,76 @@ export function terminalInputChunks(input: Uint8Array): Uint8Array[] {
     { length: Math.ceil(input.length / frameSize) },
     (_, index) => input.subarray(index * frameSize, (index + 1) * frameSize),
   );
+}
+
+
+export const priorities: Priority[] = ["needs-you", "working", "recent", "older"];
+export const priorityLabels: Record<Priority, string> = {
+  "needs-you": "Needs you", working: "Working", recent: "Recent", older: "Older",
+};
+
+export function worktreeAgents(state: WorkspaceState, tree: Worktree): Agent[] {
+  return (state.agents || []).filter((agent) => agent.worktreePath === tree.path);
+}
+
+export function worktreeSummary(state: WorkspaceState, tree: Worktree): Agent | null {
+  const agents = worktreeAgents(state, tree);
+  const attentionIds = new Set((state.attention || []).map((item) => item.agentId));
+  return [...agents].sort((a, b) => {
+    const rank = (agent: Agent) => attentionIds.has(agent.id) || (agent.state === "waiting" && !agent.stale) ? 0 : agent.live ? 1 : 2;
+    return rank(a) - rank(b) || (b.updatedAt || 0) - (a.updatedAt || 0) || a.id.localeCompare(b.id);
+  })[0] || null;
+}
+
+export function worktreePriority(state: WorkspaceState, tree: Worktree): Priority {
+  if (tree.priority) return tree.priority;
+  const agents = worktreeAgents(state, tree);
+  if (agents.some((agent) => agent.state === "waiting" && !agent.stale)
+    || (state.attention || []).some((item) => agents.some((agent) => agent.id === item.agentId))) return "needs-you";
+  if (agents.some((agent) => agent.live) || runtimeActivity(tree).panes.length || runtimeActivity(tree).terminals.length) return "working";
+  return tree.lastActivity ? "recent" : "older";
+}
+
+export function headquartersRows(state: WorkspaceState, query: string, projectId: string | null) {
+  return state.projects.filter((project) => !projectId || project.id === projectId)
+    .flatMap((project) => project.worktrees.map((worktree) => ({ project, worktree, priority: worktreePriority(state, worktree) })))
+    .filter(({ project, worktree }) => {
+      const needle = query.trim();
+      const panes = worktree.activity?.tmux || [];
+      const agents = worktreeAgents(state, worktree);
+      if (/^%\d+$/.test(needle)) return panes.some((pane) => pane.pane === needle) || agents.some((agent) => agent.target?.tmuxPane === needle);
+      if (/^@\d+$/.test(needle)) return panes.some((pane) => pane.window === needle);
+      const fields = [project.name, project.id, worktree.path, branchName(worktree),
+        ...agents.flatMap((agent) => [agent.provider, agent.title, agent.model, agent.state, agent.waitingReason, agent.target?.tmuxSession, agent.target?.tmuxPane]),
+        ...panes.flatMap((pane) => [pane.session, pane.windowName, pane.window, pane.pane, pane.command]),
+      ].filter((field): field is string => Boolean(field));
+      return needle.split(/\s+/).every((word) => fields.some((field) => fuzzyScore(word, field) >= 0));
+    })
+    .sort((a, b) => priorities.indexOf(a.priority) - priorities.indexOf(b.priority)
+      || (b.worktree.lastActivity || 0) - (a.worktree.lastActivity || 0)
+      || a.worktree.path.localeCompare(b.worktree.path));
+}
+
+export function agentHierarchy(agents: Agent[]): { agent: Agent; depth: number }[] {
+  const result: { agent: Agent; depth: number }[] = [];
+  const seen = new Set<string>();
+  const ordered = [...agents].sort((a, b) => a.id.localeCompare(b.id));
+  function visit(agent: Agent, depth: number) {
+    if (seen.has(agent.id)) return;
+    seen.add(agent.id);
+    result.push({ agent, depth });
+    ordered.filter((child) => child.parentId === agent.id).forEach((child) => visit(child, depth + 1));
+  }
+  ordered.filter((agent) => !agent.parentId || !agents.some((parent) => parent.id === agent.parentId)).forEach((agent) => visit(agent, 0));
+  ordered.forEach((agent) => visit(agent, 0));
+  return result;
+}
+
+export function relativeTime(timestamp: number | null | undefined, now = Date.now() / 1000): string {
+  if (!timestamp) return "—";
+  const seconds = Math.max(0, now - timestamp);
+  if (seconds < 60) return "now";
+  if (seconds < 3600) return `${Math.floor(seconds / 60)}m`;
+  if (seconds < 86400) return `${Math.floor(seconds / 3600)}h`;
+  return `${Math.floor(seconds / 86400)}d`;
 }

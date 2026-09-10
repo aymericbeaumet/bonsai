@@ -54,6 +54,8 @@ pub struct TmuxPane {
     pub command: String,
     pub active: bool,
     pub window_active: bool,
+    pub pid: Option<u32>,
+    pub last_activity: Option<u64>,
 }
 
 #[derive(Debug, Serialize)]
@@ -83,7 +85,7 @@ fn tmux_inventory_with(prefix: &[&str]) -> TmuxInventory {
             sessions: parse_tmux_sessions(&String::from_utf8_lossy(&output.stdout)),
             panes: Command::new("tmux")
                 .args(prefix)
-                .args(["list-panes", "-a", "-F", "#{pane_id}\u{1f}#{session_name}\u{1f}#{window_id}\u{1f}#{window_index}\u{1f}#{window_name}\u{1f}#{pane_current_path}\u{1f}#{pane_current_command}\u{1f}#{pane_active}\u{1f}#{window_active}\u{1e}"])
+                .args(["list-panes", "-a", "-F", "#{pane_id}\u{1f}#{session_name}\u{1f}#{window_id}\u{1f}#{window_index}\u{1f}#{window_name}\u{1f}#{pane_current_path}\u{1f}#{pane_current_command}\u{1f}#{pane_active}\u{1f}#{window_active}\u{1f}#{pane_pid}\u{1f}#{window_activity}\u{1e}"])
                 .output()
                 .map(|output| parse_tmux_panes(&String::from_utf8_lossy(&output.stdout)))
                 .unwrap_or_default(),
@@ -98,7 +100,7 @@ fn parse_tmux_panes(output: &str) -> Vec<TmuxPane> {
         .filter_map(|record| {
             // Record separators preserve tabs and newlines inside window names and paths.
             let record = record.strip_prefix('\n').unwrap_or(record);
-            let mut fields = record.splitn(9, '\u{1f}');
+            let mut fields = record.split('\u{1f}');
             Some(TmuxPane {
                 id: fields.next()?.to_owned(),
                 session: fields.next()?.to_owned(),
@@ -109,6 +111,8 @@ fn parse_tmux_panes(output: &str) -> Vec<TmuxPane> {
                 command: fields.next()?.to_owned(),
                 active: fields.next()?.parse::<u8>().ok()? != 0,
                 window_active: fields.next()?.parse::<u8>().ok()? != 0,
+                pid: fields.next().and_then(|value| value.parse().ok()),
+                last_activity: fields.next().and_then(|value| value.parse().ok()),
             })
         })
         .collect()
@@ -129,6 +133,28 @@ fn parse_tmux_sessions(output: &str) -> Vec<TmuxSession> {
         .collect()
 }
 
+fn tmux_attach_target(
+    inventory: &TmuxInventory,
+    session: &str,
+    pane: Option<&str>,
+) -> Result<String> {
+    ensure!(
+        inventory.sessions.iter().any(|entry| entry.name == session),
+        "tmux session no longer exists"
+    );
+    match pane {
+        Some(id) => {
+            let pane = inventory
+                .panes
+                .iter()
+                .find(|entry| entry.id == id && entry.session == session)
+                .context("tmux pane no longer exists in the selected session")?;
+            Ok(format!("={session}:{}.{}", pane.window_id, pane.id))
+        }
+        None => Ok(format!("={session}")),
+    }
+}
+
 #[derive(Default)]
 pub struct TerminalManager {
     sessions: Mutex<BTreeMap<String, Arc<TerminalSession>>>,
@@ -146,10 +172,15 @@ impl TerminalManager {
         path: &Path,
         args: Option<Vec<String>>,
         tmux: Option<String>,
+        tmux_pane: Option<String>,
         new_tmux: bool,
         config: &Config,
     ) -> Result<TerminalSummary> {
         ensure!(path.is_dir(), "terminal working directory no longer exists");
+        ensure!(
+            tmux_pane.is_none() || (tmux.is_some() && !new_tmux && args.is_none()),
+            "a pane target requires an existing tmux session"
+        );
         ensure!(
             args.is_none() || (tmux.is_none() && !new_tmux),
             "choose a command or tmux session"
@@ -189,15 +220,9 @@ impl TerminalManager {
             let command = if new_tmux {
                 new_tmux_command(environment.as_deref(), &name, path, config)
             } else {
-                ensure!(
-                    inventory
-                        .sessions
-                        .iter()
-                        .any(|session| session.name == name),
-                    "tmux session no longer exists"
-                );
+                let target = tmux_attach_target(&inventory, &name, tmux_pane.as_deref())?;
                 let mut command = tmux_command(environment.as_deref());
-                command.args(["attach-session", "-t", &format!("={name}")]);
+                command.args(["attach-session", "-t", &target]);
                 command
             };
             (command, format!("tmux · {name}"), "tmux", None)
@@ -215,6 +240,7 @@ impl TerminalManager {
         command.env("BONSAI_ROOT", config.root_dir());
         command.env_remove("_BONSAI_WRAPPED");
         command.env_remove("_BONSAI_WRAPPER_ACTIVE");
+        command.env("_BONSAI_HQ_STORE", config.root_dir().join(".hq"));
         if let Some(remote) = &config.remote {
             command.env("BONSAI_REMOTE", remote);
         }
@@ -223,7 +249,7 @@ impl TerminalManager {
 
     fn spawn_command(
         &self,
-        command: CommandBuilder,
+        mut command: CommandBuilder,
         path: &Path,
         title: String,
         kind: &str,
@@ -257,13 +283,16 @@ impl TerminalManager {
         set_nonblocking(pair.master.as_ref())?;
         let reader = pair.master.try_clone_reader()?;
         let writer = pair.master.take_writer()?;
+        let id = format!("{:032x}", rand::random::<u128>());
+        command.env("_BONSAI_HQ_TERMINAL_ID", &id);
+        command.env_remove("TMUX_PANE");
         let child = pair
             .slave
             .spawn_command(command)
             .context("start terminal process")?;
         drop(pair.slave);
         let summary = TerminalSummary {
-            id: format!("{:032x}", rand::random::<u128>()),
+            id,
             title,
             path: path.to_string_lossy().into_owned(),
             kind: kind.to_owned(),
@@ -1544,6 +1573,133 @@ mod tests {
         assert!(panes[0].window_active);
         assert_eq!(panes[1].session, "other");
         assert!(!panes[1].window_active);
+    }
+
+    #[test]
+    fn exact_tmux_targets_preserve_the_selected_session_window_and_pane() {
+        let inventory = TmuxInventory {
+            available: true,
+            sessions: parse_tmux_sessions("project\t2\t1\t/tmp\nproject-long\t1\t0\t/tmp\n"),
+            panes: parse_tmux_panes(
+                "%4\u{1f}project\u{1f}@2\u{1f}3\u{1f}worker\u{1f}/tmp\u{1f}node\u{1f}0\u{1f}0\u{1f}1234\u{1f}1788990000\u{1e}\n",
+            ),
+        };
+        assert_eq!(inventory.panes[0].pid, Some(1234));
+        assert_eq!(inventory.panes[0].last_activity, Some(1788990000));
+        assert_eq!(
+            tmux_attach_target(&inventory, "project", Some("%4")).unwrap(),
+            "=project:@2.%4"
+        );
+        assert!(tmux_attach_target(&inventory, "project-long", Some("%4")).is_err());
+        assert!(tmux_attach_target(&inventory, "project", Some("%5")).is_err());
+        assert!(tmux_attach_target(&inventory, "proj", None).is_err());
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn exact_pane_attachment_selects_an_inactive_window_without_retargeting() {
+        if Command::new("tmux").arg("-V").output().is_err() {
+            return;
+        }
+        struct Socket(tempfile::TempDir);
+        impl Drop for Socket {
+            fn drop(&mut self) {
+                let _ = Command::new("tmux")
+                    .arg("-S")
+                    .arg(self.0.path().join("socket"))
+                    .arg("kill-server")
+                    .output();
+            }
+        }
+        let socket = Socket(tempfile::tempdir().unwrap());
+        let path = socket.0.path().join("socket");
+        let tmux = |args: &[&str]| {
+            let output = Command::new("tmux")
+                .arg("-S")
+                .arg(&path)
+                .args(args)
+                .output()
+                .unwrap();
+            assert!(
+                output.status.success(),
+                "{}",
+                String::from_utf8_lossy(&output.stderr)
+            );
+            String::from_utf8_lossy(&output.stdout).trim().to_owned()
+        };
+        tmux(&[
+            "-f",
+            "/dev/null",
+            "new-session",
+            "-d",
+            "-s",
+            "exact",
+            "/bin/sh",
+            "-i",
+        ]);
+        let pane = tmux(&[
+            "new-window",
+            "-d",
+            "-t",
+            "=exact",
+            "-P",
+            "-F",
+            "#{pane_id}",
+            "/bin/sh",
+            "-i",
+        ]);
+        let other = tmux(&[
+            "split-window",
+            "-d",
+            "-t",
+            &pane,
+            "-P",
+            "-F",
+            "#{pane_id}",
+            "/bin/sh",
+            "-i",
+        ]);
+        let inventory = tmux_inventory_with(&["-S", path.to_str().unwrap()]);
+        assert!(
+            !inventory
+                .panes
+                .iter()
+                .find(|entry| entry.id == other)
+                .unwrap()
+                .window_active
+        );
+        let target = tmux_attach_target(&inventory, "exact", Some(&other)).unwrap();
+        let inherited = format!("{},123,0", path.display());
+        let mut command = tmux_command(Some(&inherited));
+        command.args(["attach-session", "-t", &target]);
+        command.env("TERM", "xterm-256color");
+        let manager = TerminalManager::new();
+        let summary = manager
+            .spawn_command(command, socket.0.path(), "tmux".into(), "tmux", None)
+            .unwrap();
+        let session = manager.get(&summary.id).unwrap();
+        session
+            .input(b"printf 'EXACT_%s\\n' PANE\n".to_vec())
+            .unwrap();
+        wait_for(&session, |snapshot| {
+            String::from_utf8_lossy(&snapshot.data).contains("EXACT_PANE")
+        });
+        let focused = tmux_inventory_with(&["-S", path.to_str().unwrap()]);
+        assert_eq!(
+            focused
+                .panes
+                .iter()
+                .find(|pane| pane.active && pane.window_active)
+                .map(|pane| pane.id.as_str()),
+            Some(other.as_str())
+        );
+        let other_content = tmux(&["capture-pane", "-p", "-t", &pane]);
+        assert!(!other_content.contains("EXACT_PANE"));
+        manager.close(&summary.id);
+        tmux(&["has-session", "-t", "=exact"]);
+        tmux(&["kill-pane", "-t", &other]);
+        let inventory = tmux_inventory_with(&["-S", path.to_str().unwrap()]);
+        assert!(tmux_attach_target(&inventory, "exact", Some(&other)).is_err());
     }
 
     #[test]

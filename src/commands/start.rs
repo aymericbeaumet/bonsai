@@ -58,6 +58,7 @@ pub(super) fn launch_interactive(mut command: Command, provider: Provider) -> Re
     #[cfg(unix)]
     {
         use std::os::unix::process::CommandExt;
+        command.env("_BONSAI_HQ_PROVIDER_PID", std::process::id().to_string());
         // The harness must own its signals: a waiting Bonsai parent would
         // die on Ctrl-C even when the interactive harness handles it.
         Err(command.exec()).with_context(|| format!("failed to launch {}", provider.executable()))

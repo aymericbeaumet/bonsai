@@ -48,6 +48,7 @@ pub fn annotate(mut state: Value) -> Value {
                 "session": pane["session"], "window": pane["windowId"],
                 "windowName": pane["windowName"], "windowIndex": pane["windowIndex"],
                 "pane": pane["id"], "command": pane["command"],
+                "pid": pane["pid"], "lastActivity": pane["lastActivity"],
                 "active": pane["active"] == true && pane["windowActive"] == true
             }));
         }

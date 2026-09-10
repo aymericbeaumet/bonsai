@@ -66,6 +66,14 @@ fn run(cli: Cli) -> Result<Option<PathBuf>> {
             commands::agents::run()?;
             return Ok(None);
         }
+        Commands::HqEvent { provider, kind } => {
+            let mut config = Config::default();
+            if let Some(root) = &cli.root {
+                config.root.clone_from(root);
+            }
+            web::integrations::run_bridge(&config, provider, kind)?;
+            return Ok(None);
+        }
         Commands::Skill { action } => {
             match action {
                 None => commands::skill::show()?,
@@ -143,8 +151,12 @@ fn run(cli: Cli) -> Result<Option<PathBuf>> {
             },
         ),
         Commands::Cd { query } => commands::cd::run(&config, repo.as_ref(), query),
-        Commands::Resume { query } => {
-            commands::resume::run(&config, repo.as_ref(), query)?;
+        Commands::Resume {
+            query,
+            provider,
+            session,
+        } => {
+            commands::resume::run(&config, repo.as_ref(), query, provider, session)?;
             Ok(None)
         }
         Commands::Workspace { all } => {
@@ -162,6 +174,7 @@ fn run(cli: Cli) -> Result<Option<PathBuf>> {
         Commands::Init { .. }
         | Commands::Completions { .. }
         | Commands::Agents
+        | Commands::HqEvent { .. }
         | Commands::Skill { .. } => unreachable!(),
     }
 }

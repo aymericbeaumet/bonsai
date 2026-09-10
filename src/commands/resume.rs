@@ -108,36 +108,37 @@ impl ProjectScope {
     }
 }
 
-pub fn run(config: &Config, repo: Option<&Repo>, query: Option<String>) -> Result<()> {
+pub fn run(
+    config: &Config,
+    repo: Option<&Repo>,
+    query: Option<String>,
+    provider: Option<Provider>,
+    exact_id: Option<String>,
+) -> Result<()> {
     let scope = ProjectScope::new(repo.context("not inside a git repository")?, config)?;
-    if let Some(query) = query.as_deref()
+    let direct_id = exact_id.as_deref().or(query.as_deref());
+    if provider.is_none_or(|provider| provider == Provider::Codex)
+        && let Some(query) = direct_id
         && let Ok(root) = codex_home()
         && let Some(session) = codex_exact_session(&codex_database_root(&root), &scope, query)
     {
         return launch(&session, &scope);
     }
-    let mut sessions = HashMap::new();
-
-    let providers = [
-        ("Claude Code", Provider::Claude),
-        ("Codex", Provider::Codex),
-        ("OpenCode", Provider::OpenCode),
-    ];
-    let results = parallel::map_ordered(&providers, |(_, provider)| match provider {
-        Provider::Claude => claude_sessions(&scope),
-        Provider::Codex => codex_sessions(&scope),
-        Provider::OpenCode => opencode_sessions(&scope),
-    });
-    for ((name, _), result) in providers.iter().zip(results) {
-        collect_provider(name, result, &mut sessions);
+    let sessions = discover(&scope, provider);
+    if let Some(id) = exact_id {
+        let session = sessions
+            .iter()
+            .find(|session| Some(session.provider) == provider && session.id == id)
+            .with_context(|| {
+                format!(
+                    "exact session '{id}' was not found for the selected provider in this project"
+                )
+            })?;
+        return launch(session, &scope);
     }
-
-    let mut sessions = sessions.into_values().collect::<Vec<_>>();
     if sessions.is_empty() {
         bail!("no sessions found for the current project");
     }
-    sort_sessions(&mut sessions);
-
     let picked = if let Some(picked) = resolve_query(&sessions, query.as_deref()) {
         picked
     } else {
@@ -145,6 +146,59 @@ pub fn run(config: &Config, repo: Option<&Repo>, query: Option<String>) -> Resul
         picker::select_styled("Session:", picker::recent_options(&rows), query.as_deref())?
     };
     launch(&sessions[picked], &scope)
+}
+
+fn discover(scope: &ProjectScope, requested: Option<Provider>) -> Vec<Session> {
+    let mut sessions = HashMap::new();
+
+    let providers = [
+        ("Claude Code", Provider::Claude),
+        ("Codex", Provider::Codex),
+        ("OpenCode", Provider::OpenCode),
+    ]
+    .into_iter()
+    .filter(|(_, provider)| requested.is_none_or(|requested| requested == *provider))
+    .collect::<Vec<_>>();
+    let results = parallel::map_ordered(&providers, |(_, provider)| match provider {
+        Provider::Claude => claude_sessions(scope),
+        Provider::Codex => codex_sessions(scope),
+        Provider::OpenCode => opencode_sessions(scope),
+    });
+    for ((name, _), result) in providers.iter().zip(results) {
+        collect_provider(name, result, &mut sessions);
+    }
+
+    let mut sessions = sessions.into_values().collect::<Vec<_>>();
+    sort_sessions(&mut sessions);
+    sessions
+}
+
+pub(crate) fn discover_for_hq(config: &Config, project_paths: &[PathBuf]) -> Result<Vec<Value>> {
+    let mut found = HashMap::new();
+    for path in project_paths {
+        let git = crate::git::Git::at(path);
+        let Ok(registered) = git.out_bytes(&["worktree", "list", "--porcelain", "-z"]) else {
+            continue;
+        };
+        let Ok(repo) = Repo::from_worktrees(
+            git,
+            crate::worktree::Worktree::parse_list(&registered),
+            Some(path),
+        ) else {
+            continue;
+        };
+        let scope = ProjectScope::new(&repo, config)?;
+        for session in discover(&scope, None) {
+            found.insert((session.provider, session.id.clone()), session);
+        }
+    }
+    let mut sessions = found.into_values().collect::<Vec<_>>();
+    sort_sessions(&mut sessions);
+    Ok(sessions.into_iter().map(|session| serde_json::json!({
+        "provider": session.provider.executable(), "sessionId": session.id,
+        "cwd": session.cwd, "title": session.title,
+        "updatedAt": session.updated.duration_since(UNIX_EPOCH).ok().map(|time| time.as_secs())
+    })).collect())
 }
 
 fn sort_sessions(sessions: &mut [Session]) {

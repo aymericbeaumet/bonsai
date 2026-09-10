@@ -51,6 +51,8 @@ impl TestRepo {
             ("USERPROFILE", self.dir.clone().into()),
             ("XDG_CONFIG_HOME", self.dir.join(".config").into()),
             ("XDG_DATA_HOME", self.dir.join(".local/share").into()),
+            ("CODEX_HOME", self.dir.join(".codex").into()),
+            ("CLAUDE_CONFIG_DIR", self.dir.join(".claude").into()),
             ("GIT_CONFIG_GLOBAL", self.dir.join("gitconfig-empty").into()),
             ("GIT_CONFIG_NOSYSTEM", "1".into()),
             ("GIT_TERMINAL_PROMPT", "0".into()),
@@ -79,6 +81,8 @@ impl TestRepo {
         cmd.envs(self.env_vars())
             .env("BONSAI_ROOT", &self.root)
             .env_remove("_BONSAI_WRAPPED")
+            .env_remove("_BONSAI_HQ_STORE")
+            .env_remove("_BONSAI_HQ_TERMINAL_ID")
             .env_remove("GIT_DIR")
             .env_remove("GIT_WORK_TREE")
             .current_dir(dir);
@@ -1069,6 +1073,43 @@ fn resume_finds_sessions_in_external_worktrees() {
         ),
         worktree
     );
+}
+
+#[test]
+fn resume_explicit_provider_and_session_never_fuzzy_matches() {
+    let repo = TestRepo::new();
+    let sessions = repo.dir.join(".claude/projects/current");
+    std::fs::create_dir_all(&sessions).unwrap();
+    let id = "5f674c63-05f9-48af-9330-4cdd94b31d15";
+    let event = serde_json::json!({
+        "type": "user", "sessionId": id, "cwd": repo.clone,
+        "message": {"role": "user", "content": "a unique task"}
+    });
+    std::fs::write(sessions.join(format!("{id}.jsonl")), format!("{event}\n")).unwrap();
+    repo.fake_harness("claude");
+    repo.bonsai(&repo.clone)
+        .env("PATH", repo.path_with_fakebin())
+        .args(["resume", "--provider", "claude", "--session", id])
+        .assert()
+        .success();
+    assert_eq!(
+        std::fs::read_to_string(repo.dir.join("claude-args.txt"))
+            .unwrap()
+            .trim(),
+        format!("--resume {id}")
+    );
+    for (provider, session) in [
+        ("codex", id),
+        ("claude", "a unique task"),
+        ("claude", "5f674c63"),
+    ] {
+        repo.bonsai(&repo.clone)
+            .env("PATH", repo.path_with_fakebin())
+            .args(["resume", "--provider", provider, "--session", session])
+            .assert()
+            .failure()
+            .stderr(predicate::str::contains("exact session"));
+    }
 }
 
 #[test]
@@ -2566,6 +2607,9 @@ impl BrowserServer {
         let mut child = StdCommand::new(assert_cmd::cargo::cargo_bin("bonsai"))
             .envs(repo.env_vars())
             .env("BONSAI_ROOT", &repo.root)
+            .env("BONSAI_HQ__AUTO_SETUP", "false")
+            .env_remove("_BONSAI_HQ_STORE")
+            .env_remove("_BONSAI_HQ_TERMINAL_ID")
             .env_remove("_BONSAI_WRAPPED")
             .env_remove("GIT_DIR")
             .env_remove("GIT_WORK_TREE")

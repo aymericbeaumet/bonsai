@@ -42,6 +42,7 @@ tempfile = "3"
 thiserror = "2"
 tokio = { version = "1", features = ["full"] }
 toml = "1.1"
+tungstenite = "0.29"
 
 [target.'cfg(unix)'.dependencies]
 libc = "0.2"

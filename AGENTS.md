@@ -28,6 +28,11 @@
 - Keep worktree inventory independent of runtime activity. Runtime adapters
   annotate existing checkouts; match pane directories to the deepest canonical
   worktree and keep idle worktrees visible.
+- Provider lifecycle observations determine agent state; tmux focus and generic
+  process names do not. Keep subscription probes separate from runtime discovery,
+  and revalidate exact session/request identities before provider controls.
+- Agent integration tests must isolate provider homes and the HQ store. Disable
+  automatic setup in server fixtures so tests cannot edit personal tool settings.
 - Capture the working directory and exact target path when opening an HQ
   action dialog. Inventory refreshes must never retarget a pending command
   or removal confirmation.

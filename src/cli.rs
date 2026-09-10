@@ -197,9 +197,10 @@ project under the Bonsai root, including
 each project's main checkout and all Git-registered worktrees. The current
 project is included even when it has no Bonsai-managed worktrees yet.
 
-Explore the worktree graph, fuzzy-find branches, run Bonsai commands, and
-open full interactive terminals in any checkout. Attach existing tmux
-sessions or create persistent ones when tmux is installed.
+Find worktrees needing you, running agents, and recent work. Expand sessions
+to see the coding tool, model, task, and exact tmux pane. Search older work,
+run Bonsai commands, and attach full interactive terminals in any checkout.
+Supported integrations expose agent controls and subscription quotas.
 
 When attached to a terminal, an interactive TUI opens alongside the web
 server. Both interfaces share worktrees and terminal sessions. Use --no-tui
@@ -380,8 +381,17 @@ pub enum Commands {
     #[command(long_about = RESUME_LONG)]
     Resume {
         /// Session ID or fuzzy query across provider, title, and worktree
+        #[arg(conflicts_with_all = ["provider", "session"])]
         query: Option<String>,
+        /// Provider of the exact session to resume
+        #[arg(long, value_enum, requires = "session")]
+        provider: Option<crate::commands::start::Provider>,
+        /// Exact session ID; never falls back to a fuzzy match
+        #[arg(long, requires = "provider")]
+        session: Option<String>,
     },
+    #[command(name = "__hq-event", hide = true)]
+    HqEvent { provider: String, kind: String },
     /// Print the repo's .code-workspace file path (refreshing it first)
     #[command(long_about = WORKSPACE_LONG)]
     Workspace {

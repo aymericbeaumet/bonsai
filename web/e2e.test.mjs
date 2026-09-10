@@ -5,6 +5,7 @@ import {
   mkdtemp,
   mkdir,
   writeFile,
+  readFile,
   chmod,
   rm,
   realpath,
@@ -37,11 +38,14 @@ async function fixture(populated) {
   const env = Object.fromEntries(
     Object.entries(process.env).filter(
       ([key]) =>
-        !/^(BONSAI_|GIT_|XDG_|_BONSAI_|TMUX$|BASH_ENV$|ENV$)/.test(key),
+        !/^(BONSAI_|GIT_|XDG_|_BONSAI_|TMUX$|TMUX_PANE$|CODEX_HOME$|CLAUDE_CONFIG_DIR$|OPENCODE_CONFIG(?:_DIR|_CONTENT)?$|BASH_ENV$|ENV$)/.test(key),
     ),
   );
   Object.assign(env, {
     HOME: testHome,
+    CODEX_HOME: join(testHome, ".codex"),
+    CLAUDE_CONFIG_DIR: join(testHome, ".claude"),
+    BONSAI_HQ__AUTO_SETUP: "false",
     XDG_CONFIG_HOME: join(testHome, ".config"),
     XDG_DATA_HOME: join(testHome, ".local/share"),
     GIT_CONFIG_GLOBAL: join(testHome, ".gitconfig"),
@@ -213,6 +217,7 @@ test("workspace graph, commands, real shell, reconnect, and persistent tmux", as
       ]);
     }
     const browser = await openWorkspace(page, workspace);
+    await page.locator('[data-view="graph"]').click();
     await expect(page.locator("g.tree-node")).toHaveCount(8);
     await expect(page.locator("#project-count")).toHaveText("03");
     const inactiveTree = page
@@ -264,14 +269,15 @@ test("workspace graph, commands, real shell, reconnect, and persistent tmux", as
     ).toBeGreaterThanOrEqual(10.9);
 
     await page.locator('[data-view="list"]').click();
+    for (const group of await page.locator('[data-group][aria-expanded="false"]').all()) await group.click();
     await expect(page.locator(".worktree-row")).toHaveCount(8);
     if (workspace.tmuxAvailable) {
       await expect(
         page
           .locator(".worktree-row")
           .filter({ hasText: "ab/accessibility" })
-          .locator(".runtime-badge.tmux"),
-      ).toHaveText("tmux 1");
+          .locator(".row-session-count"),
+      ).toContainText("tmux 1");
     }
     await page.locator("#filter").fill("terminal-replay");
     await expect(page.locator(".worktree-row")).toHaveCount(1);
@@ -298,7 +304,7 @@ test("workspace graph, commands, real shell, reconnect, and persistent tmux", as
     const shell = await page
       .locator(".terminal-tab.active [data-session]")
       .getAttribute("data-session");
-    await page.locator('[data-action="refresh"]').first().click();
+    await page.locator(".hq-refresh").click();
     await expect(
       page
         .locator("g.tree-node")
@@ -320,9 +326,10 @@ test("workspace graph, commands, real shell, reconnect, and persistent tmux", as
     await browser.input("printf 'RECONNECTED_%s\\n' 'OK'");
     await browser.waitOutput("\r\nRECONNECTED_OK\r\n");
 
+    await page.locator("g.tree-node").filter({ hasText: "ab/browser-ui" }).click();
     await page.locator('#inspector [data-action="start"]').click();
-    await page.locator("#command-args").fill("codex");
-    await page.locator('#command-form [type="submit"]').click();
+    await page.locator('#coding-form [name="provider"]').selectOption("codex");
+    await page.locator('#coding-form [type="submit"]').click();
     await browser.waitOutput("FRESH_CODEX_SESSION");
     await browser.waitOutput(workspace.trees.get("ab/browser-ui"));
 
@@ -337,7 +344,7 @@ test("workspace graph, commands, real shell, reconnect, and persistent tmux", as
           .map((tree) => tree.branch),
       )
       .toContain("ab/browser-created");
-    await page.locator('[data-action="refresh"]').first().click();
+    await page.locator(".hq-refresh").click();
     await page
       .locator("g.tree-node")
       .filter({ hasText: "ab/browser-created" })
@@ -386,7 +393,7 @@ test("workspace graph, commands, real shell, reconnect, and persistent tmux", as
     );
 
     if (workspace.tmuxAvailable) {
-      await page.locator('[data-action="refresh"]').first().click();
+      await page.locator(".hq-refresh").click();
       await page
         .locator("g.tree-node")
         .filter({ hasText: "ab/browser-ui" })
@@ -402,7 +409,7 @@ test("workspace graph, commands, real shell, reconnect, and persistent tmux", as
       await expect
         .poll(async () => (await workspace.state()).tmux.sessions.length)
         .toBeGreaterThan(0);
-      await page.locator('[data-action="refresh"]').first().click();
+      await page.locator(".hq-refresh").click();
       await page
         .locator("g.tree-node")
         .filter({ hasText: "ab/accessibility" })
@@ -412,7 +419,7 @@ test("workspace graph, commands, real shell, reconnect, and persistent tmux", as
         .first()
         .click();
       await expect(
-        page.locator('#inspector [data-tmux="native-existing"]'),
+        page.locator('#inspector [data-tmux="native-existing"][data-tmux-pane]'),
       ).toBeVisible();
       const activityScreenshot = test
         .info()
@@ -436,7 +443,7 @@ test("workspace graph, commands, real shell, reconnect, and persistent tmux", as
           contentType: "image/png",
         });
       await page.locator('[data-view="graph"]').click();
-      await page.locator('#inspector [data-tmux="native-existing"]').click();
+      await page.locator('#inspector [data-tmux="native-existing"][data-tmux-pane]').click();
       await expect(page.locator(".terminal-connection")).toContainText(
         "Persistent tmux",
       );
@@ -483,10 +490,166 @@ test("an empty workspace can add its first existing local project", async ({
     await expect
       .poll(async () => (await workspace.state()).projects.length)
       .toBe(1);
-    await page.locator('[data-action="refresh"]').first().click();
+    await page.locator(".hq-refresh").click();
+    await page.locator('[data-view="graph"]').click();
     await expect(page.locator("g.tree-node")).toHaveCount(2);
     expect(browser.errors).toEqual([]);
   } finally {
     await workspace.close();
   }
+});
+
+
+async function headquartersFixture(page) {
+  const now = Math.floor(Date.now() / 1000);
+  const providers = ["codex", "claude", "opencode"];
+  const worktrees = Array.from({ length: 11 }, (_, index) => ({
+    path: `/workspace/ab/task-${index}`, branch: `ab/task-${index}`, head: "abcdef012345",
+    main: false, external: false, locked: false, prunable: false, dirty: index === 3,
+    added: 0, modified: index === 3 ? 2 : 0, deleted: 0, untracked: 0, ahead: 0, behind: 0,
+    lastActivity: now - index * 60, priority: index === 0 ? "needs-you" : "working",
+    activity: { terminals: [], tmux: Array.from({ length: 2 }, (_, pane) => ({
+      session: "driver", window: `@${index}`, windowName: `task-${index}`, windowIndex: index,
+      pane: `%${index * 2 + pane}`, command: providers[(index * 2 + pane) % 3], active: index === 10 && pane === 1,
+    })) },
+  }));
+  const agents = worktrees.flatMap((tree, index) => tree.activity.tmux.map((pane, offset) => ({
+    id: `agent-${index * 2 + offset}`, provider: pane.command, sessionId: `saved-${index * 2 + offset}`,
+    parentId: null, worktreePath: tree.path, cwd: tree.path, title: `Session ${index * 2 + offset}: implement task`,
+    model: `${pane.command}-model`, state: index === 0 && offset === 0 ? "waiting" : "running",
+    waitingReason: index === 0 && offset === 0 ? "Choose the cache strategy" : null,
+    updatedAt: now - index, observedAt: now, live: true, stale: false,
+    target: { tmuxSession: pane.session, tmuxPane: pane.pane },
+    capabilities: index === 0 && offset === 0 ? ["attach", "reply", "interrupt"] : ["attach"],
+  })));
+  agents.push({ ...agents[1], id: "child", parentId: "agent-1", title: "Review cache implementation", target: null, capabilities: [] });
+  worktrees.push({ ...worktrees[0], path: "/workspace/recent", branch: "ab/recent", priority: "recent", activity: { terminals: [], tmux: [] } });
+  worktrees.push({ ...worktrees[0], path: "/workspace/old", branch: "ab/old", priority: "older", lastActivity: now - 864000, activity: { terminals: [], tmux: [] } });
+  const state = {
+    root: "/workspace", projects: [{ id: "example/driver", name: "driver", path: "/workspace", remote: null, worktrees }],
+    warnings: [], tmux: { available: true, sessions: [{ name: "driver", path: "/workspace", windows: 11, attached: true }] },
+    agents, attention: [{ id: "question-0", agentId: "agent-0", kind: "question", summary: "Choose the cache strategy", createdAt: now }],
+    quotas: [{ id: "weekly", provider: "codex", accountLabel: "Personal", label: "Weekly limit", usedPercent: 92, resetsAt: now + 7200, observedAt: now, stale: false }, { id: "claude", provider: "claude", label: "Subscription", usedPercent: null, resetsAt: null, observedAt: now, stale: false, unavailableReason: "Sign in to read subscription limits" }],
+    integrations: providers.map((provider) => ({ provider, status: "connected", message: "Connected to existing sessions", capabilities: ["attach", "resume"] })),
+  };
+  const requests = [];
+  const terminalSessions = [];
+  await page.route("http://hq.test/**", async (route) => {
+    const url = new URL(route.request().url());
+    const request = route.request();
+    if (url.pathname.startsWith("/api/")) {
+      if (request.method() === "POST") requests.push({ path: url.pathname, body: request.postDataJSON() });
+      let body = {};
+      if (url.pathname === "/api/state") body = state;
+      if (url.pathname === "/api/terminals") {
+        if (request.method() === "POST") {
+          body = { id: "exact-terminal", title: "driver / %0", path: request.postDataJSON().path, kind: "tmux" };
+          terminalSessions.push(body);
+        } else body = terminalSessions;
+      }
+      return route.fulfill({ contentType: "application/json", body: JSON.stringify(body) });
+    }
+    const filename = url.pathname === "/" ? "index.html" : url.pathname.slice(1);
+    const body = await readFile(join(repoRoot, "web/dist", filename));
+    return route.fulfill({ contentType: filename.endsWith("css") ? "text/css" : filename.endsWith("js") ? "text/javascript" : "text/html", body });
+  });
+  await page.goto("http://hq.test/#token=test-token");
+  await expect(page.locator("#connection-text")).toHaveText("Connected");
+  return { state, requests };
+}
+
+test("headquarters manages eleven windows and twenty-two independent panes without losing focus or targets", async ({ page }) => {
+  await page.setViewportSize({ width: 1280, height: 800 });
+  const { state, requests } = await headquartersFixture(page);
+  state.attention.push({ id: "error-2", agentId: "agent-2", kind: "error", summary: "Check the failed build", createdAt: Math.floor(Date.now() / 1000) });
+  state.projects[0].worktrees[1].priority = "needs-you";
+  await expect(page).toHaveTitle("2 need you · Bonsai HQ", { timeout: 2000 });
+  await expect(page.locator(".priority-needs-you .worktree-row")).toHaveCount(2, { timeout: 2000 });
+  state.attention.pop();
+  state.projects[0].worktrees[1].priority = "working";
+  await expect(page).toHaveTitle("1 needs you · Bonsai HQ", { timeout: 2000 });
+  await expect(page.locator(".worktree-row")).toHaveCount(12);
+  await expect(page.locator('[data-tree="/workspace/ab/task-0"] .row-task')).toHaveText("Session 0: implement task");
+  await expect(page.locator(".sidebar")).not.toBeVisible();
+  await expect(page.locator("#inspector")).not.toBeVisible();
+  await expect(page.locator(".worktree-row").last()).toBeInViewport();
+  expect(await page.locator(".worktree-row").first().evaluate((row) => row.getBoundingClientRect().height)).toBeLessThanOrEqual(34);
+  await page.screenshot({ path: test.info().outputPath("headquarters-desktop.png") });
+  await page.locator('[data-tree="/workspace/ab/task-5"]').focus();
+  await page.locator('.topbar [data-action="add"]').click();
+  await expect(page.locator('#add-form [name="cwd"]')).toHaveValue("/workspace/ab/task-5");
+  await page.keyboard.press("Escape");
+  await page.locator('[data-tree="/workspace/ab/task-0"]').focus();
+  await page.keyboard.press("ArrowRight");
+  await expect(page.locator(".agent-row")).toHaveCount(3);
+  await expect(page.locator('[data-agent="child"]')).toContainText("child");
+  await page.keyboard.press("ArrowDown");
+  await expect(page.locator('[data-agent="agent-0"]')).toBeFocused();
+  await page.keyboard.press("Enter");
+  await expect(page.locator("#agent-reply")).toBeVisible();
+  await expect(page.locator("[data-acknowledge]")).toHaveCount(0);
+  await page.locator('#agent-reply textarea').fill("Use a bounded cache, please.");
+  state.projects[0].worktrees.reverse();
+  state.agents.reverse();
+  await page.waitForTimeout(1200);
+  await expect(page.locator('#agent-reply textarea')).toHaveValue("Use a bounded cache, please.");
+  await expect(page.locator('#agent-reply textarea')).toBeFocused();
+  await page.locator('#agent-reply [type="submit"]').click();
+  expect(requests.find((request) => request.path === "/api/agents/agent-0/actions")?.body).toEqual({ action: "reply", text: "Use a bounded cache, please." });
+  await expect(page.locator('[data-agent="agent-0"]')).toBeFocused();
+  await page.keyboard.press("Enter");
+  await page.locator("#agent-attach").click();
+  expect(requests.find((request) => request.path === "/api/terminals")?.body).toEqual({ path: "/workspace/ab/task-0", tmux: "driver", tmuxPane: "%0" });
+  await page.locator('.terminal-pane:not([hidden]) .xterm-helper-textarea').focus();
+  await page.keyboard.press("Control+]");
+  await expect(page.locator("#terminal-dock")).not.toHaveClass(/open/);
+  await expect(page.locator('[data-agent="agent-0"]')).toBeFocused();
+  await expect(page.locator('[data-session="exact-terminal"]')).toHaveCount(1);
+  while (await page.locator('.worktree-row[aria-expanded="false"]').count()) await page.locator('.worktree-row[aria-expanded="false"]').first().click();
+  await expect(page.locator(".agent-row")).toHaveCount(23);
+  expect(new Set(await page.locator(".agent-row").evaluateAll((rows) => rows.map((row) => row.dataset.agent))).size).toBe(23);
+  await page.locator("#filter").fill("%21");
+  await expect(page.locator(".worktree-row")).toHaveCount(1);
+  await expect(page.locator(".worktree-row")).toContainText("ab/task-10");
+  await page.locator("#filter").fill("ab/old");
+  await expect(page.locator(".worktree-row")).toHaveCount(1);
+  await page.locator("#filter").fill("");
+  await page.locator('.quota-chip').first().click();
+  await expect(page.locator(".quota-details")).toContainText("92% used");
+  await expect(page.locator(".quota-details")).toContainText("Sign in to read subscription limits");
+  await page.keyboard.press("Escape");
+  await page.locator('[data-action="attention"]').click();
+  await expect(page.locator("#modal")).toContainText("Choose the cache strategy");
+  await page.keyboard.press("Escape");
+  const waitingAgent = state.agents.find((agent) => agent.id === "agent-0");
+  waitingAgent.capabilities.push("approve", "reject");
+  state.attention[0] = { ...state.attention[0], kind: "approval", requestId: "native-request-17", summary: "Allow this exact operation?" };
+  await Promise.all([page.waitForResponse((response) => response.url().endsWith("/api/state")), page.locator(".hq-refresh").click()]);
+  await page.locator('[data-action="attention"]').click();
+  await expect(page.locator("[data-acknowledge]")).toHaveCount(0);
+  await page.locator('[data-agent-command="approve"]').click();
+  expect(requests.filter((request) => request.path === "/api/agents/agent-0/actions").at(-1)?.body).toEqual({ action: "approve", requestId: "native-request-17" });
+  await page.keyboard.press("Escape");
+  await page.locator('[data-agent="agent-1"]').click();
+  await expect(page.locator("#agent-reply")).toHaveCount(0);
+  await expect(page.locator('[data-agent-command="interrupt"]')).toHaveCount(0);
+  await page.keyboard.press("Escape");
+  state.attention[0] = { id: "completed-0", agentId: "agent-0", kind: "completed", summary: "Cache implementation complete", createdAt: Math.floor(Date.now() / 1000) };
+  waitingAgent.title = "Cache implementation complete";
+  waitingAgent.state = "completed";
+  waitingAgent.live = false;
+  waitingAgent.capabilities = ["resume"];
+  await expect(page.locator('[data-tree="/workspace/ab/task-0"] .row-task')).toHaveText("Cache implementation complete", { timeout: 2000 });
+  await page.locator('[data-action="attention"]').click();
+  await expect(page.locator('[data-acknowledge="completed-0"]')).toHaveText("Mark reviewed");
+  await page.locator('[data-acknowledge="completed-0"]').click();
+  expect(requests.filter((request) => request.path.includes("/acknowledge"))).toEqual([{ path: "/api/attention/completed-0/acknowledge", body: {} }]);
+  await page.keyboard.press("Escape");
+  await page.setViewportSize({ width: 390, height: 844 });
+  expect(await page.evaluate(() => document.documentElement.scrollWidth <= innerWidth)).toBe(true);
+  await page.locator('[data-details="/workspace/ab/task-0"]').click();
+  await expect(page.locator("#inspector")).toBeVisible();
+  await page.locator('[data-action="close-inspector"]').click();
+  await expect(page.locator('[data-tree="/workspace/ab/task-0"]')).toBeFocused();
+  await page.screenshot({ path: test.info().outputPath("headquarters-mobile.png") });
 });

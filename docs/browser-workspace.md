@@ -20,13 +20,22 @@ Ctrl+] detaches back to the TUI while the session stays available to either
 interface. Headquarters shutdown restores the terminal and closes owned
 shells; tmux sessions remain independent.
 
-Use arrows or `j`/`k` to navigate, `/` to fuzzy-find, and Enter or `t` to
-attach a shell. Tab switches between worktrees and sessions. `e` attaches
-existing activity in the selected worktree. Space opens the selected item's
-actions; `:` runs a Bonsai command. Shortcuts include
-`s` for start, `r` for resume, `a` for add, `m` for tmux, `b` for the browser,
-and `q` to quit headquarters. Removal and closing sessions require a
-confirmation. Completed command output stays visible until Enter or Ctrl+].
+Home is a full-width hierarchy ordered Needs you, Working, Recent, Older. Older
+is collapsed until expanded or searched. Each worktree and agent occupies one
+row; details open on demand. Arrows or `j`/`k` navigate, Left/Right expand or
+collapse, `/` searches, and `[`/`]` select attention items. Enter expands a
+worktree or attaches its selected agent; `t` creates a shell. Tab switches
+between Home, Terminals, and Integrations. Space opens contextual actions and
+`?` shows shortcuts. Below the minimum size, unavailable actions are disabled.
+
+Browser and TUI consume the same agent state and preserve selected identities,
+filters, expansion, and scroll when returning from terminal attachment. Opening
+a waiting agent never acknowledges its unresolved request. Completed results can
+be marked reviewed independently of process liveness.
+
+In the browser, `/` focuses search, `n` advances through attention, and Enter
+opens the selected session's actions. The terminal workspace remains available
+from its compact dock; the graph is an optional view.
 
 ## Inventory and graph
 
@@ -54,8 +63,10 @@ in every window on the current tmux server (the inherited socket when HQ
 starts inside tmux, otherwise the default socket). Canonical pane directories,
 including subdirectories and symlinks, map to the deepest containing worktree.
 HQ terminal associations use the directory in which the terminal was opened.
-The graph, list, and TUI show live activity; the inspector offers attachment
-and preserves access to completed HQ command output through the terminal list.
+The list and TUI prioritize observed agent activity and recent use; the optional
+graph shows the same inventory. The terminal list preserves completed HQ command
+output. Session history is shared with the resume command; HQ exact resumption
+uses `bonsai resume --provider <tool> --session <id>` without fuzzy fallback.
 
 ## Local API
 
@@ -69,14 +80,20 @@ with a restrictive content security policy and no-referrer policy.
 
 | Endpoint | Purpose |
 |---|---|
-| `GET /api/state` | Projects, worktrees, status, runtime activity, discovery warnings, tmux sessions and panes |
+| `GET /api/state` | Projects, ordered worktrees, agents, attention, quotas, integration health, runtime activity, discovery warnings, tmux sessions and panes |
+| `POST /api/agents/{id}/actions` | Capability-checked reply, interrupt, approve, or reject with exact session/request identity |
+| `POST /api/attention/{id}/acknowledge` | Mark a completed result reviewed |
+| `POST /api/visits` | Record explicit use of a known worktree |
+| `POST /api/integrations/{provider}/actions` | Install, repair, disable, or uninstall a tool integration |
 | `GET /api/terminals` | Server-owned terminal tabs |
 | `POST /api/terminals` | Open a shell, Bonsai command, or tmux client |
 | `DELETE /api/terminals/{id}` | Close the owned PTY and child process |
 | `GET /api/terminals/{id}/ws` | WebSocket terminal input, output, and resizing |
 
 Terminal creation takes `path`, optional Bonsai `args`, optional existing
-`tmux` session name, or `newTmux: true`. The path must be a known checkout
+`tmux` session name and optional exact `tmuxPane`, or `newTmux: true`.
+A pane must still belong to the selected session; missing targets fail without
+substituting the currently active pane. The path must be a known checkout
 or the configured root. An `add` command may also start from an explicitly
 entered existing Git checkout, allowing the first project to be added from
 the browser. Bonsai arguments are validated with the CLI parser;
@@ -104,6 +121,53 @@ startup, new windows, and pane respawning, using the user's tmux and shell
 configuration. No Bonsai shell helper or persistent startup files are needed
 for tmux. Ordinary HQ shells use temporary startup files, owned by their
 terminal session, to load Bonsai's shell integration.
+
+## Agent adapters and attention
+
+Provider adapters annotate inventory; they never replace it. Sessions carry
+provider/runtime identity, parent identity, canonical worktree ownership, exact
+terminal targets, capabilities, observation freshness, model, and task title.
+Liveness is separate from running, waiting, idle, completed, failed, stopped,
+and unknown states. A focused tmux pane or a process named `node` is not evidence
+of agent state. Ambiguous process associations stay unresolved.
+
+Claude's supported `agents --json --all` interface provides live session state.
+Lifecycle hooks add child-agent events; a composed statusline command captures
+model and subscription limits while forwarding the original command's output.
+Codex uses its actual hosting app-server when reachable and lifecycle hooks for
+additional observations. A standalone account probe is quota-only: its thread
+state never describes separately hosted sessions. OpenCode uses a local plugin
+and its runtime's native SDK for events and supported controls.
+
+Automatic setup records ownership of its additions, preserves configuration
+symlinks and existing hooks, and keeps installation separate from activation.
+Codex requires native trust of new hooks; OpenCode plugins load at startup.
+Repair/removal must preserve entries changed independently after installation.
+The internal `__hq-event` bridge reads bounded event input and stores normalized
+metadata, not transcripts, under `<root>/.hq`. Internal environment keys use
+`_BONSAI_` so they cannot enter strict configuration parsing.
+
+Attention includes outstanding questions/approvals, actionable errors, and new
+completed results. Opening an agent does not resolve a request; provider events
+are authoritative. Saved history does not generate completion notifications.
+Recency combines explicit HQ use, provider activity, pane activity, and the
+existing filesystem fallback. Polling timestamps never make a worktree recent.
+Older means no qualifying activity in seven days and does not remove inventory.
+Visits, native lifecycle transitions, and completed-result acknowledgements
+persist under `<root>/.hq`; reconnecting preserves review identity. Failed native
+probes retain their last observation until it becomes stale.
+
+Quota observations include source, time, used percentage, and reset time. Unknown
+allowance is never zero allowance, and an elapsed reset does not prove a refill.
+Do not add together agents' observations of the same subscription. OpenCode has
+no generic subscription quota endpoint; unsupported data remains unavailable.
+
+`[hq] auto_setup = false` disables automatic installation. Desktop notifications
+and tmux status integration are opt-in through `notifications` and `tmux_status`.
+Desktop notifications use the native macOS or Linux notification command.
+The latter appends a temporary count to the existing tmux status format and
+removes its own suffix on clean shutdown. Neither option changes tmux shell
+startup. All provider discovery and control work stays off the UI input thread.
 
 ## Development
 

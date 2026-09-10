@@ -246,31 +246,44 @@ bonsai hq --no-tui --no-open --port 0  # headless server, print private link
 the current worktree, and `resume` finds and restores a past coding session.
 Both session commands are available from headquarters.
 
-The TUI specializes in keyboard navigation; the browser specializes in
-visual exploration. They share inventory and terminal sessions, so a shell
-started in either can be attached from the other. HQ enables the TUI when
-stdin and stdout are terminals; redirected or service use stays headless.
-Use Ctrl+] to detach an attached terminal back to the TUI without ending
-the session.
+Both interfaces open a compact worktree list ordered by **Needs you**, **Working**,
+**Recent**, and collapsed **Older** worktrees. Expand a worktree to see its coding
+sessions and child agents, with tool, model, task, state, and tmux location.
+Subscription allowance and reset times appear when the tool exposes them.
+The graph remains available as a secondary browser view.
 
-The graph groups every discovered project with its main checkout and all
-Git-registered worktrees, including external, locked, detached, and stale
-worktrees. Discovery scans the configured Bonsai root and its editor
-workspace files; the project you start from is also included, even before
-its first `bonsai add`. Git status refreshes automatically.
+Use arrows or `j`/`k` to navigate, `/` to search, Left/Right to collapse or expand,
+and `[`/`]` to move between attention items. Enter expands a worktree or attaches
+its selected agent; `t` opens a new shell. Ctrl+] returns from the terminal to HQ
+without ending the session. Search includes older worktrees and session titles.
+Both interfaces share inventory, attention, and terminal sessions.
 
-Bonsai tracks worktrees independently of terminal tools. Each checkout shows
-its HQ terminal and tmux activity, including panes in inactive tmux windows
-and worktree subdirectories. Select a checkout to see and attach its sessions;
-worktrees with nothing running stay visible. Tmux is optional and keeps its
-normal shell configuration.
+Discovery includes every Git-registered worktree of each project under the
+configured root, editor workspace references, and the project where HQ starts.
+Worktrees remain discoverable when no tool is running. Agent activity is separate
+from tmux focus: selecting a pane does not mean its agent is working. Tmux
+attachments target the chosen window and pane, including inactive windows.
 
-Use the command palette to fuzzy-find projects and branches, switch between
-the graph and list, and select a checkout to inspect its status or open a
-terminal. Worktree forms cover common operations; the command runner exposes
-the CLI arguments and runs commands interactively, including cleanup
-confirmations and `bonsai resume`'s session picker. External worktrees retain
-the CLI's protection against removal and adoption.
+HQ automatically installs supported local integrations for Codex, Claude Code,
+and OpenCode while preserving existing tool settings. The Integrations view shows
+connection and activation status and offers repair, disable, and removal. Codex
+hooks still require native `/hooks` trust; OpenCode's bridge loads on its next
+launch. Existing sessions remain navigable while richer integration is pending.
+Unsupported state, quota, or control capabilities are shown as unavailable.
+
+Start or resume agents through Bonsai's native interactive commands. Connected
+runtimes also expose reply, interrupt, and approval controls where supported;
+other sessions open in their native terminal. Worktree forms and the command
+runner retain the CLI's configuration, prompts, and removal protections.
+
+Desktop notifications and a tmux status count are optional:
+
+```toml
+[hq]
+auto_setup = true
+notifications = false
+tmux_status = false
+```
 
 Terminal tabs are real pseudoterminals: use your shell, terminal editor,
 Git tools, or coding assistants with normal input, colors, resizing, and

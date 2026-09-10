@@ -43,6 +43,8 @@ pub struct WorktreeEntry {
     pub untracked: usize,
     pub ahead: usize,
     pub behind: usize,
+    #[serde(rename = "lastActivity")]
+    pub last_activity: Option<u64>,
 }
 
 #[derive(Debug, Default, PartialEq)]
@@ -234,6 +236,9 @@ fn entry(wt: Worktree, kind: WorktreeKind, status: Option<Status>) -> WorktreeEn
     let dirty = status.as_ref().map(Status::dirty);
     let status = status.unwrap_or_default();
     WorktreeEntry {
+        last_activity: crate::worktree::last_activity(&wt.path)
+            .and_then(|time| time.duration_since(std::time::UNIX_EPOCH).ok())
+            .map(|time| time.as_secs()),
         path: canonicalize_or_self(&wt.path),
         branch: wt.branch,
         head: wt.head.unwrap_or_default(),

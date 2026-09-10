@@ -2,8 +2,14 @@ import { Terminal } from "@xterm/xterm";
 import { FitAddon } from "@xterm/addon-fit";
 import "@xterm/xterm/css/xterm.css";
 import "./style.css";
-import { activityBadges, inspectorActivity } from "./activity";
+import { inspectorActivity } from "./activity";
+import { renderHeadquarters, quotaSummary } from "./hq";
 import {
+  headquartersRows,
+  worktreeAgents,
+  relativeTime,
+  type Agent,
+  type Priority,
   branchName,
   escapeHtml as h,
   filterProjects,
@@ -66,9 +72,15 @@ let state: WorkspaceState | null = null;
 let selectedPath = localStorage.getItem("bonsai.selected") || "";
 let projectFilter: string | null = null;
 let inspectorMobileOpen = false;
-let query = "";
+let query = sessionStorage.getItem("bonsai.query") || "";
+const expandedWorktrees = new Set<string>(JSON.parse(sessionStorage.getItem("bonsai.expanded") || "[]"));
+const collapsedGroups = new Set<Priority>(JSON.parse(sessionStorage.getItem("bonsai.groups") || '["older"]'));
+let focusedNavigation = sessionStorage.getItem("bonsai.focus") || "";
+let attentionCursor = -1;
+let initialScroll = Number(sessionStorage.getItem("bonsai.scroll") || 0);
+let modalOpener: HTMLElement | null = null;
 let view: "graph" | "list" =
-  localStorage.getItem("bonsai.view") === "list" ? "list" : "graph";
+  localStorage.getItem("bonsai.view") === "graph" ? "graph" : "list";
 let loading = false;
 let connected = false;
 let refreshTimer: ReturnType<typeof setTimeout>;
@@ -107,15 +119,15 @@ $("#app").innerHTML = `
     <div class="sidebar-bottom"><span class="connection-dot"></span><div><strong id="connection-text">Connecting</strong><span id="workspace-root" title="Workspace root">Local workspace</span></div><button class="icon-button" data-action="refresh" title="Refresh workspace" aria-label="Refresh workspace">${icon("refresh")}</button></div>
   </aside>
   <main class="main">
-    <header class="topbar"><div class="breadcrumbs"><button class="icon-button mobile-menu" data-action="sidebar" aria-label="Toggle projects">${icon("layers")}</button><span>Workspace</span>${icon("chevron")}<strong id="breadcrumb">All projects</strong></div><div class="topbar-right"><span class="local-badge"><span></span> LOCAL</span><button class="button primary small" data-action="add">${icon("plus")} New worktree</button></div></header>
+    <header class="topbar"><div class="breadcrumbs"><button class="icon-button" data-action="sidebar" aria-label="Projects and commands">${icon("layers")}</button><strong class="hq-brand">bonsai <span>HQ</span></strong><span id="breadcrumb">All projects</span></div><div class="topbar-right"><button class="button small attention-button" data-action="attention"><span class="dot amber"></span><span id="attention-count">Needs you</span><kbd>n</kbd></button><button class="icon-button hq-refresh" data-action="refresh" aria-label="Refresh workspace" title="Refresh workspace">${icon("refresh")}</button><button class="icon-button" data-action="integrations" aria-label="Provider integrations" title="Provider integrations">${icon("command")}</button><button class="button primary small" data-action="add">${icon("plus")}<span>New worktree</span></button></div></header>
     <section class="workspace">
-      <div class="workspace-heading"><div><div class="eyebrow">A LITTLE SPACE FOR BIG IDEAS</div><h1>Your constellation<span>.</span></h1><p id="workspace-subtitle">Every project. Every branch. Room to grow.</p></div><div class="view-toggle" aria-label="Workspace view"><button data-view="graph" title="Graph view">${icon("graph")}<span>Graph</span></button><button data-view="list" title="List view">${icon("layers")}<span>List</span></button></div></div>
-      <div class="workspace-toolbar"><div class="workspace-stats" id="workspace-stats"><span>Discovering your workspaces…</span></div><label class="inline-search">${icon("search")}<input id="filter" type="search" placeholder="Filter branches, projects…" aria-label="Filter branches and projects"><kbd>/</kbd></label></div>
+      <div class="hq-status"><div id="quota-summary" class="quota-summary"></div><button class="hq-integration-status" data-action="integrations" id="integration-summary">Discovering agents…</button></div>
+      <div class="workspace-toolbar"><div class="workspace-stats" id="workspace-stats"></div><span id="workspace-subtitle" hidden></span><label class="inline-search">${icon("search")}<input id="filter" type="search" placeholder="Find a worktree, agent, model or pane…" aria-label="Filter branches and projects"><kbd>/</kbd></label><div class="view-toggle" aria-label="Workspace view"><button data-view="list" title="Headquarters list">${icon("layers")}<span>HQ</span></button><button data-view="graph" title="Graph view">${icon("graph")}<span>Graph</span></button></div></div>
       <div id="warning-banner" class="warning-banner" hidden></div>
-      <div class="canvas-layout"><div id="canvas" class="canvas"><div class="empty-state"><span class="loading-orbit"></span><h2>Finding your constellation</h2><p>Discovering projects and their worktrees.</p></div></div><aside id="inspector" class="inspector" aria-label="Worktree details"></aside></div>
+      <div class="canvas-layout"><div id="canvas" class="canvas"><div class="empty-state"><span class="loading-orbit"></span><h2>Discovering worktrees</h2><p>Discovering projects and their worktrees.</p></div></div><aside id="inspector" class="inspector" aria-label="Worktree details"></aside></div>
     </section>
-    <section id="terminal-dock" class="terminal-dock" aria-label="Browser terminals"><div class="terminal-header"><button class="terminal-label" data-action="toggle-dock">${icon("terminal")}<span>Terminal</span><span id="session-count" class="terminal-count">0</span></button><div id="terminal-tabs" class="terminal-tabs" role="tablist" aria-label="Terminal sessions"></div><div class="terminal-actions"><button class="icon-button" data-action="shell" title="New shell" aria-label="New shell">${icon("plus")}</button><button class="icon-button" data-action="expand-dock" title="Expand terminal" aria-label="Expand terminal">${icon("expand")}</button><button class="icon-button" data-action="toggle-dock" title="Toggle terminal panel" aria-label="Toggle terminal panel">${icon("minus")}</button></div></div><div id="terminal-context" class="terminal-context"></div><div id="terminal-body" class="terminal-body"><div class="terminal-empty"><span>${icon("terminal")}</span><h3>Make yourself at home.</h3><p>Your shell, editors, and coding agents. Right here.</p><button class="button primary" data-action="shell">${icon("terminal")} Open a terminal</button></div></div></section>
-    <footer class="statusbar"><span>${icon("tree")}<span id="status-summary">Connecting to Bonsai</span></span><span><span class="status-hint">Drag to explore · Scroll to zoom</span><button data-action="palette"><kbd>⌘ K</kbd> Jump anywhere</button></span></footer>
+    <section id="terminal-dock" class="terminal-dock" aria-label="Browser terminals"><div class="terminal-header"><button class="terminal-label" data-action="toggle-dock">${icon("terminal")}<span>Terminal</span><span id="session-count" class="terminal-count">0</span></button><div id="terminal-tabs" class="terminal-tabs" role="tablist" aria-label="Terminal sessions"></div><div class="terminal-actions"><button class="icon-button" data-action="shell" title="New shell" aria-label="New shell">${icon("plus")}</button><button class="icon-button" data-action="expand-dock" title="Expand terminal" aria-label="Expand terminal">${icon("expand")}</button><button class="icon-button" data-action="toggle-dock" title="Toggle terminal panel" aria-label="Toggle terminal panel">${icon("minus")}</button></div></div><div id="terminal-context" class="terminal-context"></div><div id="terminal-body" class="terminal-body"><div class="terminal-empty"><span>${icon("terminal")}</span><h3>Your running terminals</h3><p>Open a shell or attach an agent from your worktrees.</p><button class="button primary" data-action="shell">${icon("terminal")} Open a terminal</button></div></div></section>
+    <footer class="statusbar"><span>${icon("tree")}<span id="status-summary">Connecting to Bonsai</span></span><span><span class="status-hint">↑↓ navigate · Enter open · n needs you · ? help</span><button data-action="palette"><kbd>⌘ K</kbd> Jump anywhere</button></span></footer>
   </main>`;
 
 function toast(message: string, error = false): void {
@@ -179,7 +191,7 @@ async function refresh(): Promise<void> {
     const next = await api<WorkspaceState>("/api/state");
     state = next;
     connected = true;
-    if (!selected()) selectedPath = next.projects[0]?.worktrees[0]?.path || "";
+    if (!selected()) selectedPath = headquartersRows(next, "", null)[0]?.worktree.path || "";
     if (
       projectFilter &&
       !next.projects.some((project) => project.id === projectFilter)
@@ -214,12 +226,19 @@ async function refresh(): Promise<void> {
     }
   } finally {
     loading = false;
-    refreshTimer = setTimeout(() => void refresh(), 5000);
+    refreshTimer = setTimeout(() => void refresh(), 1000);
   }
 }
 
 function renderWorkspace(): void {
   if (!state) return;
+  $(".canvas-layout").classList.toggle("graph-view", view === "graph");
+  $("#quota-summary").innerHTML = quotaSummary(state);
+  const attentionCount = (state.attention || []).length;
+  document.title = `${attentionCount ? `${attentionCount} need${attentionCount === 1 ? "s" : ""} you · ` : ""}Bonsai HQ`;
+  $("#attention-count").textContent = `${attentionCount} need${attentionCount === 1 ? "s" : ""} you`;
+  const integrations = state.integrations || [];
+  $("#integration-summary").textContent = `${(state.agents || []).filter((agent) => agent.live).length} live agents · ${integrations.filter((item) => item.status === "connected").length}/${integrations.length || 3} connected`;
   const total = state.projects.reduce(
     (sum, project) => sum + project.worktrees.length,
     0,
@@ -246,7 +265,7 @@ function renderWorkspace(): void {
     "All projects";
   $("#workspace-subtitle").textContent = projectFilter
     ? state.projects.find((project) => project.id === projectFilter)?.id || ""
-    : "Every project. Every branch. Room to grow.";
+    : "Active sessions and recent worktrees";
   $("#workspace-stats").innerHTML =
     `<span>${icon("folder")}<strong>${state.projects.length}</strong> projects</span><span>${icon("branch")}<strong>${total}</strong> worktrees</span><span><i class="dot amber"></i><strong>${dirty}</strong> with changes</span>`;
   $("#status-summary").textContent =
@@ -268,16 +287,29 @@ function renderWorkspace(): void {
 
 function renderCanvas(): void {
   if (!state) return;
+  if (view === "list" && (state.projects.length || state.agents?.length)) {
+    const canvas = $("#canvas");
+    const previousFocus = (document.activeElement as HTMLElement)?.closest<HTMLElement>("[data-nav]")?.dataset.nav;
+    const previousElement = previousFocus ? navigationElement(previousFocus) : null;
+    const previousY = previousElement?.getBoundingClientRect().top;
+    const scroll = canvas.scrollTop;
+    canvas.innerHTML = renderHeadquarters(state, query, projectFilter, selectedPath, expandedWorktrees, collapsedGroups);
+    canvas.scrollTop = initialScroll || scroll;
+    initialScroll = 0;
+    if (previousFocus) {
+      const next = navigationElement(previousFocus);
+      next?.focus({ preventScroll: true });
+      if (next && previousY !== undefined) canvas.scrollTop += next.getBoundingClientRect().top - previousY;
+    }
+    return;
+  }
   const projects = filterProjects(state.projects, query, projectFilter);
   const canvas = $("#canvas");
   if (!projects.length) {
     canvas.innerHTML = `<div class="empty-state"><span class="empty-icon">${icon(query ? "search" : "tree")}</span><div class="eyebrow">${query ? "KEEP EXPLORING" : "GREAT THINGS START SMALL"}</div><h2>${query ? "No branches in sight" : "A place for your next idea"}</h2><p>${query ? "Try a project name, branch, or part of a path." : "Create a worktree from a local Git project and watch your workspace take shape."}</p><button class="button primary" data-action="${query ? "clear-filter" : "add"}">${icon(query ? "refresh" : "plus")}${query ? "Clear filters" : "Create your first worktree"}</button>${!query ? '<button class="button ghost" data-action="shell">Or open a terminal to get started</button>' : ""}</div>`;
     return;
   }
-  if (view === "list") {
-    canvas.innerHTML = `<div class="worktree-list"><div class="list-heading"><span>PROJECT / BRANCH</span><span>STATUS</span><span>SYNC</span><span></span></div>${projects.map((project) => `<div class="list-project-label">${icon("folder")} ${h(project.name)}<span>${h(project.id)}</span></div>${project.worktrees.map((tree) => `<button class="worktree-row ${selectedPath === tree.path ? "selected" : ""}" data-tree="${h(tree.path)}"><span class="list-branch">${icon("branch")}<span><strong>${h(branchName(tree))}</strong><small>${h(tree.path)}</small>${activityBadges(tree)}</span>${tree.main ? '<span class="mini-tag">main checkout</span>' : ""}</span><span class="list-status ${tree.dirty ? "changed" : ""}"><i class="dot ${tree.prunable || tree.dirty === null ? "muted-dot" : tree.dirty ? "amber" : ""}"></i>${tree.prunable ? "Missing" : tree.dirty === null ? "Unavailable" : tree.dirty ? "Changes" : "Clean"}</span><span class="list-sync">${tree.ahead ? `↑ ${tree.ahead}` : ""} ${tree.behind ? `↓ ${tree.behind}` : ""}${!tree.ahead && !tree.behind ? "—" : ""}</span><span class="row-open" data-open-shell="${h(tree.path)}" title="Open terminal">${icon("terminal")}</span></button>`).join("")}`).join("")}</div>`;
-    return;
-  }
+
   const layout = layoutGraph(projects);
   const key = JSON.stringify(
     projects.map((project) => [
@@ -437,22 +469,29 @@ function setupGraphInteractions(): void {
   });
 }
 
-function selectTree(path: string): void {
-  inspectorMobileOpen = true;
+function selectTree(path: string, details = view === "graph"): void {
+  inspectorMobileOpen = details;
+  if (!details) {
+    if (expandedWorktrees.has(path)) expandedWorktrees.delete(path);
+    else expandedWorktrees.add(path);
+  }
+  persistNavigation();
   selectedPath = path;
   localStorage.setItem("bonsai.selected", path);
   renderCanvas();
   renderInspector();
   $("#inspector").scrollTop = 0;
+  if (!details) navigationElement(`tree:${path}`)?.focus({ preventScroll: true });
 }
 
 function renderInspector(): void {
   const current = selected();
   const inspector = $("#inspector");
+  const focusedAction = inspector.contains(document.activeElement) ? (document.activeElement as HTMLElement)?.dataset.action : undefined;
+  const scroll = inspector.scrollTop;
   inspector.classList.toggle(
     "has-selection",
-    Boolean(current) &&
-      (inspectorMobileOpen || matchMedia("(min-width: 581px)").matches),
+    Boolean(current) && inspectorMobileOpen,
   );
   if (!current) {
     inspector.innerHTML =
@@ -462,6 +501,8 @@ function renderInspector(): void {
   const { project, worktree: tree } = current;
   const changed = tree.added + tree.modified + tree.deleted + tree.untracked;
   inspector.innerHTML = `<div class="inspector-topline"><span>WORKTREE DETAILS</span><button class="icon-button inspector-close" data-action="close-inspector" aria-label="Close details">${icon("close")}</button></div><div class="inspector-branch-icon">${icon("branch")}</div><div class="inspector-project">${h(project.name)}</div><h2 class="inspector-title">${h(branchName(tree))}</h2><div class="badge-row"><span class="badge ${tree.prunable || tree.dirty === null ? "neutral" : tree.dirty ? "changed" : "clean"}"><i class="dot ${tree.prunable || tree.dirty === null ? "muted-dot" : tree.dirty ? "amber" : ""}"></i>${tree.prunable ? "Missing directory" : tree.dirty === null ? "Status unavailable" : tree.dirty ? "Uncommitted changes" : "Working tree clean"}</span>${tree.main ? '<span class="badge neutral">Main checkout</span>' : ""}${tree.external ? '<span class="badge neutral">External</span>' : ""}${tree.locked ? '<span class="badge neutral">Locked</span>' : ""}</div><button class="button primary full" data-action="shell" ${tree.prunable ? "disabled" : ""}>${icon("terminal")} Open terminal <span class="button-end">↗</span></button><button class="button secondary full" data-action="new-tmux" ${!state?.tmux.available || tree.prunable ? "disabled" : ""} title="${state?.tmux.available ? "Create or attach a persistent tmux session" : "tmux is not installed"}">${icon("layers")} Persistent tmux session</button>${inspectorActivity(tree)}<div class="inspector-section"><div class="section-caption">CHECKOUT</div><div class="detail-line"><span>Commit</span><code>${h(tree.head.slice(0, 8)) || "—"}</code></div><div class="detail-line"><span>Upstream</span><span class="sync-detail">${tree.ahead || tree.behind ? `↑ ${tree.ahead} ahead <span>·</span> ↓ ${tree.behind} behind` : "No pending commits"}</span></div><button class="path-copy" data-action="copy-path" title="Copy worktree path"><span>${h(tree.path)}</span>${icon("copy")}</button></div><div class="inspector-section"><div class="section-caption">WORKING CHANGES <span>${changed}</span></div><div class="changes-grid"><div><span class="added">+${tree.added}</span><small>Added</small></div><div><span class="modified">${tree.modified}</span><small>Modified</small></div><div><span class="deleted">−${tree.deleted}</span><small>Deleted</small></div><div><span>${tree.untracked}</span><small>Untracked</small></div></div></div><div class="inspector-section inspector-actions"><div class="section-caption">MAKE YOUR NEXT MOVE</div><button data-action="add-from-here">${icon("plus")} Branch from here ${icon("chevron")}</button><button data-action="start">${icon("terminal")} New coding session ${icon("chevron")}</button><button data-action="resume">${icon("clock")} Resume a coding session ${icon("chevron")}</button><button data-action="command">${icon("command")} Run a Bonsai command ${icon("chevron")}</button><button data-action="workspace">${icon("folder")} Generate editor workspace ${icon("chevron")}</button>${!tree.main && !tree.external ? `<button class="danger-text" data-action="remove" ${tree.locked ? "disabled" : ""}>${icon("trash")} Remove worktree ${icon("chevron")}</button>` : ""}</div><div class="inspector-note">${icon("tree")} A branch is a fresh possibility.</div>`;
+  inspector.scrollTop = scroll;
+  if (focusedAction) [...inspector.querySelectorAll<HTMLElement>("[data-action]")].find((element) => element.dataset.action === focusedAction)?.focus({ preventScroll: true });
 }
 
 const commandDefinitions = [
@@ -500,6 +541,7 @@ const commandDefinitions = [
 
 function modal(content: string, className = ""): HTMLDialogElement {
   const dialog = $<HTMLDialogElement>("#modal");
+  if (!dialog.open) modalOpener = document.activeElement as HTMLElement;
   dialog.className = className;
   dialog.innerHTML = content;
   if (!dialog.open) dialog.showModal();
@@ -568,6 +610,17 @@ function openRemove(): void {
     if (data.has("force")) args.push("--force");
     args.push("--", tree.path);
     await createSession({ path: current.project.path, args });
+  });
+}
+
+function openCoding(action: "start" | "resume"): void {
+  const path = contextPath();
+  const dialog = modal(`${modalHeader("CODING SESSION", action === "start" ? "Start an agent" : "Resume a saved session")}<p class="modal-description">${action === "start" ? "Launch a provider in this worktree." : "Find a saved session using Bonsai’s interactive picker."}</p><div class="form-path">${h(path)}</div><form id="coding-form"><label>Provider<select name="provider"><option value="">Choose in the terminal</option>${["claude", "codex", "opencode"].map((provider) => `<option value="${provider}">${provider}</option>`).join("")}</select></label><p class="form-error" role="alert"></p><div class="modal-footer"><button class="button secondary" type="button" data-action="close-modal">Cancel</button><button class="button primary" type="submit">${action === "start" ? "Start session" : "Find saved session"}</button></div></form>`);
+  submitForm(dialog.querySelector("form")!, async (data) => {
+    const provider = String(data.get("provider"));
+    const args = action === "start" ? ["start", ...(provider ? [provider] : [])]
+      : ["resume", ...(provider ? [provider] : [])];
+    await createSession({ path, args });
   });
 }
 
@@ -677,6 +730,7 @@ function openPalette(): void {
         },
       })),
     ) || []),
+    ...(state?.agents || []).map((agent) => ({ title: agent.title, subtitle: `${agent.provider} · ${agent.model || "model unknown"} · ${agent.target?.tmuxSession || ""} ${agent.target?.tmuxPane || ""} · ${agent.cwd}`, icon: "terminal", action: () => openAgent(agent.id) })),
     ...[...sessions.values()].map((session) => ({
       title: session.title,
       subtitle: `Terminal · ${session.path}`,
@@ -767,6 +821,7 @@ async function createSession(options: {
   path: string;
   args?: string[];
   tmux?: string;
+  tmuxPane?: string;
   newTmux?: boolean;
 }): Promise<void> {
   const session = await api<Session>("/api/terminals", {
@@ -782,6 +837,8 @@ async function createSession(options: {
 function activateTerminal(id: string): void {
   if (!sessions.has(id)) return;
   selectedTerminal = id;
+  const path = sessions.get(id)!.path;
+  void api("/api/visits", { method: "POST", body: JSON.stringify({ path }) }).catch(() => {});
   dockOpen = true;
   updateDock();
   let live = terminals.get(id);
@@ -823,6 +880,13 @@ function activateTerminal(id: string): void {
     const fit = new FitAddon();
     terminal.loadAddon(fit);
     terminal.open(element);
+    terminal.attachCustomKeyEventHandler((event) => {
+      if (event.ctrlKey && event.key === "]") {
+        if (event.type === "keydown") returnToHeadquarters();
+        return false;
+      }
+      return true;
+    });
     live = { terminal, fit, socket: null, element, status: "connecting" };
     terminals.set(id, live);
     terminal.onData((data) => {
@@ -952,7 +1016,7 @@ function renderTerminalTabs(): void {
   const session = selectedTerminal ? sessions.get(selectedTerminal) : null;
   const live = selectedTerminal ? terminals.get(selectedTerminal) : null;
   $("#terminal-context").innerHTML = session
-    ? `<span>${icon("folder")}${h(session.path)}</span><span class="terminal-connection">${live?.status === "offline" ? `<span class="amber-text">Disconnected</span><button data-action="reconnect-terminal">Reconnect</button>` : live?.status === "exited" ? `<span>Process finished</span><button data-action="shell">New shell</button>` : live?.status === "connecting" ? "Connecting…" : session.kind === "tmux" ? "Persistent tmux · Ctrl+B, D to detach" : "Live shell · full keyboard input"}</span>`
+    ? `<span>${icon("folder")}${h(session.path)}</span><span class="terminal-connection">${live?.status === "offline" ? `<span class="amber-text">Disconnected</span><button data-action="reconnect-terminal">Reconnect</button>` : live?.status === "exited" ? `<span>Process finished</span><button data-action="shell">New shell</button>` : live?.status === "connecting" ? "Connecting…" : session.kind === "tmux" ? "Persistent tmux · Ctrl+] back to HQ" : "Live shell · Ctrl+] back to HQ"}</span>`
     : "";
   $(".terminal-empty")?.classList.toggle("hidden", Boolean(selectedTerminal));
 }
@@ -966,8 +1030,139 @@ function updateDock(): void {
   });
 }
 
+function persistNavigation(): void {
+  sessionStorage.setItem("bonsai.query", query);
+  sessionStorage.setItem("bonsai.expanded", JSON.stringify([...expandedWorktrees]));
+  sessionStorage.setItem("bonsai.groups", JSON.stringify([...collapsedGroups]));
+  sessionStorage.setItem("bonsai.focus", focusedNavigation);
+}
+
+function navigationElement(key: string): HTMLElement | null {
+  return [...document.querySelectorAll<HTMLElement>("#canvas [data-nav]")].find((element) => element.dataset.nav === key) || null;
+}
+
+function focusNavigation(): void {
+  (navigationElement(focusedNavigation) || navigationElement(`tree:${selectedPath}`) || $<HTMLElement>("#canvas [data-nav]"))?.focus({ preventScroll: true });
+}
+
+function returnToHeadquarters(): void {
+  dockOpen = false;
+  dockExpanded = false;
+  updateDock();
+  focusNavigation();
+}
+
+function nextAttention(): void {
+  const attention = state?.attention || [];
+  if (!attention.length) { toast("Nothing needs your input."); return; }
+  attentionCursor = (attentionCursor + 1) % attention.length;
+  const item = attention[attentionCursor];
+  const agent = state?.agents?.find((agent) => agent.id === item.agentId);
+  if (!agent) { toast(item.summary); return; }
+  if (agent.worktreePath) {
+    selectedPath = agent.worktreePath;
+    expandedWorktrees.add(agent.worktreePath);
+    collapsedGroups.delete("needs-you");
+    query = ""; projectFilter = null;
+    $<HTMLInputElement>("#filter").value = "";
+    view = "list";
+    persistNavigation(); renderWorkspace();
+  }
+  focusedNavigation = `agent:${agent.id}`;
+  navigationElement(focusedNavigation)?.scrollIntoView({ block: "nearest" });
+  navigationElement(focusedNavigation)?.focus();
+  openAgent(agent.id);
+}
+
+async function attachAgent(agent: Agent): Promise<void> {
+  const target = agent.target;
+  if (target?.terminalId) {
+    await restoreSessions();
+    if (!sessions.has(target.terminalId)) throw new Error("This exact terminal is no longer available.");
+    $<HTMLDialogElement>("#modal").close();
+    activateTerminal(target.terminalId);
+  } else if (target?.tmuxSession && target.tmuxPane) {
+    await createSession({ path: agent.worktreePath || agent.cwd, tmux: target.tmuxSession, tmuxPane: target.tmuxPane });
+  } else throw new Error("This session has no live terminal to attach.");
+}
+
+function openAgent(id: string): void {
+  const agent = state?.agents?.find((candidate) => candidate.id === id);
+  if (!agent) { toast("This session is no longer available.", true); return; }
+  focusedNavigation = `agent:${id}`;
+  persistNavigation();
+  const attention = (state?.attention || []).filter((item) => item.agentId === id);
+  const canAttach = Boolean(agent.target?.terminalId || (agent.target?.tmuxSession && agent.target.tmuxPane));
+  const capability = (name: string) => agent.capabilities.includes(name) || (name === "reply" && agent.capabilities.includes("prompt"));
+  const dialog = modal(`${modalHeader(`${h(agent.provider)} · ${h(agent.stale ? "stale" : agent.state)}`, h(agent.title || "Coding session"))}
+    <div class="agent-context">${agent.parentId ? `<span>Child of ${h(state?.agents?.find((parent) => parent.id === agent.parentId)?.title || agent.parentId)}</span>` : ""}<span>${h(agent.model || "Model unavailable")}</span><code>${h(agent.target?.tmuxSession || "")}${agent.target?.tmuxPane ? ` / ${h(agent.target.tmuxPane)}` : ""}</code><span>${h(agent.cwd)}</span></div>
+    ${agent.stale ? '<p class="inline-notice">Last observation is stale. Refresh before relying on its status.</p>' : ""}
+    ${attention.map((item) => `<article class="attention-item"><span class="attention-kind">${h(item.kind)}</span><p>${h(item.summary)}</p><div>${item.requestId && capability("approve") ? `<button class="button primary small" data-agent-command="approve" data-request="${h(item.requestId)}">Approve</button>` : ""}${item.requestId && capability("reject") ? `<button class="button secondary small" data-agent-command="reject" data-request="${h(item.requestId)}">Reject</button>` : ""}${item.kind === "completed" ? `<button class="button ghost small" data-acknowledge="${h(item.id)}">Mark reviewed</button>` : ""}</div></article>`).join("")}
+    ${agent.waitingReason ? `<p class="agent-waiting">${h(agent.waitingReason)}</p>` : ""}
+    ${capability("reply") ? '<form id="agent-reply"><label>Reply to this session<textarea name="text" rows="4" required placeholder="Your instructions…"></textarea></label><div class="form-error" role="alert"></div><div class="modal-footer"><button class="button primary" type="submit">Send reply</button></div></form>' : '<p class="modal-description">Use the attached terminal to read and answer this session.</p>'}
+    <div id="agent-error" class="form-error" role="alert"></div><div class="modal-footer"><button class="button secondary" id="agent-attach" ${canAttach ? "" : "disabled"}>Attach exact terminal ↗</button>${capability("interrupt") ? '<button class="button secondary" data-agent-command="interrupt">Interrupt</button>' : ""}${capability("resume") && agent.sessionId && agent.provider !== "unknown" ? '<button class="button primary" id="agent-resume">Resume session</button>' : ""}</div>`, "agent-dialog");
+  const act = async (action: string, text?: string, requestId?: string) => {
+    await api(`/api/agents/${encodeURIComponent(agent.id)}/actions`, { method: "POST", body: JSON.stringify({ action, text, requestId }) });
+    void refresh();
+    toast(action === "reply" ? "Reply sent to this session." : `Session ${action} requested.`);
+  };
+  const run = (button: HTMLButtonElement, operation: () => Promise<void>) => {
+    button.disabled = true;
+    void operation().catch((error) => { $("#agent-error").textContent = error instanceof Error ? error.message : String(error); })
+      .finally(() => { if (button.isConnected) button.disabled = false; });
+  };
+  dialog.querySelector<HTMLButtonElement>("#agent-attach")!.addEventListener("click", (event) => run(event.currentTarget as HTMLButtonElement, () => attachAgent(agent)));
+  dialog.querySelector<HTMLButtonElement>("#agent-resume")?.addEventListener("click", (event) => run(event.currentTarget as HTMLButtonElement, () => createSession({ path: agent.worktreePath || agent.cwd, args: ["resume", "--provider", agent.provider, "--session", agent.sessionId!] })));
+  dialog.querySelectorAll<HTMLButtonElement>("[data-agent-command]").forEach((button) => button.addEventListener("click", () => run(button, () => act(button.dataset.agentCommand!, undefined, button.dataset.request))));
+  dialog.querySelectorAll<HTMLButtonElement>("[data-acknowledge]").forEach((button) => button.addEventListener("click", () => run(button, async () => {
+    await api(`/api/attention/${encodeURIComponent(button.dataset.acknowledge!)}/acknowledge`, { method: "POST", body: "{}" });
+    button.closest(".attention-item")?.remove(); void refresh();
+  })));
+  const form = dialog.querySelector<HTMLFormElement>("#agent-reply");
+  if (form) submitForm(form, (data) => act("reply", String(data.get("text"))));
+}
+
+function openQuotas(): void {
+  const quotas = state?.quotas || [];
+  modal(`${modalHeader("SUBSCRIPTIONS", "Usage & reset windows")}<p class="modal-description">Provider-reported subscription limits. Unavailable data is shown explicitly.</p><div class="quota-details">${quotas.length ? quotas.map((quota) => `<article class="quota-detail"><div><strong class="provider provider-${h(quota.provider)}">${h(quota.provider)}</strong><span>${h(quota.accountLabel || "")}</span><span>${quota.stale ? "Stale · " : ""}observed ${relativeTime(quota.observedAt)} ago</span></div><h3>${h(quota.label)}</h3>${quota.usedPercent === null ? `<p>${h(quota.unavailableReason || "Usage unavailable")}</p>` : `<div class="quota-meter" role="meter" aria-label="${h(quota.label)} used" aria-valuenow="${quota.usedPercent}" aria-valuemin="0" aria-valuemax="100"><i style="width:${Math.min(100, Math.max(0, quota.usedPercent))}%"></i></div><p>${Math.round(quota.usedPercent)}% used · ${Math.max(0, Math.round(100 - quota.usedPercent))}% remaining</p>`}<small>${quota.resetsAt ? `Resets ${h(new Date(quota.resetsAt * 1000).toLocaleString())}` : "Reset time unavailable"}</small></article>`).join("") : '<p class="small-empty">Subscription quotas are unavailable. Check provider integrations for connection details.</p>'}</div><div class="modal-footer"><button class="button secondary" data-action="integrations">Provider integrations</button><button class="button primary" data-action="close-modal">Done</button></div>`);
+}
+
+function openIntegrations(): void {
+  const integrations = state?.integrations || [];
+  const dialog = modal(`${modalHeader("CONNECTED TOOLS", "Provider integrations")}<p class="modal-description">Discover existing sessions and enable the controls each provider supports.</p><div class="integration-list">${["claude", "codex", "opencode"].map((provider) => {
+    const integration = integrations.find((item) => item.provider === provider);
+    return `<article class="integration-item"><div><strong class="provider provider-${provider}">${provider}</strong><span>${h(integration?.status || "unavailable")}</span></div><p>${h(integration?.message || "This provider is not connected.")}</p><small>${h(integration?.capabilities.join(" · ") || "No direct controls available")}</small><div>${integration && integration.status !== "unavailable" ? `<button class="button secondary small" data-integration="${provider}" data-operation="${integration.status === "disabled" ? "install" : "repair"}">${integration.status === "disabled" ? "Enable integration" : "Repair integration"}</button>${integration.status !== "disabled" ? `<button class="button ghost small" data-integration="${provider}" data-operation="disable">Disable</button><button class="button ghost small" data-integration="${provider}" data-operation="uninstall">Remove integration</button>` : ""}` : ""}</div><p class="form-error" role="alert"></p></article>`;
+  }).join("")}</div><div class="modal-footer"><button class="button primary" data-action="close-modal">Done</button></div>`);
+  dialog.querySelectorAll<HTMLButtonElement>("[data-integration]").forEach((button) => button.addEventListener("click", async () => {
+    button.disabled = true;
+    try {
+      await api(`/api/integrations/${button.dataset.integration}/actions`, { method: "POST", body: JSON.stringify({ action: button.dataset.operation }) });
+      await refresh(); openIntegrations();
+    } catch (error) {
+      button.closest("article")!.querySelector(".form-error")!.textContent = error instanceof Error ? error.message : String(error);
+      button.disabled = false;
+    }
+  }));
+}
+
+function openHelp(): void {
+  modal(`${modalHeader("KEYBOARD", "Drive your headquarters")}<dl class="shortcut-list"><dt>↑ ↓ / j k</dt><dd>Move through worktrees and sessions</dd><dt>← →</dt><dd>Collapse / expand a worktree</dd><dt>Enter</dt><dd>Open the focused worktree or session</dd><dt>/</dt><dd>Search branches, agents, models and panes</dd><dt>n</dt><dd>Next session that needs you</dd><dt>⌘ K / Ctrl K</dt><dd>Search commands and worktrees</dd><dt>Esc</dt><dd>Close details or return to the list</dd><dt>Ctrl ]</dt><dd>Return from a terminal; keep it running</dd></dl><div class="modal-footer"><button class="button primary" data-action="close-modal">Done</button></div>`);
+}
+
 async function performAction(action: string): Promise<void> {
   switch (action) {
+    case "attention":
+      nextAttention();
+      break;
+    case "quotas":
+      openQuotas();
+      break;
+    case "integrations":
+      openIntegrations();
+      break;
+    case "help":
+      openHelp();
+      break;
     case "palette":
       openPalette();
       break;
@@ -994,7 +1189,7 @@ async function performAction(action: string): Promise<void> {
       openAdd("HEAD");
       break;
     case "start":
-      openCommand("start");
+      openCoding("start");
       break;
     case "remove":
       openRemove();
@@ -1009,7 +1204,7 @@ async function performAction(action: string): Promise<void> {
       openCommand("prune", "--all");
       break;
     case "resume":
-      openCommand("resume");
+      openCoding("resume");
       break;
     case "workspace":
       openCommand("workspace");
@@ -1045,10 +1240,11 @@ async function performAction(action: string): Promise<void> {
     case "close-inspector":
       inspectorMobileOpen = false;
       $("#inspector").classList.remove("has-selection");
+      navigationElement(`tree:${selectedPath}`)?.focus({ preventScroll: true });
       break;
     case "toggle-dock":
-      dockOpen = !dockOpen;
-      updateDock();
+      if (dockOpen) returnToHeadquarters();
+      else { dockOpen = true; updateDock(); }
       break;
     case "expand-dock":
       dockExpanded = !dockExpanded;
@@ -1066,6 +1262,16 @@ async function performAction(action: string): Promise<void> {
 
 document.addEventListener("click", (event) => {
   const target = event.target as Element;
+  const details = target.closest<HTMLElement>("[data-details]");
+  if (details) { selectTree(details.dataset.details!, true); return; }
+  const agent = target.closest<HTMLElement>("[data-agent]");
+  if (agent) { openAgent(agent.dataset.agent!); return; }
+  const group = target.closest<HTMLElement>("[data-group]");
+  if (group) {
+    const key = group.dataset.group as Priority;
+    if (collapsedGroups.has(key)) collapsedGroups.delete(key); else collapsedGroups.add(key);
+    persistNavigation(); renderCanvas(); return;
+  }
   const action = target.closest<HTMLElement>("[data-action]");
   if (action) {
     void performAction(action.dataset.action!).catch((error) =>
@@ -1143,11 +1349,13 @@ document.addEventListener("click", (event) => {
     void createSession({
       path: tmux.dataset.path!,
       tmux: tmux.dataset.tmux!,
+      tmuxPane: tmux.dataset.tmuxPane,
     }).catch((error) => toast(String(error), true));
 });
 
 $<HTMLInputElement>("#filter").addEventListener("input", (event) => {
   query = (event.target as HTMLInputElement).value;
+  persistNavigation();
   renderCanvas();
 });
 $<HTMLDialogElement>("#modal").addEventListener("click", (event) => {
@@ -1163,40 +1371,71 @@ $<HTMLDialogElement>("#modal").addEventListener("click", (event) => {
   }
 });
 document.addEventListener("keydown", (event) => {
-  if ((event.metaKey || event.ctrlKey) && event.key.toLowerCase() === "k") {
-    event.preventDefault();
-    openPalette();
-    return;
-  }
   const target = event.target as Element;
-  if (
-    (event.key === "Enter" || event.key === " ") &&
-    target.matches("g[data-tree], g[data-project-node]")
-  ) {
-    event.preventDefault();
-    target.dispatchEvent(new MouseEvent("click", { bubbles: true }));
+  if (target.closest(".xterm")) return;
+  if ($<HTMLDialogElement>("#modal").open) return;
+  if ((event.metaKey || event.ctrlKey) && event.key.toLowerCase() === "k") {
+    event.preventDefault(); openPalette(); return;
   }
-  if (
-    target.closest("input, textarea, select, .xterm") ||
-    $<HTMLDialogElement>("#modal").open
-  )
+  if (target.closest("input, textarea, select, [contenteditable=true]")) {
+    if (event.key === "Escape" && target.id === "filter") {
+      event.preventDefault(); $<HTMLInputElement>("#filter").blur(); focusNavigation();
+    }
+    if (event.key === "ArrowDown" && target.id === "filter") {
+      event.preventDefault(); focusNavigation();
+    }
     return;
-  if (event.key === "/") {
+  }
+  if (event.ctrlKey || event.metaKey || event.altKey) return;
+  if ((event.key === "Enter" || event.key === " ") && target.matches("g[data-tree], g[data-project-node]")) {
+    event.preventDefault(); target.dispatchEvent(new MouseEvent("click", { bubbles: true })); return;
+  }
+  if (event.key === "/") { event.preventDefault(); $<HTMLInputElement>("#filter").focus(); return; }
+  if (event.key === "?") { event.preventDefault(); openHelp(); return; }
+  if (event.key === "n") { event.preventDefault(); nextAttention(); return; }
+  if (["ArrowDown", "ArrowUp", "j", "k", "Home", "End"].includes(event.key) && view === "list") {
     event.preventDefault();
-    $<HTMLInputElement>("#filter").focus();
+    const rows = [...document.querySelectorAll<HTMLElement>("#canvas [data-nav]")];
+    const index = rows.indexOf(target.closest<HTMLElement>("[data-nav]")!);
+    const next = event.key === "Home" ? 0 : event.key === "End" ? rows.length - 1
+      : Math.max(0, Math.min(rows.length - 1, index + (["ArrowDown", "j"].includes(event.key) ? 1 : -1)));
+    rows[next]?.focus(); rows[next]?.scrollIntoView({ block: "nearest" }); return;
+  }
+  if (["ArrowLeft", "ArrowRight"].includes(event.key) && target.matches("[data-tree]")) {
+    event.preventDefault();
+    const path = (target as HTMLElement).dataset.tree!;
+    if (event.key === "ArrowRight") expandedWorktrees.add(path); else expandedWorktrees.delete(path);
+    persistNavigation(); renderCanvas(); return;
   }
   if (event.key === "Escape") {
     document.body.classList.remove("sidebar-open");
-    if (dockExpanded) {
-      dockExpanded = false;
-      updateDock();
-    } else {
-      query = "";
-      $<HTMLInputElement>("#filter").value = "";
-      renderCanvas();
-    }
+    if (inspectorMobileOpen) { void performAction("close-inspector"); return; }
+    if (dockOpen) { returnToHeadquarters(); return; }
+    query = ""; $<HTMLInputElement>("#filter").value = ""; persistNavigation(); renderCanvas();
   }
 });
+document.addEventListener("focusin", (event) => {
+  const nav = (event.target as HTMLElement).closest<HTMLElement>("[data-nav]")?.dataset.nav;
+  if (nav) {
+    focusedNavigation = nav;
+    const path = nav.startsWith("tree:") ? nav.slice(5)
+      : nav.startsWith("agent:") ? state?.agents?.find((agent) => agent.id === nav.slice(6))?.worktreePath : null;
+    if (path && selectedPath !== path) {
+      selectedPath = path;
+      localStorage.setItem("bonsai.selected", path);
+      document.querySelectorAll<HTMLElement>(".worktree-row").forEach((row) => row.classList.toggle("selected", row.dataset.tree === path));
+      if (inspectorMobileOpen) renderInspector();
+    }
+    persistNavigation();
+  }
+});
+$<HTMLDialogElement>("#modal").addEventListener("close", () => {
+  if (dockOpen) return;
+  if (modalOpener?.isConnected) modalOpener.focus({ preventScroll: true }); else focusNavigation();
+});
+$<HTMLInputElement>("#filter").value = query;
+
+$("#canvas").addEventListener("scroll", () => sessionStorage.setItem("bonsai.scroll", String($("#canvas").scrollTop)), { passive: true });
 new ResizeObserver(() => {
   if (selectedTerminal) {
     const live = terminals.get(selectedTerminal);

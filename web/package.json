@@ -6,7 +6,7 @@
   "scripts": {
     "build": "node build.mjs",
     "typecheck": "tsc --noEmit",
-    "test": "node --experimental-strip-types --test src/model.test.ts",
+    "test": "node --experimental-strip-types --test src/model.test.ts ../src/web/integrations/opencode.test.mjs",
     "check": "npm run typecheck && npm test && npm run build",
     "test:e2e": "playwright test"
   },

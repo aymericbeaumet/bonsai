@@ -28,6 +28,25 @@ pub struct Config {
     pub workspace: bool,
     pub add: AddConfig,
     pub clean: CleanConfig,
+    pub hq: HqConfig,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(default, deny_unknown_fields)]
+pub struct HqConfig {
+    pub auto_setup: bool,
+    pub notifications: bool,
+    pub tmux_status: bool,
+}
+
+impl Default for HqConfig {
+    fn default() -> Self {
+        Self {
+            auto_setup: true,
+            notifications: false,
+            tmux_status: false,
+        }
+    }
 }
 
 /// Local-only files worth carrying into every new worktree by default:
@@ -89,6 +108,7 @@ impl Default for Config {
             workspace: true,
             add: AddConfig::default(),
             clean: CleanConfig::default(),
+            hq: HqConfig::default(),
         }
     }
 }
@@ -157,6 +177,17 @@ struct GitConfigPatch {
     workspace: Option<bool>,
     add: GitConfigAddPatch,
     clean: GitConfigCleanPatch,
+    hq: GitConfigHqPatch,
+}
+
+#[derive(Debug, Default, Serialize)]
+struct GitConfigHqPatch {
+    #[serde(skip_serializing_if = "Option::is_none")]
+    auto_setup: Option<bool>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    notifications: Option<bool>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    tmux_status: Option<bool>,
 }
 
 #[derive(Debug, Default, Serialize)]
@@ -212,6 +243,9 @@ fn git_config_patch(git: &Git) -> Result<GitConfigPatch> {
             "bonsai.add.copy" => patch.add.copy.get_or_insert_default().push(value),
             "bonsai.clean.fetch" => patch.clean.fetch = Some(boolean()?),
             "bonsai.clean.protected" => patch.clean.protected.get_or_insert_default().push(value),
+            "bonsai.hq.autosetup" => patch.hq.auto_setup = Some(boolean()?),
+            "bonsai.hq.notifications" => patch.hq.notifications = Some(boolean()?),
+            "bonsai.hq.tmuxstatus" => patch.hq.tmux_status = Some(boolean()?),
             _ => eprintln!("bonsai: ignoring unknown git config key '{key}'"),
         }
     }
@@ -280,6 +314,9 @@ mod tests {
             assert_eq!(config.add.copy, DEFAULT_COPY);
             assert!(config.add.fetch);
             assert!(config.add.install);
+            assert!(config.hq.auto_setup);
+            assert!(!config.hq.notifications);
+            assert!(!config.hq.tmux_status);
 
             // Repo config overrides global.
             std::fs::write(
@@ -297,10 +334,14 @@ mod tests {
             jail.set_env("BONSAI_REMOTE", "fork");
             jail.set_env("BONSAI_CLEAN__FETCH", "true");
             jail.set_env("BONSAI_ADD__INSTALL", "true");
+            jail.set_env("BONSAI_HQ__AUTO_SETUP", "false");
+            jail.set_env("BONSAI_HQ__NOTIFICATIONS", "true");
             let config = Config::load(Some(&repo), &git).unwrap();
             assert_eq!(config.remote.as_deref(), Some("fork"));
             assert!(config.clean.fetch);
             assert!(config.add.install);
+            assert!(!config.hq.auto_setup);
+            assert!(config.hq.notifications);
             Ok(())
         });
     }

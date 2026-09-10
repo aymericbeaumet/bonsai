@@ -2,6 +2,11 @@ import test from "node:test";
 import assert from "node:assert/strict";
 import {
   fuzzyScore,
+  headquartersRows,
+  worktreeSummary,
+  agentHierarchy,
+  type Agent,
+  type WorkspaceState,
   parseArguments,
   filterProjects,
   layoutGraph,
@@ -195,4 +200,51 @@ test("quoted paths preserve literal backslashes and POSIX escapes never expand i
     "three",
   ]);
   assert.deepEqual(parseArguments('"one\\\ntwo"'), ["onetwo"]);
+});
+
+
+test("headquarters prioritizes attention and activity, searches sessions, and has deterministic ties", () => {
+  const state: WorkspaceState = { root: "/", projects: [{ ...projects[0], worktrees: [
+    { ...tree("/old", "ab/old"), priority: "older" },
+    { ...tree("/recent", "ab/recent"), priority: "recent", lastActivity: 500 },
+    { ...tree("/busy", "ab/busy"), priority: "working", lastActivity: 100 },
+    { ...tree("/input", "ab/input"), priority: "needs-you", lastActivity: 90 },
+  ] }], warnings: [], tmux: { available: true, sessions: [] }, agents: [
+    { id: "codex", provider: "codex", worktreePath: "/busy", title: "Investigate cache", model: "test-model", target: {tmuxSession: "dev", tmuxPane: "%22"} } as Agent,
+  ] };
+  assert.deepEqual(headquartersRows(state, "", null).map((row) => row.worktree.path), ["/input", "/busy", "/recent", "/old"]);
+  assert.equal(headquartersRows(state, "%22", null)[0].worktree.path, "/busy");
+  assert.equal(headquartersRows(state, "cache", null)[0].worktree.path, "/busy");
+  assert.deepEqual(headquartersRows(state, "ab/old", null).map((row) => row.worktree.path), ["/old"]);
+  assert.deepEqual(headquartersRows(state, "codex cache", null).map((row) => row.worktree.path), ["/busy"]);
+  const reversed = { ...state, projects: state.projects.map((project) => ({ ...project, worktrees: [...project.worktrees].reverse() })) };
+  assert.deepEqual(headquartersRows(state, "", null).map((row) => row.worktree.path), headquartersRows(reversed, "", null).map((row) => row.worktree.path));
+});
+
+test("agent hierarchy preserves independent sessions, children, orphans and cycles exactly once", () => {
+  const agents = [
+    {id: "b", parentId: null}, {id: "a", parentId: null}, {id: "child", parentId: "a"},
+    {id: "orphan", parentId: "missing"}, {id: "cycle1", parentId: "cycle2"}, {id: "cycle2", parentId: "cycle1"},
+  ] as Agent[];
+  const rows = agentHierarchy(agents);
+  assert.equal(rows.length, 6);
+  assert.equal(new Set(rows.map((row) => row.agent.id)).size, 6);
+  assert.equal(rows.find((row) => row.agent.id === "child")?.depth, 1);
+  assert.equal(rows.find((row) => row.agent.id === "b")?.depth, 0);
+});
+
+
+test("collapsed worktrees summarize attention before newer live and saved sessions", () => {
+  const worktree = tree("/api/main", "main");
+  const agents = [
+    { id: "saved", worktreePath: worktree.path, title: "Saved task", updatedAt: 900, live: false, state: "completed" },
+    { id: "live", worktreePath: worktree.path, title: "Active task", updatedAt: 800, live: true, state: "running" },
+    { id: "question", worktreePath: worktree.path, title: "Waiting task", updatedAt: 100, live: true, state: "waiting" },
+  ] as Agent[];
+  const state = { agents, attention: [] } as unknown as WorkspaceState;
+  assert.equal(worktreeSummary(state, worktree)?.id, "question");
+  agents[2].state = "completed"; agents[2].live = false;
+  assert.equal(worktreeSummary(state, worktree)?.id, "live");
+  agents[1].live = false;
+  assert.equal(worktreeSummary(state, worktree)?.id, "saved");
 });
