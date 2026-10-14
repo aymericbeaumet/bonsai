@@ -185,7 +185,7 @@ impl TestRepo {
             std::fs::write(
                 dir.join(format!("{name}.cmd")),
                 format!(
-                    "@echo %*> \"{}\"\r\n@cd > \"{}\"\r\n@echo %_BONSAI_WRAPPED%> \"{}\"\r\n",
+                    "@echo(%*> \"{}\"\r\n@cd > \"{}\"\r\n@echo(%_BONSAI_WRAPPED%> \"{}\"\r\n",
                     args.display(),
                     cwd.display(),
                     wrapped.display()
@@ -2746,7 +2746,12 @@ fn hq_json_discovers_every_project_main_external_and_broken_worktree() {
         .unwrap();
     assert!(output.status.success());
     let second_worktree = PathBuf::from(String::from_utf8_lossy(&output.stdout).trim());
-    let orphan = first.root.join("local/lost/ab/stale");
+    let orphan = first
+        .root
+        .join("local")
+        .join("lost")
+        .join("ab")
+        .join("stale");
     std::fs::create_dir_all(&orphan).unwrap();
     std::fs::write(orphan.join(".git"), "gitdir: missing\n").unwrap();
     let state = hq_json(&first, &first.dir);

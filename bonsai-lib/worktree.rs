@@ -179,7 +179,9 @@ pub fn find_worktree_dirs(root: &Path) -> Vec<PathBuf> {
 pub fn find_worktree_dirs_checked(root: &Path) -> std::io::Result<Vec<PathBuf>> {
     let mut found = Vec::new();
     let root = match std::fs::canonicalize(root) {
-        Ok(root) => root,
+        // `\\?\` prefixes make the printed path disagree with the path git
+        // and the caller already hold.
+        Ok(root) => crate::paths::simplify(root),
         Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(found),
         Err(error) => return Err(error),
     };

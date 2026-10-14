@@ -227,7 +227,9 @@ fn project(config: &Config, common: &Path, source: &Path) -> Result<Project> {
     Ok(Project {
         id: common.to_string_lossy().into_owned(),
         name,
-        path: action_path,
+        // Git on Windows reports `C:/...` while canonical checkouts use
+        // `C:\...`. Emit one form so JSON paths match `bonsai add`.
+        path: canonicalize_or_self(&action_path),
         remote,
         worktrees,
     })

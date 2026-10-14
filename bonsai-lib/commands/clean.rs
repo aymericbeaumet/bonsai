@@ -437,13 +437,13 @@ fn execute(
     crate::workspace::sync_quietly(repo, config);
     if let Err(error) = outcome {
         return Err(RemovalFailure {
-            recovery: cd_home.then(|| repo.main_root.clone()),
+            recovery: cd_home.then(|| crate::paths::canonicalize_or_self(&repo.main_root)),
             completed: report.removed.clone(),
             error,
         }
         .into());
     }
-    Ok(cd_home.then(|| repo.main_root.clone()))
+    Ok(cd_home.then(|| crate::paths::canonicalize_or_self(&repo.main_root)))
 }
 
 /// Squash-merge detection: synthesize a commit holding the branch's whole
