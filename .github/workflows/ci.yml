@@ -46,7 +46,7 @@ jobs:
         with:
           node-version: '26'
           package-manager-cache: false
-      - uses: astral-sh/setup-uv@v10
+      - uses: astral-sh/setup-uv@v10.3.0
         if: matrix.name == 'linux-amd64'
         with:
           version: '0.13.1'
