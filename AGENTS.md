@@ -13,29 +13,54 @@
 - Verify agent-facing changes with the existing CLI tests for printed and
   installed content. Test their shared-source relationship rather than
   pinning prose fragments that would make editorial changes brittle.
+- The root package is `bonsai-cli` and builds the `bonsai` binary.
+  `bonsai-lib` is the library, imported as `bonsai`. Keep both versions and
+  the CLI's dependency requirement in sync. `cargo install --path .` installs
+  the CLI. CLI sources and integration tests live in `bonsai-cli/`; library
+  sources live in `bonsai-lib/`. The root package embeds `skills/bonsai/SKILL.md`
+  so publication does not reach outside the library crate.
 - Before finishing, run the CI checks: `cargo fmt --check`,
-  `cargo clippy --all-targets -- -D warnings`, and `cargo test`.
-- The browser workspace is embedded from `web/dist`; after editing `web/src`,
-  run `npm ci` and `npm run check` in `web/` and include the rebuilt assets.
-  Rust builds must remain usable without Node.js. See
-  [browser architecture](docs/browser-workspace.md) for API and lifecycle rules.
-- Bonsai commands launched from HQ must use the executable and real PTYs so CLI
-  configuration, prompts, and worktree ownership rules remain authoritative.
-  Keep HTTP and WebSocket authentication, loopback Host/Origin checks, and
-  terminal cleanup covered when changing server routes.
-- Use tmux's native session operations and preserve its shell configuration;
-  do not add persistent startup files or a Bonsai shell launcher for tmux.
-- Keep worktree inventory independent of runtime activity. Runtime adapters
-  annotate existing checkouts; match pane directories to the deepest canonical
-  worktree and keep idle worktrees visible.
-- Provider lifecycle observations determine agent state; tmux focus and generic
-  process names do not. Keep subscription probes separate from runtime discovery,
-  and revalidate exact session/request identities before provider controls.
-- Agent integration tests must isolate provider homes and the HQ store. Disable
-  automatic setup in server fixtures so tests cannot edit personal tool settings.
-- Capture the working directory and exact target path when opening an HQ
-  action dialog. Inventory refreshes must never retarget a pending command
-  or removal confirmation.
+  `cargo clippy --all-targets -- -D warnings`, `cargo test`, and
+  `cargo package --workspace --locked`.
+- `bonsai hq` is a terminal worktree list. Enter, `o`, and Ctrl-I open the
+  selected project and list its checkouts by branch. Ctrl-O and Esc go up
+  one step: clear a search, leave the command line, then leave the project.
+  `:` runs
+  add, remove, clean, and prune for that project, with the same confirmation
+  rules as the CLI (`yes` stays false; remove does not pass `--force`).
+  Inventory is Git checkouts under the bonsai root, workspace folder
+  references, and the project where hq starts. Do not add a browser, a
+  server, or a second UI. Do not run a shell or tmux inside hq.
+- Paint the worktree list before git status. Status and footprints stream in
+  afterwards. `--json` waits for both. The on-screen list starts in
+  alphabetical order by host, owner, and repository. `s` cycles between that
+  and most recent. Keep the JSON inventory in project-name order. The home list is
+  one row per project and shows the host, then the repository owner parsed
+  from the remote, not the branch. A heading names each visible column:
+  host, owner, project, branch, and age. An open tree and an open project use
+  a ruled frame; the home list stays a table. `t` toggles the home list between that row and a tree of
+  host, then owner, then repository, and leaves a project detail to show the tree.
+  Host, owner, and project each have their own colour, in the table and the tree.
+  Enter, `o`, and Ctrl-I, and any non-empty `/` search, list that project's
+  checkouts by branch. Ctrl-O and Esc step back. The `/` filter and `:` command line share readline
+  editing (Ctrl-B/F, Ctrl-A/E, Ctrl-W, Ctrl-U, Ctrl-K, Ctrl-D, Alt word
+  keys). Do not append or pop those strings directly. Outside those fields,
+  arrows, Ctrl-Y, and Ctrl-E move one row, Ctrl-U and Ctrl-D move half a
+  page, `gg` jumps to the top, and `G` jumps to the bottom. The cursor moves
+  inside the window, and the list scrolls when it comes within `hq.scrolloff`
+  rows of the top or bottom (default 10). `/` also accepts
+  `user:` and `organisation:` (`org:`,
+  `organization:`). GitHub owner kind is resolved off the input thread and
+  cached at `$XDG_CONFIG_HOME/bonsai/owners.json`; until it is known, or for
+  any other host, either prefix matches the owner text. Do not block the list
+  on that lookup. Paths stay on the status line. A missing checkout is marked
+  `missing` and is not passed to git. Every hq warning is appended to
+  `~/.local/state/bonsai/hq.log` (`XDG_STATE_HOME` overrides the directory,
+  `_BONSAI_HQ_LOG` overrides the file, and `0` disables it).
+- Measure `bonsai hq` footprints off the input thread, after the list is on
+  screen. `shared` means a dependency directory is a symlink, contains
+  hardlinked files, or lives in an external store such as Go modules.
+  Copy-on-write and clonefile clones report their full logical size as `local`.
 - `BONSAI_*` environment variables are strict configuration keys. Prefix
   internal process/bootstrap/test variables with `_BONSAI_` so they cannot
   make normal commands fail configuration parsing.

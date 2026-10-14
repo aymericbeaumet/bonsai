@@ -8,52 +8,43 @@ license = "MIT"
 description = "Ergonomic git worktree manager with a global worktree root"
 repository = "https://github.com/aymericbeaumet/bonsai"
 readme = "readme.md"
+include = ["bonsai-cli/", "skills/", "readme.md", "LICENSE"]
 keywords = ["git", "worktree", "cli"]
 categories = ["command-line-utilities", "development-tools"]
 
 [[bin]]
 name = "bonsai"
-path = "src/main.rs"
+path = "bonsai-cli/main.rs"
+
+[[test]]
+name = "cli"
+path = "bonsai-cli/tests/cli.rs"
+
+[[test]]
+name = "safety"
+path = "bonsai-cli/tests/safety.rs"
 
 [dependencies]
 anyhow = "1"
-axum = { version = "0.8", features = ["ws"] }
+bonsai = { package = "bonsai-lib", path = "bonsai-lib", version = "0.1.1" }
 clap = { version = "4", features = ["derive"] }
 clap_complete = "4"
-crossterm = "0.29"
-figment = { version = "0.10", features = ["toml", "env"] }
-futures-util = "0.3"
-glob = "0.3"
-inquire = "0.9"
-jsonc-parser = { version = "0.33.1", features = ["cst", "serde", "serde_json"] }
-portable-pty = "0.9"
-rand = "0.9"
-ratatui = "0.30"
-rusqlite = { version = "0.40", features = ["bundled"] }
-serde = { version = "1", features = ["derive"] }
-serde_json = "1"
-serde_yaml = "0.9"
-sha2 = "0.11"
-shlex = "1"
-skim = { version = "5.6", default-features = false }
-slug = "0.1"
-tabwriter = "1.4"
-tempfile = "3"
-thiserror = "2"
-tokio = { version = "1", features = ["full"] }
-toml = "1.1"
-tungstenite = "0.29"
-
-[target.'cfg(unix)'.dependencies]
-libc = "0.2"
-nix = { version = "0.30", features = ["signal", "process", "fs", "poll"] }
-signal-hook = "0.3"
 
 [dev-dependencies]
 assert_cmd = "2"
-figment = { version = "0.10", features = ["test"] }
+portable-pty = "0.9"
 predicates = "3"
-tower = { version = "0.5", features = ["util"] }
+rusqlite = { version = "0.40", features = ["bundled"] }
+serde_json = "1"
+tempfile = "3"
+
+[target.'cfg(unix)'.dev-dependencies]
+libc = "0.2"
+
+[workspace]
+members = ["bonsai-lib"]
+default-members = [".", "bonsai-lib"]
+resolver = "3"
 
 [profile.dev]
 opt-level = 0

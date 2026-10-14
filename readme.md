@@ -12,9 +12,8 @@ bonsai add fix-parser     # creates branch + worktree, cds into it
 bonsai clean              # removes merged worktrees and their branches
 ```
 
-Run `bonsai hq` for terminal and browser interfaces to all your projects:
-fuzzy navigation, a worktree constellation, Bonsai commands, and shared
-interactive terminals.
+Run `bonsai hq` to browse every project in the terminal and open the one
+you pick.
 
 ## Install
 
@@ -25,11 +24,15 @@ Windows — amd64 and arm64):
 mise use -g github:aymericbeaumet/bonsai
 ```
 
-Or build from source:
+Or with Cargo:
 
 ```sh
-cargo install --git https://github.com/aymericbeaumet/bonsai bonsai-cli
+cargo install --locked bonsai-cli
 ```
+
+From a clone, `cargo install --path . --locked` builds the same `bonsai`
+binary. The `bonsai-cli` package provides that binary. The `bonsai-lib`
+package is the Rust library behind it.
 
 Then enable the shell integration (auto-cd + completions) in your rc file:
 
@@ -59,18 +62,24 @@ wrapper loaded. The binary detects that mismatch and prints the exact
 
 ## Commands
 
+Inside a repository, commands act on that project; `-a`/`--all` widens them
+to every project under the root. Outside a repository every project is in
+scope, and commands that need one project (`add`, `start`) prompt for it.
+`-C <dir>` (`--cwd`) runs bonsai as if it was started in `<dir>`, like
+`git -C`, and composes with `-a`.
+
 | Command | Description |
 |---|---|
-| `bonsai hq` | Run persistent headquarters with a TUI and browser workspace sharing worktrees and terminal sessions. `--port` selects the web port (default `47831`, `0` chooses an available port); `--no-open` skips opening the browser; `--no-tui` runs headlessly. |
-| `bonsai start [claude\|codex\|opencode]` | Start a new coding session in the current worktree. Choose among installed providers when omitted; a single installed provider is selected automatically. `--prompt` supplies an initial prompt. |
-| `bonsai add [branch]` | Preserve an existing branch name, or slugify a new name (preserving `/`), fetch the remote, then create a worktree under the bonsai root and cd into it. New branches start from the latest default branch; remote branches get a local tracking branch. No argument opens a fuzzy prompt (type a new name to create it). |
-| `bonsai list` (`ls`) | List every Git-registered worktree for the current repo, including external worktrees created by other tools. `--all` lists every Bonsai-managed worktree across projects; `--status` adds a dirty marker. |
-| `bonsai cd [query]` | Fuzzy-jump between registered worktrees, including external ones, listed most recently worked-in first with a color-coded last-change age (green = today, yellow = this week, dim = older). Works globally across Bonsai-managed worktrees when run outside a repo. |
-| `bonsai resume [query]` | Fuzzy-search one recent-first list of resumable top-level Claude Code, Codex, and OpenCode sessions across every registered worktree of the current project, then resume the selected harness in its original directory. |
-| `bonsai workspace` | Refresh and print the repo's `.code-workspace` file, including registered external worktrees: `code "$(bonsai workspace)"`. |
-| `bonsai remove [branch-or-path…]` (`rm`) | Remove worktrees (fuzzy multi-pick without arguments). Exact managed paths also support detached worktrees. Keeps the branch unless `-d`; `--force` discards uncommitted changes. Safe to run from inside the worktree being removed. |
-| `bonsai clean` | Remove worktrees whose branches are merged or squash-merged into the default branch, then delete those branches. A missing upstream alone never proves integration. Fetches `--prune` first (`--no-fetch` to skip), always shows the plan, `-n`/`--dry-run`, `-y`/`--yes` (alias `-f`/`--force`). Dirty worktrees are never touched. |
-| `bonsai prune` | Clean up stale worktree registrations, orphaned directories, and empty dirs. `--all` sweeps the whole root, including worktrees of repos whose clone was deleted. |
+| `bonsai hq` | Browse the current project, or every project with `-a`, in the terminal. Enter, `o`, and Ctrl-I open the selected project. Ctrl-O and Esc go up. `--json` prints the inventory and exits. |
+| `bonsai start [claude\|codex\|opencode]` | Start a new coding session in the current worktree. Choose among installed providers when omitted; a single installed provider is selected automatically. `--prompt` supplies an initial prompt. `-a` picks a worktree from any project first. |
+| `bonsai add [branch]` | Preserve an existing branch name, or slugify a new name (preserving `/`), fetch the remote, then create a worktree under the bonsai root and cd into it. New branches start from the latest default branch; remote branches get a local tracking branch. No argument opens a fuzzy prompt (type a new name to create it). `-a` picks the project first. |
+| `bonsai list` (`ls`) | List every Git-registered worktree for the current repo, including external worktrees created by other tools. `-a` lists every project, prefixed by repo id; `--status` adds a dirty marker. |
+| `bonsai cd [query]` | Fuzzy-jump between registered worktrees, including external ones, listed most recently worked-in first with a color-coded last-change age (green = today, yellow = this week, dim = older). `-a` jumps across every project. |
+| `bonsai resume [query]` | Fuzzy-search one recent-first list of resumable top-level Claude Code, Codex, and OpenCode sessions across every registered worktree of the current project, then resume the selected harness in its original directory. `-a` searches every project. |
+| `bonsai workspace` | Refresh and print the repo's `.code-workspace` file, including registered external worktrees: `code "$(bonsai workspace)"`. `-a` prints the global file. |
+| `bonsai remove [branch-or-path…]` (`rm`) | Remove worktrees (fuzzy multi-pick without arguments). Exact managed paths also support detached worktrees. Keeps the branch unless `-d`; `--force` discards uncommitted changes. Safe to run from inside the worktree being removed. With `-a`, a branch selects its worktree in every project. |
+| `bonsai clean` | Remove worktrees whose branches are merged or squash-merged into the default branch, then delete those branches. A missing upstream alone never proves integration. Fetches `--prune` first (`--no-fetch` to skip), always shows the plan, `-n`/`--dry-run`, `-y`/`--yes` (alias `-f`/`--force`). Dirty worktrees are never touched. `-a` confirms one combined plan for every project. |
+| `bonsai prune` | Clean up stale worktree registrations, orphaned directories, and empty dirs. `-a` prunes every project and sweeps the whole root, including worktrees of repos whose clone was deleted. |
 | `bonsai init <shell>` | Print the shell wrapper (zsh, bash, fish). |
 | `bonsai agents` | Print a usage contract for AI coding agents, ready for `bonsai agents >> AGENTS.md`. |
 | `bonsai skill [install]` | Print the bundled Agent Skill, or install it for detected harnesses (Claude Code, Codex, OpenCode, Cursor, Pi). |
@@ -137,6 +146,7 @@ workspace = true            # maintain a .code-workspace file per repo
 [add]
 fetch = true                # fetch --prune before creating (set false for offline use)
 install = true              # auto-install deps (pnpm/npm/yarn/bun/cargo/uv)
+clone_cargo_target = true   # copy-on-write clone Cargo's target/ into new worktrees
 post_add = "mise install"   # runs after automatic dependency installation
 # untracked files copied into new worktrees; setting this replaces the
 # defaults: [".env", ".env.*", ".envrc", ".mcp.json", "CLAUDE.local.md",
@@ -146,6 +156,9 @@ copy = [".env*", ".envrc"]
 [clean]
 fetch = true                # fetch --prune before computing merged branches
 protected = ["release/*"]   # branch globs never cleaned
+
+[hq]
+scrolloff = 10              # rows kept above and below the cursor, as in vim
 ```
 
 ## Working from inside a worktree
@@ -237,69 +250,50 @@ Standard location overrides are respected: `CLAUDE_CONFIG_DIR`, `CODEX_HOME`,
 ## Headquarters
 
 ```sh
-bonsai hq                              # TUI and browser, shared sessions
-bonsai hq --no-open --port 47831       # TUI with web server on a chosen port
-bonsai hq --no-tui --no-open --port 0  # headless server, print private link
+bonsai hq          # browse every worktree
+bonsai hq --json   # print the same inventory and exit
 ```
 
-`hq` is a persistent process running both interfaces. `start` opens a new coding session in
-the current worktree, and `resume` finds and restores a past coding session.
-Both session commands are available from headquarters.
+`hq` lists every project under the bonsai root, plus editor workspace folders
+and the project you start it from. A checkout with no bonsai worktrees yet
+still appears. Each project's main checkout, bonsai worktrees, and external
+worktrees are shown together.
 
-Both interfaces open a compact worktree list ordered by **Needs you**, **Working**,
-**Recent**, and collapsed **Older** worktrees. Expand a worktree to see its coding
-sessions and child agents, with tool, model, task, state, and tmux location.
-Subscription allowance and reset times appear when the tool exposes them.
-The graph remains available as a secondary browser view.
+The home list is one row per project, in alphabetical order by host, owner,
+and repository. `s` cycles between that and most recent. Each row
+shows the host, the repository owner, and the name. The branch is not on
+that row. A heading names each visible column. An open tree and an open
+project use a ruled frame; the home list stays a table. `t`
+opens and closes the tree, grouping checkouts by host, then owner, then
+repository. Host, owner, and project each have their own colour, in the table and in the tree. Enter,
+`o`, and Ctrl-I open the project and list every checkout by branch. Ctrl-O
+and Esc go up one step, clearing a search or leaving the project. `j`/`k`
+or the arrow keys move one row, as do Ctrl-E and Ctrl-Y. Ctrl-D and Ctrl-U
+move half a page. `gg` jumps to the top and `G` to the bottom. The cursor
+moves inside the window, and the list scrolls when it comes within
+`hq.scrolloff` rows of the top or bottom (default 10). `/` fuzzy-finds by host, owner, project, branch, path,
+stack, or harness and lists every match. The `/` line and the `:` command line take the usual
+readline keys: Ctrl-B/F move, Ctrl-A/E jump, Ctrl-W deletes a word, Ctrl-U
+deletes back to the start, and Ctrl-K deletes to the end. `user:<name>` and
+`organisation:<name>` (also `org:` and
+`organization:`) match the owner. A GitHub owner is classified in the
+background; until that is known, or on any other host, either prefix matches
+the owner text. `:` runs add, remove, clean, and prune for the selected
+project, with the same confirmation rules as the CLI. `r` refreshes. `q`
+quits. The checkout path stays on the status line.
 
-Use arrows or `j`/`k` to navigate, `/` to search, Left/Right to collapse or expand,
-and `[`/`]` to move between attention items. Enter expands a worktree or attaches
-its selected agent; `t` opens a new shell. Ctrl+] returns from the terminal to HQ
-without ending the session. Search includes older worktrees and session titles.
-Both interfaces share inventory, attention, and terminal sessions.
+Each row shows the host and owner on the home list, or the branch inside a project
+and in search results, plus age, flags, checkout size, project stack,
+dependency-directory sizes, whether those directories are local or shared,
+and which of claude, codex, grok, or opencode has a session there. Sizes
+appear on the same row once measured. Shared dependencies are symlinks,
+hardlinked files, or external stores such as Go modules. Copy-on-write clones
+report their full logical size as local. A checkout whose directory is gone
+is marked missing and is not passed to git. Warnings are appended to
+`~/.local/state/bonsai/hq.log`. Git status fills in after the list appears.
+`--json` waits for status and sizes and includes `footprint` on each worktree.
 
-Discovery includes every Git-registered worktree of each project under the
-configured root, editor workspace references, and the project where HQ starts.
-Worktrees remain discoverable when no tool is running. Agent activity is separate
-from tmux focus: selecting a pane does not mean its agent is working. Tmux
-attachments target the chosen window and pane, including inactive windows.
-
-HQ automatically installs supported local integrations for Codex, Claude Code,
-and OpenCode while preserving existing tool settings. The Integrations view shows
-connection and activation status and offers repair, disable, and removal. Codex
-hooks still require native `/hooks` trust; OpenCode's bridge loads on its next
-launch. Existing sessions remain navigable while richer integration is pending.
-Unsupported state, quota, or control capabilities are shown as unavailable.
-
-Start or resume agents through Bonsai's native interactive commands. Connected
-runtimes also expose reply, interrupt, and approval controls where supported;
-other sessions open in their native terminal. Worktree forms and the command
-runner retain the CLI's configuration, prompts, and removal protections.
-
-Desktop notifications and a tmux status count are optional:
-
-```toml
-[hq]
-auto_setup = true
-notifications = false
-tmux_status = false
-```
-
-Terminal tabs are real pseudoterminals: use your shell, terminal editor,
-Git tools, or coding assistants with normal input, colors, resizing, and
-interactive prompts. Tabs and recent output survive browser reconnection
-while the server runs. With tmux installed, create a persistent session for
-a checkout or attach an existing session. Closing its browser terminal
-detaches the tmux client; the tmux session continues running.
-
-The server binds to `127.0.0.1` (port `47831` by default). Its private launch
-link grants access to the local shell; use that link to connect another
-browser tab. Quitting HQ stops Bonsai and its ordinary terminals. Tmux sessions
-survive a server restart. Browser assets are embedded in the binary, so
-Node.js and an internet connection are unnecessary at runtime.
-
-See [browser architecture and development](docs/browser-workspace.md) for
-the API, terminal lifecycle, and frontend build commands.
+`start` and `resume` stay separate commands. Run them in a worktree.
 
 ## Desktop editors
 
@@ -322,7 +316,7 @@ the file, so the tree updates live as bonsai creates and removes worktrees:
 
 ```sh
 code "$(bonsai workspace)"           # this repo's worktrees
-cursor "$(bonsai workspace --all)"   # everything under the bonsai root
+cursor "$(bonsai workspace -a)"      # everything under the bonsai root
 ```
 
 Disable the file maintenance with `workspace = false`.
@@ -364,7 +358,8 @@ lists stay readable. Jump from a terminal with `bonsai cd`.
   | pnpm | Warns until `virtualStoreType: global` (or the legacy `enableGlobalVirtualStore: true`) is set in `pnpm-workspace.yaml`; see [pnpm's worktree guide](https://pnpm.io/git-worktrees). |
   | Bun | Warns until `[install]` uses `linker = "isolated"` and `globalStore = true`; see [Bun's global virtual store](https://bun.sh/docs/pm/global-store). |
   | Yarn Berry | Yarn 4's global cache + PnP defaults are optimized; Yarn 2/3 needs `enableGlobalCache: true`, and `node-modules` needs `nmMode: hardlinks-global`. See [Yarn settings](https://yarnpkg.com/configuration/yarnrc/). |
-  | npm, Yarn Classic, Cargo, uv | Their default global download/source caches already give Bonsai's frozen install commands the appropriate sharing. uv warns if its cache is explicitly disabled or placed inside the worktree. |
+  | Cargo | Downloads are shared through `CARGO_HOME`. Build output is per checkout, so `add` copy-on-write clones `target/` from your current worktree (then the main one). See [Cargo build output](#cargo-build-output). |
+  | npm, Yarn Classic, uv | Their default global download/source caches already give Bonsai's frozen install commands the appropriate sharing. uv warns if its cache is explicitly disabled or placed inside the worktree. |
 
   Missing tools and failed installs produce an incomplete-setup summary with
   the command to retry from the new worktree. Installer and hook output streams
@@ -385,6 +380,34 @@ lists stay readable. Jump from a terminal with `bonsai cd`.
   Storage warnings are suggestions based on recognized settings, not a complete
   package-manager configuration evaluator. Bonsai does not change linker or
   toolchain configuration.
+- **backups, sync, and indexing**: the bonsai root holds disposable checkouts
+  and build output, so tools that walk your home directory should ignore it,
+  the same way they ignore build directories. Exclude it from Spotlight
+  (System Settings → Spotlight → Search Privacy) and other desktop indexers,
+  keep `root` outside cloud-synced folders such as iCloud Drive, Dropbox, or
+  OneDrive, and exclude it from backups such as Time Machine
+  (`tmutil addexclusion ~/.bonsai`) once your work is pushed regularly,
+  because uncommitted changes in an excluded worktree are not backed up.
+
+### Cargo build output
+
+Cargo shares downloaded sources in `CARGO_HOME`, but compiles into a
+`target/` directory inside each checkout, so every worktree would otherwise
+rebuild and store every dependency again. When a new worktree has a
+`Cargo.toml`, `bonsai add` asks Cargo where its target and build directories
+are and clones them from your current worktree, then the main checkout, with
+copy-on-write (`clonefile` on APFS, `FICLONE` on Btrfs, XFS, and other
+reflink-capable Linux filesystems). The clone takes seconds even for
+multi-gigabyte targets, shares disk blocks until either side rebuilds them,
+and leaves only the workspace's own crates to recompile. Tools such as `du`
+count shared blocks in every clone; free space reflects the real usage.
+
+Bonsai never falls back to a full copy: on filesystems without copy-on-write,
+across volumes, and on Windows, it reports that `target/` was not seeded and
+Cargo builds as usual. Target directories outside the worktree, such as a
+shared `CARGO_TARGET_DIR` or `build.target-dir`, are left alone. Disable
+cloning with `[add] clone_cargo_target = false`. Removing a worktree with
+`remove` or `clean` frees the blocks only it was using.
 
 ## How it works
 
@@ -401,12 +424,34 @@ lists stay readable. Jump from a terminal with `bonsai cd`.
   line to cd. Other commands and captured output pass through directly. Prompts
   render on stderr, so fuzzy pickers work even inside `$(...)`.
 
+## Use as a Rust library
+
+Worktree discovery and the commands behind the CLI are packaged as
+`bonsai-lib`, which the CLI builds on and which is imported as `bonsai`.
+For the 0.1.1 release, add:
+
+```toml
+[dependencies]
+bonsai = { package = "bonsai-lib", version = "0.1" }
+```
+
+```rust
+use bonsai::repo::repo_id_from_url;
+
+let id = repo_id_from_url("https://github.com/aymericbeaumet/bonsai.git");
+assert_eq!(id.as_deref(), Some("github.com/aymericbeaumet/bonsai"));
+```
+
+API documentation is available on [docs.rs](https://docs.rs/bonsai-lib).
+In a clone, run `cargo doc --open -p bonsai-lib`.
+
 ## Development checks
 
 ```sh
 cargo test --locked
 cargo clippy --locked --all-targets -- -D warnings
 cargo fmt --check
+cargo package --workspace --locked
 cargo build --release --locked
 python3 tests/terminal.py target/release/bonsai
 cargo test --locked --test cli real_package_managers_ -- --ignored

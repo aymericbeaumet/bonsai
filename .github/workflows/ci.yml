@@ -9,32 +9,6 @@ env:
   CARGO_TERM_COLOR: always
 
 jobs:
-  web:
-    name: browser
-    runs-on: ubuntu-latest
-    defaults:
-      run:
-        working-directory: web
-    steps:
-      - uses: actions/checkout@v7
-      - uses: actions/setup-node@v6
-        with:
-          node-version: 24
-          cache: npm
-          cache-dependency-path: web/package-lock.json
-      - run: npm ci
-      - run: npm run check
-      - run: git diff --exit-code -- dist
-      - uses: dtolnay/rust-toolchain@stable
-      - uses: Swatinem/rust-cache@v2
-      - run: cargo build --locked --manifest-path ../Cargo.toml
-      - name: Install tmux for browser runtime tests
-        run: |
-          sudo apt-get update
-          sudo apt-get install --yes tmux
-      - run: npx playwright install --with-deps chromium
-      - run: npm run test:e2e
-
   test:
     name: test (${{ matrix.name }})
     strategy:
@@ -64,21 +38,24 @@ jobs:
         if: matrix.name == 'linux-amd64'
       - run: cargo clippy --locked --all-targets -- -D warnings
       - run: cargo test --locked
+      - name: Package both crates
+        if: matrix.name == 'linux-amd64'
+        run: cargo package --workspace --locked
       - uses: actions/setup-node@v7
         if: matrix.name == 'linux-amd64'
         with:
-          node-version: '24'
+          node-version: '26'
           package-manager-cache: false
       - uses: astral-sh/setup-uv@v10
         if: matrix.name == 'linux-amd64'
         with:
-          version: '0.11.15'
-          python-version: '3.13'
+          version: '0.13.1'
+          python-version: '3.14'
           enable-cache: false
       - name: Real package-manager smoke tests
         if: matrix.name == 'linux-amd64'
         run: |
-          uv python install 3.13
+          uv python install 3.14
           cargo test --locked --test cli real_package_managers_ -- --ignored
       - name: Release terminal and benchmark smoke tests
         if: matrix.name == 'linux-amd64'

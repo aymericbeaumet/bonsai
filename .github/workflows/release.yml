@@ -63,11 +63,14 @@ jobs:
       - uses: actions/checkout@v7
       - uses: dtolnay/rust-toolchain@stable
       - uses: Swatinem/rust-cache@v2
-      # Stamp the computed version (not committed) so `bonsai --version` reports it.
+      # Stamp the computed version (not committed) on both crates so
+      # `bonsai --version` matches the library it was built with.
       - shell: bash
         env:
           VERSION: ${{ needs.version.outputs.version }}
-        run: perl -pi -e 's/^version = ".*"/version = "$ENV{VERSION}"/' Cargo.toml
+        run: |
+          perl -pi -e 's/^version = ".*"/version = "$ENV{VERSION}"/' Cargo.toml bonsai-lib/Cargo.toml
+          perl -pi -e 's/(package = "bonsai-lib", path = "bonsai-lib", version = ")[^"]+/${1}$ENV{VERSION}/' Cargo.toml
       - run: cargo build --release
       - shell: bash
         env:

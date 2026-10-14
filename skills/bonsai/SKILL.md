@@ -23,6 +23,11 @@ and explain the remaining blocker separately from your interpretation.
   (default root `~/.bonsai`). Branch names nest: `feat/x` → `feat/x/`.
 - Run bonsai from anywhere inside the repo — the main checkout or any
   worktree — it always operates on the repository as a whole.
+- Scope: inside a repo, commands act on that project; `-a`/`--all` widens
+  them to every project under the root. Outside a repo every project is in
+  scope, including for `clean`, `remove`, and `prune`. `-C <dir>`
+  (`--cwd`) runs bonsai as if started in `<dir>`, like `git -C`; prefer it
+  to scope a command to one project from elsewhere.
 - `add` preserves existing branch names and slugifies new inputs segment-by-segment
   while preserving `/` as a nested branch/path delimiter, creates branches automatically, and fetches
   the remote default branch first. Missing arguments open fuzzy pickers on a
@@ -67,13 +72,14 @@ bonsai clean --yes              # execute when cleanup is authorized
   A preview-only request ends with the plan. When the user authorized
   cleanup and the inspected targets fit that scope, execute with `--yes`;
   the user need not name the flag. Preserve the preview's scope flags.
-- `clean` removes eligible worktrees and their branches across the current
-  repo. A fresh worktree with no commits can qualify; exclude active work
+- `clean` removes eligible worktrees and their branches across the projects
+  in scope. A fresh worktree with no commits can qualify; exclude active work
   from the intended cleanup. For named targets or a subset of the plan, use
   `bonsai remove <branch>`; add `-d` only when branch deletion is intended.
 - `prune` has no dry-run mode. Inspect registrations and candidate directory
   contents before deleting orphans, which may contain uncommitted work.
-  Keep `prune --all`, which spans repositories, within the user's scope.
+  Keep `-a`/`--all`, and runs outside a repo, which span repositories,
+  within the user's scope.
 - On `clean` and `prune`, `--force` is an alias of `--yes`: it skips the
   prompt. `clean` still skips dirty worktrees. On `remove`, `--force` can
   discard uncommitted files and, with `-d`, delete an unmerged branch. Use

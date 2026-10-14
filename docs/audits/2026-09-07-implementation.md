@@ -105,9 +105,8 @@ fixture comparison above was run sequentially.
 ## Deliberate limits
 
 This workflow audit added no commands, providers, persistent session cache,
-or background daemon; [headquarters](../browser-workspace.md) is a separate
-feature. Existing bounded concurrency remains: these profiles do not justify
-increasing it globally. Further scheduler changes should follow resource
+or background daemon; headquarters was a separate feature. Existing bounded
+concurrency remains: these profiles do not justify increasing it globally. Further scheduler changes should follow resource
 profiling, especially for status and broad discovery.
 
 Other Git clients and editors do not honor Bonsai locks. Expected-OID checks and
