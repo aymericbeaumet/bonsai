@@ -553,7 +553,10 @@ mod tests {
         let original = "{\"folders\":[{\"path\":\"ab/one\",\"name\":\"one\"}],\"settings\":{\"editor.fontSize\":15}}";
         std::fs::write(&file, original).unwrap();
         let old = std::time::SystemTime::UNIX_EPOCH + std::time::Duration::from_secs(1_000_000);
-        std::fs::File::open(&file)
+        // A read-only handle cannot change timestamps on Windows (os error 5).
+        std::fs::OpenOptions::new()
+            .write(true)
+            .open(&file)
             .unwrap()
             .set_times(std::fs::FileTimes::new().set_modified(old))
             .unwrap();
