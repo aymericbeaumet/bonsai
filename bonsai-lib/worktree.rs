@@ -1,0 +1,332 @@
+use std::path::{Path, PathBuf};
+
+/// One entry of `git worktree list --porcelain -z`.
+#[derive(Debug, Clone, Default)]
+pub struct Worktree {
+    pub path: PathBuf,
+    pub branch: Option<String>,
+    pub head: Option<String>,
+    pub is_bare: bool,
+    pub is_detached: bool,
+    pub is_locked: bool,
+    pub is_prunable: bool,
+}
+
+impl Worktree {
+    /// The main worktree is always the first entry emitted by git.
+    pub fn parse_list(bytes: &[u8]) -> Vec<Worktree> {
+        let mut worktrees = Vec::new();
+        let mut current: Option<Worktree> = None;
+        for field in bytes.split(|&b| b == 0) {
+            let field = String::from_utf8_lossy(field);
+            if field.is_empty() {
+                if let Some(wt) = current.take() {
+                    worktrees.push(wt);
+                }
+                continue;
+            }
+            let (key, value) = match field.split_once(' ') {
+                Some((k, v)) => (k, v),
+                None => (field.as_ref(), ""),
+            };
+            match key {
+                "worktree" => {
+                    if let Some(wt) = current.take() {
+                        worktrees.push(wt);
+                    }
+                    current = Some(Worktree {
+                        path: PathBuf::from(value),
+                        ..Default::default()
+                    });
+                }
+                _ => {
+                    let Some(wt) = current.as_mut() else { continue };
+                    match key {
+                        "HEAD" => wt.head = Some(value.to_string()),
+                        "branch" => {
+                            wt.branch = Some(
+                                value
+                                    .strip_prefix("refs/heads/")
+                                    .unwrap_or(value)
+                                    .to_string(),
+                            );
+                        }
+                        "bare" => wt.is_bare = true,
+                        "detached" => wt.is_detached = true,
+                        "locked" => wt.is_locked = true,
+                        "prunable" => wt.is_prunable = true,
+                        _ => {}
+                    }
+                }
+            }
+        }
+        if let Some(wt) = current.take() {
+            worktrees.push(wt);
+        }
+        worktrees
+    }
+}
+
+/// Where the worktree for a normalized `branch` lives. Slash-separated branch
+/// segments map verbatim to nested directories; git forbids ref conflicts
+/// (`foo` vs `foo/bar`), so this is collision-free with respect to branches.
+pub fn path_for_branch(repo_dir: &Path, branch: &str) -> PathBuf {
+    let mut path = repo_dir.to_path_buf();
+    for segment in branch.split('/') {
+        path.push(segment);
+    }
+    path
+}
+
+/// A directory is a linked worktree checkout iff it contains a `.git` *file*
+/// (the main worktree has a `.git` directory; intermediate dirs have neither).
+pub fn is_worktree_dir(path: &Path) -> bool {
+    std::fs::symlink_metadata(path.join(".git"))
+        .is_ok_and(|metadata| metadata.file_type().is_file())
+}
+
+/// After removing `removed`, delete now-empty parent directories walking up
+/// until (and excluding) `root`. Also removes `removed` itself if it is an
+/// empty leftover directory.
+pub fn cleanup_empty_dirs(removed: &Path, root: &Path) {
+    let mut dir = removed.to_path_buf();
+    loop {
+        if !dir.starts_with(root) || dir == root {
+            break;
+        }
+        if crate::paths::ensure_contained(&dir, root).is_err() {
+            break;
+        }
+        match std::fs::remove_dir(&dir) {
+            Ok(()) => {}
+            Err(_) => break, // non-empty or already gone with non-empty parent
+        }
+        match dir.parent() {
+            Some(parent) => dir = parent.to_path_buf(),
+            None => break,
+        }
+    }
+}
+
+/// The repo-id is the worktree's path relative to the root, minus the branch
+/// segments (`<root>/<repo-id>/<branch dirs...>`).
+pub fn repo_id_of(root: &Path, path: &Path, branch: Option<&str>) -> Option<String> {
+    let rel = path.strip_prefix(root).ok()?;
+    let segments: Vec<String> = rel
+        .components()
+        .map(|c| c.as_os_str().to_string_lossy().to_string())
+        .collect();
+    let branch_segments = branch.map_or(1, |b| b.split('/').count());
+    let keep = segments.len().checked_sub(branch_segments)?;
+    if keep == 0 {
+        return None;
+    }
+    Some(segments[..keep].join("/"))
+}
+
+/// Current branch read directly from a checkout's Git metadata. Global
+/// commands already discovered linked worktrees from their `.git` files, so
+/// spawning one Git process per checkout would only repeat this lookup.
+pub fn current_branch(worktree: &Path) -> Option<String> {
+    let head = std::fs::read_to_string(git_dir(worktree)?.join("HEAD")).ok()?;
+    head.trim()
+        .strip_prefix("ref: refs/heads/")
+        .filter(|branch| !branch.is_empty())
+        .map(str::to_string)
+}
+
+/// When the git metadata of `worktree` was last touched — a cheap proxy for
+/// "last worked in" that covers commits, staging, and checkouts without
+/// spawning git. Reads the mtime of the git dir's `index` (then `HEAD`),
+/// resolving the `.git` file indirection of linked worktrees; falls back to
+/// the directory's own mtime.
+pub fn last_activity(worktree: &Path) -> Option<std::time::SystemTime> {
+    let git_dir = git_dir(worktree)?;
+    for name in ["index", "HEAD"] {
+        if let Ok(mtime) = std::fs::metadata(git_dir.join(name)).and_then(|m| m.modified()) {
+            return Some(mtime);
+        }
+    }
+    std::fs::metadata(worktree).and_then(|m| m.modified()).ok()
+}
+
+fn git_dir(worktree: &Path) -> Option<PathBuf> {
+    let dot_git = worktree.join(".git");
+    if !dot_git.is_file() {
+        return Some(dot_git);
+    }
+    let content = std::fs::read_to_string(&dot_git).ok()?;
+    let target = PathBuf::from(content.strip_prefix("gitdir:")?.trim());
+    Some(if target.is_absolute() {
+        target
+    } else {
+        worktree.join(target)
+    })
+}
+
+/// Recursively find worktree checkout dirs (dirs containing a `.git` file)
+/// under `root`, without descending into checkouts themselves.
+pub fn find_worktree_dirs(root: &Path) -> Vec<PathBuf> {
+    match find_worktree_dirs_checked(root) {
+        Ok(found) => found,
+        Err(error) => {
+            eprintln!("bonsai: could not scan {}: {error}", root.display());
+            Vec::new()
+        }
+    }
+}
+
+pub fn find_worktree_dirs_checked(root: &Path) -> std::io::Result<Vec<PathBuf>> {
+    let mut found = Vec::new();
+    let root = match std::fs::canonicalize(root) {
+        // `\\?\` prefixes make the printed path disagree with the path git
+        // and the caller already hold.
+        Ok(root) => crate::paths::simplify(root),
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(found),
+        Err(error) => return Err(error),
+    };
+    let mut stack = vec![root.clone()];
+    while let Some(dir) = stack.pop() {
+        if !std::fs::symlink_metadata(&dir)?.is_dir() {
+            continue;
+        }
+        for entry in std::fs::read_dir(&dir)? {
+            let entry = entry?;
+            let path = entry.path();
+            if !entry.file_type()?.is_dir()
+                || path
+                    .file_name()
+                    .is_some_and(|n| n == ".git" || n == ".locks")
+            {
+                continue;
+            }
+            if is_worktree_dir(&path) {
+                found.push(path);
+            } else {
+                stack.push(path);
+            }
+        }
+    }
+    found.sort();
+    Ok(found)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn parses_porcelain_z_output() {
+        let bytes = b"worktree /repo\0HEAD 1111111111111111111111111111111111111111\0branch refs/heads/main\0\0worktree /b/feat\0HEAD 2222222222222222222222222222222222222222\0branch refs/heads/feature/login\0locked reason\0\0worktree /b/det\0HEAD 3333333333333333333333333333333333333333\0detached\0prunable gitdir file points to non-existent location\0\0";
+        let wts = Worktree::parse_list(bytes);
+        assert_eq!(wts.len(), 3);
+        assert_eq!(wts[0].path, PathBuf::from("/repo"));
+        assert_eq!(wts[0].branch.as_deref(), Some("main"));
+        assert!(!wts[0].is_locked);
+        assert_eq!(wts[1].branch.as_deref(), Some("feature/login"));
+        assert!(wts[1].is_locked);
+        assert!(wts[2].is_detached);
+        assert!(wts[2].is_prunable);
+        assert_eq!(wts[2].branch, None);
+    }
+
+    #[test]
+    fn parses_bare_entry() {
+        let bytes = b"worktree /repo.git\0bare\0\0";
+        let wts = Worktree::parse_list(bytes);
+        assert_eq!(wts.len(), 1);
+        assert!(wts[0].is_bare);
+    }
+
+    #[test]
+    fn parses_empty_input() {
+        assert!(Worktree::parse_list(b"").is_empty());
+    }
+
+    #[test]
+    fn repo_id_strips_branch_segments() {
+        let root = Path::new("/b");
+        let cases = [
+            (
+                "/b/github.com/o/r/feat",
+                Some("feat"),
+                Some("github.com/o/r"),
+            ),
+            (
+                "/b/github.com/o/r/feature/login",
+                Some("feature/login"),
+                Some("github.com/o/r"),
+            ),
+            ("/b/local/x-1234/feat", None, Some("local/x-1234")),
+            ("/b/feat", Some("feat"), None),
+            ("/elsewhere/feat", Some("feat"), None),
+        ];
+        for (path, branch, expected) in cases {
+            assert_eq!(
+                repo_id_of(root, Path::new(path), branch).as_deref(),
+                expected,
+                "path: {path}"
+            );
+        }
+    }
+
+    #[test]
+    fn branch_path_nests_slashes() {
+        assert_eq!(
+            path_for_branch(Path::new("/b/gh/o/r"), "feature/login"),
+            PathBuf::from("/b/gh/o/r/feature/login")
+        );
+    }
+
+    #[test]
+    fn last_activity_resolves_gitdir_indirection() {
+        let tmp = tempfile::tempdir().unwrap();
+        // Linked worktree: `.git` file pointing at a git dir with an index.
+        let gitdir = tmp.path().join("meta");
+        std::fs::create_dir_all(&gitdir).unwrap();
+        std::fs::write(gitdir.join("index"), "x").unwrap();
+        std::fs::write(gitdir.join("HEAD"), "ref: refs/heads/feature/test\n").unwrap();
+        let wt = tmp.path().join("wt");
+        std::fs::create_dir_all(&wt).unwrap();
+        std::fs::write(wt.join(".git"), format!("gitdir: {}\n", gitdir.display())).unwrap();
+        let expected = std::fs::metadata(gitdir.join("index"))
+            .unwrap()
+            .modified()
+            .unwrap();
+        assert_eq!(last_activity(&wt), Some(expected));
+        assert_eq!(current_branch(&wt).as_deref(), Some("feature/test"));
+
+        // Main checkout: `.git` directory, index missing -> HEAD mtime.
+        let main = tmp.path().join("main");
+        std::fs::create_dir_all(main.join(".git")).unwrap();
+        std::fs::write(main.join(".git/HEAD"), "ref: refs/heads/main\n").unwrap();
+        assert!(last_activity(&main).is_some());
+
+        // No git metadata at all -> directory mtime.
+        let bare_dir = tmp.path().join("plain");
+        std::fs::create_dir_all(&bare_dir).unwrap();
+        assert!(last_activity(&bare_dir).is_some());
+    }
+
+    #[test]
+    fn cleanup_stops_at_root() {
+        let tmp = tempfile::tempdir().unwrap();
+        let root = tmp.path().join("root");
+        let leaf = root.join("gh/o/r/feature/login");
+        std::fs::create_dir_all(&leaf).unwrap();
+        cleanup_empty_dirs(&leaf, &root);
+        assert!(!root.join("gh").exists());
+        assert!(root.exists());
+    }
+
+    #[test]
+    fn cleanup_keeps_non_empty_dirs() {
+        let tmp = tempfile::tempdir().unwrap();
+        let root = tmp.path().join("root");
+        std::fs::create_dir_all(root.join("gh/o/r/a")).unwrap();
+        std::fs::create_dir_all(root.join("gh/o/r/b")).unwrap();
+        cleanup_empty_dirs(&root.join("gh/o/r/a"), &root);
+        assert!(!root.join("gh/o/r/a").exists());
+        assert!(root.join("gh/o/r/b").exists());
+    }
+}
