@@ -22,6 +22,11 @@
 - Before finishing, run the CI checks: `cargo fmt --check`,
   `cargo clippy --all-targets -- -D warnings`, `cargo test`, and
   `cargo package --workspace --locked`.
+- Trust `.mise.toml` with `mise trust .mise.toml` and run
+  `mise install --locked rust node python uv` for development tools. Run checks
+  through `mise exec --` unless mise is
+  activated in the shell. Tool pins and platform checksums live in `.mise.toml`
+  and `mise.lock`.
 - `bonsai hq` is a terminal worktree list. Enter, `o`, and Ctrl-I open the
   selected project and list its checkouts by branch. Ctrl-O and Esc go up
   one step: clear a search, leave the command line, then leave the project.

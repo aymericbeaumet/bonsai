@@ -3,7 +3,7 @@ name = "bonsai-cli"
 version = "0.1.1"
 authors = ["Aymeric Beaumet <hi@aymericbeaumet.com>"]
 edition = "2024"
-rust-version = "1.96"
+rust-version = "1.99.1"
 license = "MIT"
 description = "Ergonomic git worktree manager with a global worktree root"
 repository = "https://github.com/aymericbeaumet/bonsai"
@@ -25,21 +25,21 @@ name = "safety"
 path = "bonsai-cli/tests/safety.rs"
 
 [dependencies]
-anyhow = "1"
+anyhow = "1.0.104"
 bonsai = { package = "bonsai-lib", path = "bonsai-lib", version = "0.1.1" }
-clap = { version = "4", features = ["derive"] }
-clap_complete = "4"
+clap = { version = "4.6.7", features = ["derive"] }
+clap_complete = "4.6.11"
 
 [dev-dependencies]
-assert_cmd = "2"
-portable-pty = "0.9"
-predicates = "3"
-rusqlite = { version = "0.40", features = ["bundled"] }
-serde_json = "1"
-tempfile = "3"
+assert_cmd = "2.2.2"
+portable-pty = "0.9.0"
+predicates = "3.1.4"
+rusqlite = { version = "0.40.2", features = ["bundled"] }
+serde_json = "1.0.154"
+tempfile = "3.27.0"
 
 [target.'cfg(unix)'.dev-dependencies]
-libc = "0.2"
+libc = "0.2.190"
 
 [workspace]
 members = ["bonsai-lib"]

@@ -447,21 +447,27 @@ In a clone, run `cargo doc --open -p bonsai-lib`.
 
 ## Development checks
 
+Install [mise](https://mise.jdx.dev), then run `mise trust .mise.toml` and
+`mise install --locked rust node python uv` in the clone. `.mise.toml` and
+`mise.lock` pin Rust, Node.js, Python, and uv for local development and CI.
+Use `mise exec --` for commands in shells without mise activation. The Linux
+CI shell tests also need Bash, Zsh, and Fish from the OS.
+
 ```sh
-cargo test --locked
-cargo clippy --locked --all-targets -- -D warnings
-cargo fmt --check
-cargo package --workspace --locked
-cargo build --release --locked
-python3 tests/terminal.py target/release/bonsai
-cargo test --locked --test cli real_package_managers_ -- --ignored
-python3 scripts/benchmark.py --worktrees 1 10 100 --sessions 1000 10000 100000
+mise exec -- cargo test --locked
+mise exec -- cargo clippy --locked --all-targets -- -D warnings
+mise exec -- cargo fmt --check
+mise exec -- cargo package --workspace --locked
+mise exec -- cargo build --release --locked
+mise exec -- python3 tests/terminal.py target/release/bonsai
+mise exec -- cargo test --locked --test cli real_package_managers_ -- --ignored
+mise exec -- python3 scripts/benchmark.py --worktrees 1 10 100 --sessions 1000 10000 100000
 ```
 
 The PTY checks require Unix. Package-manager smoke tests require npm, uv, and
-Python. CI installs Bash/Zsh/Fish coverage explicitly on Linux. Benchmarks use
-disposable repositories and synthetic session stores, report first-run and warm
-median/p95 latency plus Git process counts, and never access personal sessions.
+Python. Benchmarks use disposable repositories and synthetic session stores,
+report first-run and warm median/p95 latency plus Git process counts, and never
+access personal sessions.
 
 ## License
 
