@@ -448,8 +448,8 @@ In a clone, run `cargo doc --open -p bonsai-lib`.
 ## Development checks
 
 Install [mise](https://mise.jdx.dev), then run `mise trust .mise.toml` and
-`mise install --locked rust node python uv` in the clone. `.mise.toml` and
-`mise.lock` pin Rust, Node.js, Python, and uv for local development and CI.
+`mise install --locked rust node python uv actionlint` in the clone. `.mise.toml` and
+`mise.lock` pin Rust, Node.js, Python, uv, and actionlint for local development and CI.
 Use `mise exec --` for commands in shells without mise activation. The Linux
 CI shell tests also need Bash, Zsh, and Fish from the OS.
 
@@ -457,6 +457,7 @@ CI shell tests also need Bash, Zsh, and Fish from the OS.
 mise exec -- cargo test --locked
 mise exec -- cargo clippy --locked --all-targets -- -D warnings
 mise exec -- cargo fmt --check
+mise exec -- actionlint .github/workflows/ci.yml .github/workflows/release.yml
 mise exec -- cargo package --workspace --locked
 mise exec -- cargo build --release --locked
 mise exec -- python3 tests/terminal.py target/release/bonsai

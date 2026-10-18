@@ -19,11 +19,12 @@
   the CLI. CLI sources and integration tests live in `bonsai-cli/`; library
   sources live in `bonsai-lib/`. The root package embeds `skills/bonsai/SKILL.md`
   so publication does not reach outside the library crate.
-- Before finishing, run the CI checks: `cargo fmt --check`,
-  `cargo clippy --all-targets -- -D warnings`, `cargo test`, and
-  `cargo package --workspace --locked`.
+- Before finishing, run the CI checks through `mise exec --`:
+  `cargo fmt --check`, `cargo clippy --locked --all-targets -- -D warnings`,
+  `cargo test --locked`, `cargo package --workspace --locked`, and
+  `actionlint .github/workflows/ci.yml .github/workflows/release.yml`.
 - Trust `.mise.toml` with `mise trust .mise.toml` and run
-  `mise install --locked rust node python uv` for development tools. Run checks
+  `mise install --locked rust node python uv actionlint` for development tools. Run checks
   through `mise exec --` unless mise is
   activated in the shell. Tool pins and platform checksums live in `.mise.toml`
   and `mise.lock`.

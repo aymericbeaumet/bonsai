@@ -15,11 +15,11 @@ jobs:
       fail-fast: false
       matrix:
         include:
-          - { name: linux-amd64, os: ubuntu-latest, tools: "rust node python uv" }
+          - { name: linux-amd64, os: ubuntu-24.04, tools: "rust node python uv actionlint" }
           - { name: linux-arm64, os: ubuntu-24.04-arm, tools: rust }
-          - { name: macos-arm64, os: macos-latest, tools: rust }
+          - { name: macos-arm64, os: macos-26, tools: rust }
           - { name: macos-amd64, os: macos-15-intel, tools: rust }
-          - { name: windows-amd64, os: windows-latest, tools: rust }
+          - { name: windows-amd64, os: windows-2025, tools: rust }
           - { name: windows-arm64, os: windows-11-arm, tools: rust }
     runs-on: ${{ matrix.os }}
     steps:
@@ -36,6 +36,8 @@ jobs:
           sudo apt-get install --yes zsh fish
           echo "REQUIRE_TEST_SHELLS=1" >> "$GITHUB_ENV"
       - run: cargo fmt --check
+        if: matrix.name == 'linux-amd64'
+      - run: actionlint .github/workflows/ci.yml .github/workflows/release.yml
         if: matrix.name == 'linux-amd64'
       - run: cargo clippy --locked --all-targets -- -D warnings
       - run: cargo test --locked

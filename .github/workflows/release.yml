@@ -19,7 +19,7 @@ jobs:
     uses: ./.github/workflows/ci.yml
 
   version:
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
     outputs:
       version: ${{ steps.version.outputs.version }}
     steps:
@@ -52,11 +52,11 @@ jobs:
       fail-fast: false
       matrix:
         include:
-          - { name: linux-amd64, os: ubuntu-latest }
+          - { name: linux-amd64, os: ubuntu-24.04 }
           - { name: linux-arm64, os: ubuntu-24.04-arm }
           - { name: darwin-amd64, os: macos-15-intel }
-          - { name: darwin-arm64, os: macos-latest }
-          - { name: windows-amd64, os: windows-latest }
+          - { name: darwin-arm64, os: macos-26 }
+          - { name: windows-amd64, os: windows-2025 }
           - { name: windows-arm64, os: windows-11-arm }
     runs-on: ${{ matrix.os }}
     steps:
@@ -75,7 +75,8 @@ jobs:
         run: |
           perl -pi -e 's/^version = ".*"/version = "$ENV{VERSION}"/' Cargo.toml bonsai-lib/Cargo.toml
           perl -pi -e 's/(package = "bonsai-lib", path = "bonsai-lib", version = ")[^"]+/${1}$ENV{VERSION}/' Cargo.toml
-      - run: cargo build --release
+      - run: cargo update --workspace
+      - run: cargo build --release --locked
       - shell: bash
         env:
           ARCHIVE: bonsai-${{ matrix.name }}
@@ -94,7 +95,7 @@ jobs:
 
   release:
     needs: [version, build]
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
     steps:
       - uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
         with:
