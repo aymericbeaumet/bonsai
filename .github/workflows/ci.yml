@@ -15,20 +15,42 @@ jobs:
       fail-fast: false
       matrix:
         include:
-          - { name: linux-amd64, os: ubuntu-latest }
-          - { name: linux-arm64, os: ubuntu-24.04-arm }
-          - { name: macos-arm64, os: macos-latest }
-          - { name: macos-amd64, os: macos-15-intel }
-          - { name: windows-amd64, os: windows-latest }
-          - { name: windows-arm64, os: windows-11-arm }
+          - { name: linux-amd64, os: ubuntu-24.04, tools: "rust node python uv actionlint" }
+          - { name: linux-arm64, os: ubuntu-24.04-arm, tools: rust }
+          - { name: macos-arm64, os: macos-26, tools: rust }
+          - { name: macos-amd64, os: macos-15-intel, tools: rust }
+          - { name: windows-amd64, os: windows-2025, tools: rust }
+          - { name: windows-arm64, os: windows-11-arm, tools: rust }
     runs-on: ${{ matrix.os }}
     steps:
-      - uses: actions/checkout@v7
-      - uses: dtolnay/rust-toolchain@stable
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - uses: jdx/mise-action@08ae2a091c038e1e05ec6f5115dc5c69d5a2a6b8 # v5.1.2
         with:
-          components: rustfmt, clippy
-      - uses: Swatinem/rust-cache@v2
+          version: 2026.10.11
+          install_args: ${{ matrix.tools }}
+      - uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2.9.2
+      - name: Install supported shells
+        if: matrix.name == 'linux-amd64'
+        run: |
+          sudo apt-get update
+          sudo apt-get install --yes zsh fish
+          echo "REQUIRE_TEST_SHELLS=1" >> "$GITHUB_ENV"
       - run: cargo fmt --check
         if: matrix.name == 'linux-amd64'
-      - run: cargo clippy --all-targets -- -D warnings
-      - run: cargo test
+      - run: actionlint .github/workflows/ci.yml .github/workflows/release.yml
+        if: matrix.name == 'linux-amd64'
+      - run: cargo clippy --locked --all-targets -- -D warnings
+      - run: cargo test --locked
+      - name: Package both crates
+        if: matrix.name == 'linux-amd64'
+        run: cargo package --workspace --locked
+      - name: Real package-manager smoke tests
+        if: matrix.name == 'linux-amd64'
+        run: |
+          cargo test --locked --test cli real_package_managers_ -- --ignored
+      - name: Release terminal and benchmark smoke tests
+        if: matrix.name == 'linux-amd64'
+        run: |
+          cargo build --release --locked
+          python3 tests/terminal.py target/release/bonsai
+          python3 scripts/benchmark.py --worktrees 1 --sessions 1000 --runs 3
