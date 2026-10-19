@@ -43,7 +43,19 @@ pub fn run(
     }
     validate_branch_name(&repo.git, &branch)?;
 
-    let project_worktrees = repo.project_worktrees(config)?;
+    let mut project_worktrees = repo.project_worktrees(config)?;
+    // A Bonsai worktree whose directory was deleted by hand holds nothing to
+    // lose: drop its stale registration and create the worktree afresh.
+    if let Some(stale) = project_worktrees.iter().find(|entry| {
+        entry.kind == WorktreeKind::Managed
+            && entry.worktree.branch.as_deref() == Some(branch.as_str())
+            && entry.worktree.is_missing()
+    }) {
+        let path = stale.worktree.path.to_string_lossy().into_owned();
+        eprintln!("bonsai: '{branch}' worktree {path} was deleted; recreating it");
+        repo.git.run(&["worktree", "remove", &path])?;
+        project_worktrees = repo.project_worktrees(config)?;
+    }
     let worktrees = project_worktrees
         .iter()
         .map(|entry| entry.worktree.clone())
@@ -180,8 +192,16 @@ fn resolve_branch_input(repo: &Repo, config: &Config, input: &str) -> Result<Str
 }
 
 fn fetch_remote(repo: &Repo, config: &Config) -> Result<()> {
-    if let Some(remote) = repo.remote_name(config) {
-        repo.git.interactive(&["fetch", "--prune", &remote])?;
+    if let Some(remote) = repo.remote_name(config)
+        && let Err(error) = repo.git.interactive(&["fetch", "--prune", &remote])
+    {
+        // An explicit --fetch already overrides the setting the hint names.
+        if config.add.fetch {
+            bail!(
+                "{error}; to add without fetching, set [add] fetch = false or BONSAI_ADD__FETCH=false"
+            );
+        }
+        return Err(error.into());
     }
     Ok(())
 }

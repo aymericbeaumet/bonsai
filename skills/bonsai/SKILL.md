@@ -93,7 +93,8 @@ bonsai clean --yes              # execute when cleanup is authorized
 
 After adding a worktree, use the returned path and confirm its branch before
 editing. After cleanup or removal, inspect `bonsai list --json` and the
-command's report; report removed targets, dirty skips, and failures accurately.
+command's report; report removed targets, skipped worktrees, and failures
+accurately.
 If an operation partly succeeds, inspect the remaining state before retrying.
 Read dependency-install warnings on stderr even when `add` succeeds.
 

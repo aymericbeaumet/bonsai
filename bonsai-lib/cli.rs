@@ -19,8 +19,8 @@ in scope, and commands that need a single project prompt for one.
 composes with -a/--all.
 
 Interactive use: enable the shell wrapper with `eval \"$(bonsai init zsh)\"`
-so add/cd/remove move your shell automatically, and omit arguments to get
-fuzzy pickers.
+so add, cd, remove (rm), and clean move your shell automatically, and omit
+arguments to get fuzzy pickers.
 
 Scripted use (CI, AI agents): pass arguments explicitly; cd-capable commands
 print the target path on stdout, so `cd \"$(bonsai add foo)\"` composes.
@@ -74,7 +74,7 @@ Outside a repository, or with -a/--all, a picker chooses the project first
 (terminal only); scripts pass -C <dir> instead.";
 
 const LIST_LONG: &str = "\
-List worktrees of the current repo, one per line, in tab-aligned columns:
+List worktrees of the current repo, one per line, in space-aligned columns:
 <branch>  <path>  <flags>. Root and external worktrees are labelled
 `<branch> (root)` and `<branch> (external)`. Flags: locked, prunable, dirty
 (with --status). The main checkout is listed first. With -a/--all (the
@@ -181,10 +181,10 @@ Print the shell integration for zsh, bash, or fish. Add to your shell rc:
   eval \"$(bonsai init bash)\"    # bash
   bonsai init fish | source     # fish
 
-The wrapper makes add/cd/remove/clean move your shell into the right
-directory when stdout is a terminal. Substitutions, pipes, and redirections
-preserve the raw path; `command bonsai` always bypasses the wrapper. It uses
-a plain `cd`, so directory-change hooks keep working.";
+The wrapper makes add, cd, remove (rm), and clean move your shell into the
+right directory when stdout is a terminal. Substitutions, pipes, and
+redirections preserve the raw path; `command bonsai` always bypasses the
+wrapper. It uses a plain `cd`, so directory-change hooks keep working.";
 
 const AGENTS_LONG: &str = "\
 Print the bundled Agent Skill without YAML frontmatter for AI coding agents
@@ -379,7 +379,7 @@ pub enum Commands {
         /// Add a dirty flag (runs git status across worktrees concurrently)
         #[arg(long)]
         status: bool,
-        /// Output JSON instead of TSV
+        /// Output JSON instead of aligned columns
         #[arg(long)]
         json: bool,
     },

@@ -67,9 +67,10 @@
   screen. `shared` means a dependency directory is a symlink, contains
   hardlinked files, or lives in an external store such as Go modules.
   Copy-on-write and clonefile clones report their full logical size as `local`.
-- `BONSAI_*` environment variables are strict configuration keys. Prefix
-  internal process/bootstrap/test variables with `_BONSAI_` so they cannot
-  make normal commands fail configuration parsing.
+- `BONSAI_*` environment variables whose first segment names a setting are
+  strict: unknown nested keys (`BONSAI_ADD__FETHC`) fail. Other `BONSAI_*`
+  variables (e.g. Heroku's `BONSAI_URL`) are ignored. Prefix internal
+  process/bootstrap/test variables with `_BONSAI_`.
 - Repository discovery caches the initial worktree inventory only within one
   invocation. `Repo::lock_mutations` must invalidate it: an interactive wait or
   another Bonsai process may have changed the inventory before lock acquisition.

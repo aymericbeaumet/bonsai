@@ -206,7 +206,9 @@ pub fn preflight(repo: &Repo, config: &Config, wt: &Worktree, force: bool) -> Re
             bail!("branch '{branch}' changed since selection; retry");
         }
     }
+    // A directory deleted by hand has no changes left to protect.
     if !force
+        && !current.is_missing()
         && !crate::git::Git::at(&wt.path)
             .out(&["status", "--porcelain"])?
             .is_empty()

@@ -6,6 +6,7 @@ use anyhow::{Result, bail};
 use crate::config::Config;
 use crate::parallel;
 use crate::picker;
+use crate::repo::Repo;
 use crate::scope::Scope;
 use crate::worktree::{cleanup_empty_dirs, find_worktree_dirs_checked};
 
@@ -24,12 +25,9 @@ pub fn run(config: &Config, scope: &Scope, yes: bool) -> Result<()> {
             let pruned = project
                 .repo
                 .lock_mutations()
-                .and_then(|_lock| Ok(project.repo.git.run(&["worktree", "prune"])?));
+                .and_then(|_lock| prune_registrations(&project.repo));
             match pruned {
-                Ok(()) => eprintln!(
-                    "bonsai: [{}] pruned stale worktree registrations",
-                    project.id()
-                ),
+                Ok(count) => report_pruned(&format!("[{}] ", project.id()), count),
                 Err(error) => eprintln!("bonsai: [{}] skipped: {error:#}", project.id()),
             }
         }
@@ -50,8 +48,7 @@ pub fn run(config: &Config, scope: &Scope, yes: bool) -> Result<()> {
         };
         let repo = &project.repo;
         let config = &project.config;
-        repo.git.run(&["worktree", "prune"])?;
-        eprintln!("bonsai: pruned stale worktree registrations");
+        report_pruned("", prune_registrations(repo)?);
         // Directories on disk that git does not know about (crash leftovers).
         let registered: HashSet<PathBuf> = repo
             .worktrees()?
@@ -80,6 +77,9 @@ pub fn run(config: &Config, scope: &Scope, yes: bool) -> Result<()> {
             eprintln!("  [{}/{}] {}", index + 1, orphans.len(), path.display());
         }
         // They may contain uncommitted work, hence the confirmation.
+        if !yes && !picker::is_interactive() {
+            bail!("cannot confirm without a terminal; pass --yes to delete them");
+        }
         if yes || picker::confirm("Delete these directories?")? {
             let workers = parallel::worker_count(orphans.len());
             if workers > 1 {
@@ -153,6 +153,20 @@ pub fn run(config: &Config, scope: &Scope, yes: bool) -> Result<()> {
     remove_empty_tree(&root);
     eprintln!("bonsai: done");
     Ok(())
+}
+
+/// Prune stale registrations, returning how many Git dropped.
+fn prune_registrations(repo: &Repo) -> Result<usize> {
+    let before = repo.worktrees()?.len();
+    repo.git.run(&["worktree", "prune"])?;
+    Ok(before.saturating_sub(repo.worktrees()?.len()))
+}
+
+fn report_pruned(tag: &str, count: usize) {
+    if count > 0 {
+        let plural = if count == 1 { "" } else { "s" };
+        eprintln!("bonsai: {tag}pruned {count} stale worktree registration{plural}");
+    }
 }
 
 /// The target of a linked checkout's `.git` file (`gitdir: <path>`).

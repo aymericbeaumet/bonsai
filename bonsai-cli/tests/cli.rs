@@ -659,6 +659,22 @@ fn add_is_idempotent_for_existing_bonsai_worktree() {
 }
 
 #[test]
+fn add_recreates_a_worktree_whose_directory_was_deleted() {
+    let repo = TestRepo::new();
+    let first = repo.add("feat-deleted");
+    std::fs::remove_dir_all(&first).unwrap();
+    let second = repo.add("feat-deleted");
+    assert_eq!(first, second);
+    assert_eq!(
+        repo.git(&second, &["branch", "--show-current"]),
+        "feat-deleted"
+    );
+    let registrations = repo.worktree_list();
+    assert_eq!(registrations.matches("refs/heads/feat-deleted").count(), 1);
+    assert!(!registrations.contains("prunable"), "{registrations}");
+}
+
+#[test]
 fn add_rejects_branch_checked_out_in_main_worktree() {
     let repo = TestRepo::new();
     repo.bonsai(&repo.clone)
@@ -736,6 +752,22 @@ fn add_fetch_can_be_disabled_in_config() {
 
     let path = repo.add("feat-stale");
     assert!(!path.join("latest.txt").exists());
+}
+
+#[test]
+fn add_fetch_failure_points_at_the_setting_that_skips_it() {
+    let repo = TestRepo::new();
+    std::fs::rename(&repo.origin, repo.dir.join("origin-offline.git")).unwrap();
+    repo.bonsai(&repo.clone)
+        .args(["add", "feat-offline"])
+        .assert()
+        .failure()
+        .stderr(predicate::str::contains("BONSAI_ADD__FETCH=false"));
+    repo.bonsai(&repo.clone)
+        .env("BONSAI_ADD__FETCH", "false")
+        .args(["add", "feat-offline"])
+        .assert()
+        .success();
 }
 
 #[test]
@@ -860,6 +892,41 @@ fn cd_resolves_exact_branch_to_path() {
         PathBuf::from(String::from_utf8_lossy(&output.stdout).trim()),
         path
     );
+}
+
+#[test]
+fn cd_skips_deleted_worktrees_and_explains_unresolved_queries() {
+    let repo = TestRepo::new();
+    let kept = repo.add("feat-kept");
+    let gone = repo.add("feat-gone");
+    std::fs::remove_dir_all(&gone).unwrap();
+
+    let output = repo
+        .bonsai(&repo.clone)
+        .args(["cd", "feat"])
+        .output()
+        .unwrap();
+    assert!(output.status.success());
+    assert_eq!(
+        PathBuf::from(String::from_utf8_lossy(&output.stdout).trim()),
+        kept
+    );
+    repo.bonsai(&repo.clone)
+        .args(["cd", "feat-gone"])
+        .assert()
+        .failure()
+        .stdout("")
+        .stderr(
+            predicate::str::contains("feat-gone").and(predicate::str::contains("terminal").not()),
+        );
+
+    repo.add("feat-other");
+    repo.bonsai(&repo.clone)
+        .args(["cd", "feat"])
+        .assert()
+        .failure()
+        .stdout("")
+        .stderr(predicate::str::contains("feat-kept").and(predicate::str::contains("feat-other")));
 }
 
 #[test]
@@ -1304,6 +1371,23 @@ fn remove_refuses_dirty_worktree_without_force() {
 }
 
 #[test]
+fn remove_drops_a_worktree_whose_directory_was_deleted() {
+    let repo = TestRepo::new();
+    let path = repo.add("feat-deleted");
+    std::fs::remove_dir_all(&path).unwrap();
+    repo.bonsai(&repo.clone)
+        .args(["remove", "feat-deleted"])
+        .assert()
+        .success();
+    assert!(!repo.worktree_list().contains("feat-deleted"));
+    // The branch survives; -d stays explicit.
+    repo.git(
+        &repo.clone,
+        &["show-ref", "--verify", "refs/heads/feat-deleted"],
+    );
+}
+
+#[test]
 fn remove_from_inside_the_worktree_sends_shell_home() {
     let repo = TestRepo::new();
     let path = repo.add("feat-here");
@@ -1403,6 +1487,66 @@ fn clean_skips_dirty_worktrees_even_with_yes() {
 }
 
 #[test]
+fn clean_keeps_merged_worktrees_whose_directory_is_missing() {
+    let repo = TestRepo::new();
+    let path = repo.add("feat-gone");
+    std::fs::remove_dir_all(&path).unwrap();
+    let output = repo
+        .bonsai(&repo.clone)
+        .args(["clean", "--yes", "--json"])
+        .output()
+        .unwrap();
+    assert!(output.status.success());
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert!(!stderr.contains("uncommitted changes"), "{stderr}");
+    let report: serde_json::Value = serde_json::from_slice(&output.stdout).unwrap();
+    assert_eq!(report["skipped_missing"][0]["branch"], "feat-gone");
+    assert_eq!(report["skipped_dirty"].as_array().unwrap().len(), 0);
+    assert_eq!(report["removed"].as_array().unwrap().len(), 0);
+    repo.git(
+        &repo.clone,
+        &["show-ref", "--verify", "refs/heads/feat-gone"],
+    );
+
+    // The explicit removal it points to drops both.
+    repo.bonsai(&repo.clone)
+        .args(["remove", "feat-gone", "-d"])
+        .assert()
+        .success();
+    assert!(!repo.worktree_list().contains("feat-gone"));
+    let refs = repo.git(&repo.clone, &["for-each-ref", "refs/heads"]);
+    assert!(!refs.contains("feat-gone"));
+}
+
+#[test]
+fn clean_without_a_terminal_asks_for_yes() {
+    let repo = TestRepo::new();
+    let path = repo.add("feat-fresh");
+    repo.bonsai(&repo.clone)
+        .arg("clean")
+        .assert()
+        .failure()
+        .stderr(predicate::str::contains("--yes"));
+    assert!(path.exists());
+}
+
+#[test]
+fn clean_fetch_failure_points_at_no_fetch() {
+    let repo = TestRepo::new();
+    repo.add("feat-offline");
+    std::fs::rename(&repo.origin, repo.dir.join("origin-offline.git")).unwrap();
+    repo.bonsai(&repo.clone)
+        .args(["clean", "--dry-run"])
+        .assert()
+        .failure()
+        .stderr(predicate::str::contains("--no-fetch"));
+    repo.bonsai(&repo.clone)
+        .args(["clean", "--dry-run", "--no-fetch"])
+        .assert()
+        .success();
+}
+
+#[test]
 fn clean_respects_protected_globs() {
     let repo = TestRepo::new();
     let path = repo.add("release/1.0");
@@ -1464,6 +1608,38 @@ fn prune_cleans_up_after_manual_deletion() {
         .assert()
         .success();
     assert!(!repo.worktree_list().contains("feat-gone"));
+}
+
+#[test]
+fn prune_reports_only_the_registrations_it_dropped() {
+    let repo = TestRepo::new();
+    let path = repo.add("feat-gone");
+    repo.bonsai(&repo.clone)
+        .args(["prune", "--yes"])
+        .assert()
+        .success()
+        .stderr(predicate::str::contains("pruned").not());
+    std::fs::remove_dir_all(&path).unwrap();
+    repo.bonsai(&repo.clone)
+        .args(["prune", "--yes"])
+        .assert()
+        .success()
+        .stderr(predicate::str::contains("pruned 1 "));
+}
+
+#[test]
+fn prune_without_a_terminal_asks_for_yes() {
+    let repo = TestRepo::new();
+    let path = repo.add("feat-anchor");
+    let orphan = path.parent().unwrap().join("orphan");
+    std::fs::create_dir_all(&orphan).unwrap();
+    std::fs::write(orphan.join(".git"), "gitdir: /nonexistent\n").unwrap();
+    repo.bonsai(&repo.clone)
+        .arg("prune")
+        .assert()
+        .failure()
+        .stderr(predicate::str::contains("--yes"));
+    assert!(orphan.exists());
 }
 
 #[test]

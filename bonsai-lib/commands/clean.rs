@@ -26,6 +26,13 @@ impl Reason {
     }
 }
 
+/// Why an integrated worktree is kept anyway.
+#[derive(Debug, Clone, Copy)]
+enum Hold {
+    Dirty,
+    Missing,
+}
+
 /// Facts about a branch, gathered up front so the decision itself is pure.
 #[derive(Debug, Default, Clone, Copy)]
 pub struct BranchFacts {
@@ -65,6 +72,7 @@ struct JsonReport {
     dry_run: bool,
     planned: Vec<JsonEntry>,
     skipped_dirty: Vec<JsonEntry>,
+    skipped_missing: Vec<JsonEntry>,
     removed: Vec<String>,
     deleted_branches: Vec<String>,
     failures: Vec<String>,
@@ -197,6 +205,9 @@ fn clean(
         return finish(failed, None);
     }
     if !yes {
+        if !picker::is_interactive() {
+            anyhow::bail!("cannot confirm without a terminal; pass --yes to remove them");
+        }
         let labels: Vec<String> = rows.iter().map(|(tag, _, _)| tag.clone()).collect();
         let picked = picker::multi_select_all_checked("Confirm removal:", labels)?;
         for plan in &mut plans {
@@ -287,8 +298,9 @@ fn plan(
     if !no_fetch
         && config.clean.fetch
         && let Some(remote) = &remote
+        && let Err(error) = repo.git.interactive(&["fetch", "--prune", remote])
     {
-        repo.git.interactive(&["fetch", "--prune", remote])?;
+        anyhow::bail!("{error}; pass --no-fetch to clean without fetching");
     }
 
     let default = repo.default_branch(config)?;
@@ -364,25 +376,39 @@ fn plan(
             facts.squash_merged = is_squash_merged(&repo.git, &target, wt.head.as_deref()?);
         }
         let reason = classify(facts)?;
-        Some((wt.clone(), branch, reason, is_dirty(wt)))
+        // A deleted directory cannot be inspected; keep it for an explicit
+        // `bonsai remove` rather than deleting its branch unseen.
+        let hold = if wt.is_missing() {
+            Some(Hold::Missing)
+        } else {
+            is_dirty(wt).then_some(Hold::Dirty)
+        };
+        Some((wt.clone(), branch, reason, hold))
     });
 
     let mut candidates: Vec<(Worktree, String, Reason)> = Vec::new();
-    for (wt, branch, reason, dirty) in checks.into_iter().flatten() {
-        if dirty {
-            eprintln!(
-                "bonsai: [{}] skipped ({}): uncommitted changes",
-                tag(index, &branch),
-                reason.as_str()
-            );
-            report.skipped_dirty.push(JsonEntry {
-                branch,
-                reason: reason.as_str(),
-                path: wt.path,
-            });
+    for (wt, branch, reason, hold) in checks.into_iter().flatten() {
+        let Some(hold) = hold else {
+            candidates.push((wt, branch, reason));
             continue;
-        }
-        candidates.push((wt, branch, reason));
+        };
+        let (why, skipped) = match hold {
+            Hold::Dirty => ("uncommitted changes", &mut report.skipped_dirty),
+            Hold::Missing => (
+                "directory missing; use 'bonsai remove' to drop it",
+                &mut report.skipped_missing,
+            ),
+        };
+        eprintln!(
+            "bonsai: [{}] skipped ({}): {why}",
+            tag(index, &branch),
+            reason.as_str()
+        );
+        skipped.push(JsonEntry {
+            branch,
+            reason: reason.as_str(),
+            path: wt.path,
+        });
     }
     report.planned = candidates
         .iter()
