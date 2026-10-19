@@ -1,0 +1,6 @@
+*
+!Cargo.toml
+!Cargo.lock
+!bonsai-cli/
+!bonsai-lib/
+!skills/

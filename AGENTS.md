@@ -19,6 +19,12 @@
   the CLI. CLI sources and integration tests live in `bonsai-cli/`; library
   sources live in `bonsai-lib/`. The root package embeds `skills/bonsai/SKILL.md`
   so publication does not reach outside the library crate.
+- Keep `readme.md` a short landing page: pitch, demo, install, quick start,
+  command summary, and links. Detailed reference belongs in `docs/*.md`;
+  update the page that owns a behavior when changing it.
+- `docs/demo/demo.gif` is recorded by `docs/demo/record.sh` (VHS in a
+  container, bonsai built from the checkout). Re-record it when the commands
+  or output it shows change.
 - Before finishing, run the CI checks through `mise exec --`:
   `cargo fmt --check`, `cargo clippy --locked --all-targets -- -D warnings`,
   `cargo test --locked`, `cargo package --workspace --locked`, and
