@@ -46,16 +46,20 @@ project's totals, and suggests `P` when checkouts were deleted by hand.
 `upstream gone` usually means the pull request was merged and its branch
 deleted; `C` cleans those.
 
-`t` cycles through three **trees**, then back to the table:
+The home list has four **views**, named by tabs on the top border with the
+current one highlighted. They go from the shortest list to the longest, each
+adding one level of grouping: `t` moves to the next view and `T` to the
+previous one, wrapping around at either end.
 
-| Tree | Groups |
-|---|---|
-| By host, owner, and project | `github.com`, then `aymericbeaumet`, then `bonsai`, then its checkouts |
-| By owner | `github.com/aymericbeaumet`, then `bonsai`, then its checkouts |
-| By project | `github.com/aymericbeaumet/bonsai`, then its checkouts |
+| View | Top-level rows | Then |
+|---|---|---|
+| table | one row per project | |
+| projects | `github.com/aymericbeaumet/bonsai` | its checkouts |
+| owners | `github.com/aymericbeaumet` | its projects, then their checkouts |
+| hosts | `github.com` | its owners, then projects, then checkouts |
 
-Every group sums what it contains. `:tree host`, `:tree owner`,
-`:tree project`, and `:tree off` go straight to one. A **search** (`/`) lists matching
+Every group sums what it contains. `:view table`, `:view projects`,
+`:view owners`, and `:view hosts` go straight to one. A **search** (`/`) lists matching
 checkouts from every project. Columns that have nothing to show are hidden,
 and on a narrow terminal the least useful ones go first.
 
@@ -96,7 +100,7 @@ the full-screen output (`O`), which they scroll like a pager.
 | `l`, →, Tab | Open a project |
 | `h`, ←, Esc, Ctrl-O | Back: close the output, clear a search, leave the project |
 | `/` | Fuzzy-find by host, owner, project, branch, path, stack, or agent |
-| `t` | Next tree: by host, owner, and project; by owner; by project; then the table |
+| `t` `T` | Next / previous view: table, projects, owners, hosts |
 | `s` | Sort by name, recent activity, or size |
 | `r` | Refresh |
 | `O` | Show the latest command's output full screen |
@@ -135,7 +139,7 @@ checkout on the home list.
 | `yy` | `:copy` | Copy the checkout's path to the clipboard |
 
 `:` opens a command line listing these commands, plus `refresh`, `sort`,
-`tree`, `help`, and `quit`. Type to filter, Tab completes the name, and
+`view`, `help`, and `quit`. Type to filter, Tab completes the name, and
 Enter runs it with the rest of the line as arguments.
 
 Removing a worktree, deleting a branch, and cleaning ask first, explaining

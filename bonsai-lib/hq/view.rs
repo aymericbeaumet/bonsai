@@ -37,6 +37,12 @@ pub(super) fn draw(frame: &mut Frame, model: &mut Model) {
     ])
     .split(area);
     let mut block = Block::bordered().title(title(model));
+    // The views `t` and `T` step through, on the top border when they fit.
+    if let Some(tabs) = tabs(model)
+        && title(model).width() + tabs.width() + 4 <= usize::from(area.width)
+    {
+        block = block.title(tabs.right_aligned());
+    }
     if framed(model) {
         block = block.border_style(Style::new().fg(Color::Cyan));
     }
@@ -152,7 +158,7 @@ fn kind(model: &Model) -> Kind {
     match &model.view {
         View::Detail { .. } => Kind::Checkouts,
         View::List if searching => Kind::Search,
-        View::List if model.tree.is_on() => Kind::Tree,
+        View::List if model.grouping.is_tree() => Kind::Tree,
         View::List => Kind::Projects,
     }
 }
@@ -203,9 +209,6 @@ fn title(model: &Model) -> Line<'static> {
         }
         View::List => {
             let mut parts = Vec::new();
-            if model.tree.is_on() {
-                parts.push(model.tree.label().to_string());
-            }
             let (projects, checkouts, bytes, sized) = model.overall();
             parts.push(plural(projects, "project"));
             parts.push(plural(checkouts, "checkout"));
@@ -216,6 +219,33 @@ fn title(model: &Model) -> Line<'static> {
         }
     };
     Line::from(format!(" bonsai · {} · {sort} ", parts.join(" · ")))
+}
+
+/// `table  projects  owners  hosts`, the current view highlighted. Shown on
+/// the home list, where the grouping applies.
+fn tabs(model: &Model) -> Option<Line<'static>> {
+    if model.palette.is_some()
+        || model.filtering
+        || !model.filter.is_empty()
+        || !matches!(model.view, View::List)
+    {
+        return None;
+    }
+    let mut spans = Vec::new();
+    for grouping in super::Grouping::ALL {
+        spans.push(Span::raw(" "));
+        let style = if grouping == model.grouping {
+            Style::new()
+                .fg(Color::Black)
+                .bg(Color::Cyan)
+                .add_modifier(Modifier::BOLD)
+        } else {
+            Style::new().add_modifier(Modifier::DIM)
+        };
+        spans.push(Span::styled(format!(" {} ", grouping.tab()), style));
+    }
+    spans.push(Span::raw(" "));
+    Some(Line::from(spans))
 }
 
 pub(super) fn plural(count: usize, word: &str) -> String {
@@ -234,7 +264,7 @@ pub(super) fn framed(model: &Model) -> bool {
 fn tree_frame(model: &Model) -> bool {
     model.palette.is_none()
         && matches!(model.view, View::List)
-        && model.tree.is_on()
+        && model.grouping.is_tree()
         && model.filter.is_empty()
 }
 
@@ -276,13 +306,14 @@ fn keys(model: &Model) -> String {
         View::List if !model.filter.is_empty() => {
             keys.extend(["enter open", "c cd", "dd remove", "/ edit", "esc clear"]);
         }
-        View::List if model.tree.is_on() => {
+        View::List if model.grouping.is_tree() => {
             keys.extend([
                 "enter open",
                 "c cd",
                 "a add",
                 "dd remove",
-                model.tree.next_hint(),
+                "t next view",
+                "T previous view",
                 "s sort",
             ]);
         }
@@ -292,7 +323,8 @@ fn keys(model: &Model) -> String {
             "a add",
             "C clean",
             "P prune",
-            "t tree",
+            "t next view",
+            "T previous view",
             "s sort",
         ]),
     }
@@ -530,8 +562,8 @@ pub(super) const HELP: &[(&str, &[(&str, &str)])] = &[
             ("h  ←  esc", "back"),
             ("/", "search; enter keeps the results, esc clears them"),
             (
-                "t",
-                "tree by host, owner, and project; by owner; by project; then the table",
+                "t  T",
+                "next / previous view: table, projects, owners, hosts; each adds a level",
             ),
             ("s  r", "sort by name, recent activity, or size; refresh"),
         ],

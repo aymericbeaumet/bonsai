@@ -13,7 +13,7 @@ use std::time::Duration;
 use super::footprint::{Dependency, Footprint};
 use super::inventory::{Project, WorktreeEntry};
 use super::owner;
-use super::{Model, Sort, Tree, View};
+use super::{Grouping, Model, Sort, View};
 
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
 pub(super) enum Depth {
@@ -235,8 +235,8 @@ pub(super) fn project_totals(model: &Model, project: &Project) -> Totals {
 pub(super) fn visible_rows(model: &Model, now: u64) -> Vec<Row> {
     let query = owner::parse_query(model.filter.text());
     let list = matches!(model.view, View::List) && query_is_empty(&query);
-    let overview = list && !model.tree.is_on();
-    let tree = list && model.tree.is_on();
+    let overview = list && !model.grouping.is_tree();
+    let tree = list && model.grouping.is_tree();
     let mut projects: Vec<&Project> = model.snapshot.projects.iter().collect();
     sort_projects(model, &mut projects);
     if let View::Detail { project } = &model.view {
@@ -282,10 +282,10 @@ pub(super) fn visible_rows(model: &Model, now: u64) -> Vec<Row> {
     }
     let context = Context { model, now };
     if tree {
-        match model.tree {
-            Tree::Owners => owner_rows(&shown, &context),
-            Tree::Projects => project_rows(&shown, &context),
-            Tree::Nested | Tree::Off => tree_rows(&shown, &context),
+        match model.grouping {
+            Grouping::Projects => project_rows(&shown, &context),
+            Grouping::Owners => owner_rows(&shown, &context),
+            Grouping::Hosts | Grouping::Table => tree_rows(&shown, &context),
         }
     } else {
         list_rows(&shown, overview, &context)

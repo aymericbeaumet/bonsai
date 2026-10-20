@@ -629,8 +629,8 @@ struct Model {
     filtering: bool,
     /// Counts and two-key prefixes between keys, shared by every view.
     keys: keys::Keys,
-    /// How the home list groups projects; `t` cycles through the trees.
-    tree: Tree,
+    /// How the home list groups projects; `t` and `T` step through these.
+    grouping: Grouping,
     /// `s` cycles this. Alphabetical is the order the list opens in.
     sort: Sort,
     view: View,
@@ -700,51 +700,58 @@ impl Sort {
     }
 }
 
-/// The home list's grouping. `t` cycles through the three trees, from most
-/// to least nested, then back to the table.
+/// How the home list groups its rows, from the shortest list to the
+/// longest: each step adds one level. `t` moves to the next, `T` back.
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
-enum Tree {
+enum Grouping {
     /// One row per project.
-    Off,
-    /// Host, then owner, then project.
-    Nested,
-    /// `host/owner`, then project.
-    Owners,
-    /// One `host/owner/project` group per project.
+    Table,
+    /// Each project, as `host/owner/project`, with its checkouts.
     Projects,
+    /// Projects under each `host/owner`.
+    Owners,
+    /// Owners under each host.
+    Hosts,
 }
 
-impl Tree {
-    fn cycle(self) -> Self {
+impl Grouping {
+    /// In order of list length: the order `t` follows.
+    const ALL: [Self; 4] = [Self::Table, Self::Projects, Self::Owners, Self::Hosts];
+
+    fn index(self) -> usize {
+        Self::ALL.iter().position(|item| *item == self).unwrap_or(0)
+    }
+
+    fn next(self) -> Self {
+        Self::ALL[(self.index() + 1) % Self::ALL.len()]
+    }
+
+    fn previous(self) -> Self {
+        Self::ALL[(self.index() + Self::ALL.len() - 1) % Self::ALL.len()]
+    }
+
+    fn is_tree(self) -> bool {
+        self != Self::Table
+    }
+
+    /// The tab name: what the top-level rows are.
+    fn tab(self) -> &'static str {
         match self {
-            Self::Off => Self::Nested,
-            Self::Nested => Self::Owners,
-            Self::Owners => Self::Projects,
-            Self::Projects => Self::Off,
+            Self::Table => "table",
+            Self::Projects => "projects",
+            Self::Owners => "owners",
+            Self::Hosts => "hosts",
         }
     }
 
-    fn is_on(self) -> bool {
-        self != Self::Off
-    }
-
-    fn label(self) -> &'static str {
-        match self {
-            Self::Off => "table",
-            Self::Nested => "tree by host, owner, and project",
-            Self::Owners => "tree by owner",
-            Self::Projects => "tree by project",
-        }
-    }
-
-    /// What the next `t` shows, for the key hints.
-    fn next_hint(self) -> &'static str {
-        match self.cycle() {
-            Self::Off => "t table",
-            Self::Nested => "t tree",
-            Self::Owners => "t group by owner",
-            Self::Projects => "t group by project",
-        }
+    fn parse(text: &str) -> Option<Self> {
+        Some(match text {
+            "table" | "off" => Self::Table,
+            "project" | "projects" => Self::Projects,
+            "owner" | "owners" => Self::Owners,
+            "host" | "hosts" => Self::Hosts,
+            _ => return None,
+        })
     }
 }
 
@@ -918,10 +925,10 @@ const COMMANDS: &[CommandSpec] = &[
         cmd: Cmd::Sort,
     },
     CommandSpec {
-        name: "tree",
-        aliases: &[],
-        args: "[host|owner|project|off]",
-        hint: "cycle the trees: by host, by owner, by project, off",
+        name: "view",
+        aliases: &["tree", "group"],
+        args: "[table|projects|owners|hosts]",
+        hint: "show another view; t and T step through them",
         key: "t",
         cmd: Cmd::Tree,
     },
@@ -997,7 +1004,7 @@ impl Model {
             filter: LineInput::default(),
             filtering: false,
             keys: keys::Keys::default(),
-            tree: Tree::Off,
+            grouping: Grouping::Table,
             sort: Sort::Name,
             view: View::List,
             palette: None,
@@ -1200,6 +1207,7 @@ impl Model {
             KeyCode::Char('q') => return Effect::Quit,
             KeyCode::Char('r') => return Effect::Refresh,
             KeyCode::Char('t') => return self.command(Cmd::Tree, ""),
+            KeyCode::Char('T') => return self.command(Cmd::Tree, "previous"),
             KeyCode::Char('s') => return self.command(Cmd::Sort, ""),
             KeyCode::Char('a') => return self.command(Cmd::Add, ""),
             KeyCode::Char('c') => return self.command(Cmd::Cd, ""),
@@ -1403,12 +1411,11 @@ impl Model {
                 Effect::None
             }
             Cmd::Tree => {
-                self.tree = match args.trim() {
-                    "host" => Tree::Nested,
-                    "owner" => Tree::Owners,
-                    "project" => Tree::Projects,
-                    "off" | "table" => Tree::Off,
-                    _ => self.tree.cycle(),
+                let args = args.trim();
+                self.grouping = match Grouping::parse(args) {
+                    Some(grouping) => grouping,
+                    None if matches!(args, "previous" | "back") => self.grouping.previous(),
+                    None => self.grouping.next(),
                 };
                 self.view = View::List;
                 self.rebuild();
@@ -2984,7 +2991,7 @@ mod tests {
     #[test]
     fn gg_and_half_page_move_through_the_tree() {
         let mut model = many(20);
-        model.on_key(press(KeyCode::Char('t')));
+        model.on_key(press(KeyCode::Char('T')));
         model.viewport = 10;
         let path = |model: &Model| model.selected_path().unwrap();
         assert!(path(&model).ends_with("p00/main"));
@@ -3081,7 +3088,7 @@ mod tests {
             &home_layout,
             width,
         );
-        model.on_key(press(KeyCode::Char('t')));
+        model.on_key(press(KeyCode::Char('T')));
         let line = |model: &Model, pred: fn(&Row) -> bool| {
             let layout = table::layout(Kind::Tree, &model.rows, width);
             table::line(
@@ -3523,7 +3530,7 @@ mod tests {
             }),
             ("home", |model| {
                 model.on_key(press(KeyCode::Esc));
-                model.tree = Tree::Off;
+                model.grouping = Grouping::Table;
                 model.rebuild();
             }),
         ];
@@ -3961,9 +3968,9 @@ mod tests {
         assert!(home.add_modifier.contains(Modifier::REVERSED));
         assert_eq!(home.bg, Some(Color::Reset));
 
-        model.on_key(press(KeyCode::Char('t')));
+        model.on_key(press(KeyCode::Char('T')));
         let (tree, tree_buf) = painted(&mut model);
-        assert!(tree.contains(" bonsai · tree "));
+        assert!(tree.contains(" hosts "), "{tree}");
         assert!(tree.contains("┌─ github.com"));
         assert!(tree.contains("│  ├─ aymericbeaumet"));
         assert!(tree.contains("│  │  └─ bonsai "));
@@ -4053,7 +4060,7 @@ mod tests {
             "{screen}"
         );
 
-        model.on_key(press(KeyCode::Char('t')));
+        model.on_key(press(KeyCode::Char('T')));
         let host = model
             .rows
             .iter()
@@ -4174,7 +4181,7 @@ mod tests {
         assert_eq!(model.rows[0].owner, "aymericbeaumet");
         assert_eq!(model.rows[0].project, "bonsai");
         assert_eq!(model.rows[0].title, "");
-        assert_eq!(model.tree, Tree::Off);
+        assert_eq!(model.grouping, Grouping::Table);
         assert_eq!(checkouts(&model.rows[0]), 2);
         assert_eq!(model.rows[1].host, "github.com");
         assert_eq!(model.rows[1].owner, "interfaceinc");
@@ -4209,7 +4216,7 @@ mod tests {
         assert_eq!(local.host, "example");
         assert_eq!(local.owner, "");
 
-        model.on_key(press(KeyCode::Char('t')));
+        model.on_key(press(KeyCode::Char('T')));
         assert!(model.rows.iter().any(|row| {
             row.depth == Depth::Host && row.host == "gitlab.com" && row.owner.is_empty()
         }));
@@ -4264,7 +4271,7 @@ mod tests {
             worktrees: vec![worktree("main", "/trees/plain/main", true, Some(false))],
         });
         let mut model = Model::from_snapshot(snapshot);
-        model.on_key(press(KeyCode::Char('t')));
+        model.on_key(press(KeyCode::Char('T')));
 
         let open_owner = child_prefix(TREE_RAIL, true);
         let shut_owner = child_prefix(TREE_RAIL, false);
@@ -4384,16 +4391,73 @@ mod tests {
     }
 
     #[test]
-    fn t_cycles_three_trees_then_the_table() {
+    fn t_and_t_step_through_views_from_the_shortest_list() {
         let mut model = Model::from_snapshot(sample());
-        assert_eq!(model.tree, Tree::Off);
-
-        model.on_key(press(KeyCode::Char('t')));
-        assert_eq!(model.tree, Tree::Nested);
-        assert!(matches!(model.view, View::List));
-        let labels: Vec<String> = tree_shape(&model).into_iter().map(|row| row.1).collect();
+        assert_eq!(model.grouping, Grouping::Table);
+        let mut lengths = vec![model.rows.len()];
+        let mut views = vec![Grouping::Table];
+        for _ in 0..3 {
+            model.on_key(press(KeyCode::Char('t')));
+            lengths.push(model.rows.len());
+            views.push(model.grouping);
+        }
         assert_eq!(
-            labels,
+            views,
+            [
+                Grouping::Table,
+                Grouping::Projects,
+                Grouping::Owners,
+                Grouping::Hosts
+            ]
+        );
+        assert!(
+            lengths.windows(2).all(|pair| pair[0] < pair[1]),
+            "each view adds rows: {lengths:?}"
+        );
+        // t wraps from the longest back to the table; T goes the other way.
+        model.on_key(press(KeyCode::Char('t')));
+        assert_eq!(model.grouping, Grouping::Table);
+        model.on_key(press(KeyCode::Char('T')));
+        assert_eq!(model.grouping, Grouping::Hosts);
+        model.on_key(press(KeyCode::Char('T')));
+        assert_eq!(model.grouping, Grouping::Owners);
+    }
+
+    #[test]
+    fn each_view_groups_by_one_more_level() {
+        let labels = |model: &Model| -> Vec<String> {
+            tree_shape(model).into_iter().map(|row| row.1).collect()
+        };
+        let mut model = Model::from_snapshot(sample());
+        let selected = model.selected_path();
+        model.on_key(press(KeyCode::Char('t')));
+        assert_eq!(
+            labels(&model),
+            [
+                "┌─ github.com/aymericbeaumet/bonsai",
+                "│  ├─ ab/dev",
+                "│  └─ main",
+                "┌─ github.com/interfaceinc/other",
+                "│  └─ feature",
+            ]
+        );
+        assert_eq!(model.selected_path(), selected, "the selection follows");
+        model.on_key(press(KeyCode::Char('t')));
+        assert_eq!(
+            labels(&model),
+            [
+                "┌─ github.com/aymericbeaumet",
+                "│  └─ bonsai",
+                "│     ├─ ab/dev",
+                "│     └─ main",
+                "┌─ github.com/interfaceinc",
+                "│  └─ other",
+                "│     └─ feature",
+            ]
+        );
+        model.on_key(press(KeyCode::Char('t')));
+        assert_eq!(
+            labels(&model),
             [
                 "┌─ github.com",
                 "│  ├─ aymericbeaumet",
@@ -4405,52 +4469,12 @@ mod tests {
                 "│        └─ feature",
             ]
         );
-        let (screen, _) = painted(&mut model);
-        assert!(screen.contains(" bonsai · tree by host, owner, and project · "));
-        assert!(screen.contains("t group by owner"));
-        let selected = model.selected_path();
-
-        model.on_key(press(KeyCode::Char('t')));
-        assert_eq!(model.tree, Tree::Owners);
-        let labels: Vec<String> = tree_shape(&model).into_iter().map(|row| row.1).collect();
-        assert_eq!(
-            labels,
-            [
-                "┌─ github.com/aymericbeaumet",
-                "│  └─ bonsai",
-                "│     ├─ ab/dev",
-                "│     └─ main",
-                "┌─ github.com/interfaceinc",
-                "│  └─ other",
-                "│     └─ feature",
-            ]
-        );
-        assert_eq!(model.selected_path(), selected, "the selection follows");
-        let (screen, _) = painted(&mut model);
-        assert!(screen.contains(" bonsai · tree by owner · "));
-        assert!(screen.contains("t group by project"));
-
-        model.on_key(press(KeyCode::Char('t')));
-        assert_eq!(model.tree, Tree::Projects);
-        let labels: Vec<String> = tree_shape(&model).into_iter().map(|row| row.1).collect();
-        assert_eq!(
-            labels,
-            [
-                "┌─ github.com/aymericbeaumet/bonsai",
-                "│  ├─ ab/dev",
-                "│  └─ main",
-                "┌─ github.com/interfaceinc/other",
-                "│  └─ feature",
-            ]
-        );
-        let (screen, _) = painted(&mut model);
-        assert!(screen.contains(" bonsai · tree by project · "));
-        assert!(screen.contains("t table"));
+        assert_eq!(model.selected_path(), selected);
 
         model.on_key(press(KeyCode::Enter));
         assert!(matches!(model.view, View::Detail { .. }));
         model.on_key(press(KeyCode::Char('t')));
-        assert_eq!(model.tree, Tree::Off);
+        assert_eq!(model.grouping, Grouping::Table);
         assert!(matches!(model.view, View::List));
         assert_eq!(model.rows.len(), 2);
         assert!(model.rows.iter().all(|row| row.title.is_empty()));
@@ -4459,7 +4483,51 @@ mod tests {
         model.on_key(press(KeyCode::Char('/')));
         model.on_key(press(KeyCode::Char('t')));
         assert_eq!(model.filter.text(), "t");
-        assert_eq!(model.tree, Tree::Off);
+        assert_eq!(model.grouping, Grouping::Table);
+    }
+
+    #[test]
+    fn the_tabs_name_every_view_and_mark_the_current_one() {
+        let mut model = Model::from_snapshot(sample());
+        for (presses, current) in [(0, "table"), (1, "projects"), (2, "owners"), (3, "hosts")] {
+            let mut model = Model::from_snapshot(sample());
+            for _ in 0..presses {
+                model.on_key(press(KeyCode::Char('t')));
+            }
+            let (screen, buffer) = paint(&mut model, 120, 12);
+            let top = screen.lines().next().unwrap();
+            // The strip starts at "table", which the title never says.
+            let strip_at = top.find(" table ").expect("the tab strip");
+            let strip = &top[strip_at..];
+            let names = ["table", "projects", "owners", "hosts"];
+            let positions: Vec<usize> = names
+                .iter()
+                .map(|name| {
+                    strip
+                        .find(&format!(" {name} "))
+                        .unwrap_or_else(|| panic!("{name} in {top}"))
+                })
+                .collect();
+            assert!(positions.windows(2).all(|pair| pair[0] < pair[1]), "{top}");
+            let at = strip_at + strip.find(&format!(" {current} ")).unwrap() + 1;
+            let x = u16::try_from(top[..at].chars().count()).unwrap();
+            assert_eq!(
+                buffer[(x, 0)].style().bg,
+                Some(Color::Cyan),
+                "{current} is highlighted"
+            );
+            assert!(screen.contains("t next view"), "{screen}");
+            assert!(screen.contains("T previous view"), "{screen}");
+        }
+        // Inside a project and in search results the views do not apply.
+        model.on_key(press(KeyCode::Enter));
+        let (screen, _) = paint(&mut model, 120, 12);
+        assert!(!screen.lines().next().unwrap().contains(" owners "));
+        // A narrow terminal keeps the title and drops the tabs.
+        let mut model = Model::from_snapshot(sample());
+        let (screen, _) = paint(&mut model, 70, 12);
+        assert!(screen.contains(" bonsai · 2 projects"));
+        assert!(!screen.lines().next().unwrap().contains(" owners "));
     }
 
     #[test]
@@ -4503,10 +4571,10 @@ mod tests {
             Some(Color::LightGreen)
         );
         assert!(words(repo).contains("4 kB"));
-        model.command(Cmd::Tree, "off");
-        assert_eq!(model.tree, Tree::Off);
+        model.command(Cmd::Tree, "table");
+        assert_eq!(model.grouping, Grouping::Table);
         model.command(Cmd::Tree, "host");
-        assert_eq!(model.tree, Tree::Nested);
+        assert_eq!(model.grouping, Grouping::Hosts);
     }
 
     #[test]

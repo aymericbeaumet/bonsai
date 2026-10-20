@@ -61,10 +61,12 @@
   `resize` to force a redraw.
 - Spell every value out under a column heading; no bare symbols or counts.
   Views: the home list (one row per project with its totals), an open project
-  (one row per checkout), search results, and three trees that `t` cycles
-  through before returning to the table: host › owner › project,
-  `host/owner` › project, and `host/owner/project`. Every tree group sums its
-  checkouts. `table.rs` drops the least useful
+  (one row per checkout), and search results. The home list has four
+  views, ordered from the shortest list to the longest so each adds one
+  grouping level: table, projects (`host/owner/project` with checkouts),
+  owners (`host/owner`, then projects), hosts (host, then owners). `t` moves
+  forward, `T` back, both wrapping; tabs on the top border name them and
+  mark the current one. Every tree group sums its checkouts. `table.rs` drops the least useful
   columns first when the terminal is narrow. Host, owner, and project keep
   their colours in the table and the tree; an open project or tree uses a
   ruled frame. Deleted checkouts sort last and are not counted as warnings.
