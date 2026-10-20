@@ -51,7 +51,7 @@ mise use -g github:aymericbeaumet/bonsai
 Or build from source with Cargo (Rust 1.99.1 or newer):
 
 ```sh
-cargo install --locked --git https://github.com/aymericbeaumet/bonsai bonsai-cli
+cargo install --locked --git https://github.com/aymericbeaumet/bonsai
 ```
 
 Then enable the shell integration, which lets bonsai `cd` you into worktrees

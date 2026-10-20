@@ -8,6 +8,9 @@ license = "MIT"
 description = "Ergonomic git worktree manager with a global worktree root"
 repository = "https://github.com/aymericbeaumet/bonsai"
 readme = "readme.md"
+# Installed from GitHub, never published: `bonsai-cli` on crates.io is
+# another project.
+publish = false
 include = ["bonsai-cli/", "skills/", "readme.md", "LICENSE"]
 keywords = ["git", "worktree", "cli"]
 categories = ["command-line-utilities", "development-tools"]

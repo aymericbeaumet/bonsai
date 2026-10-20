@@ -20,7 +20,7 @@ locking guarantees.
 
 Worktree discovery and the commands behind the CLI are packaged as
 `bonsai-lib`, which the CLI builds on and which is imported as `bonsai`.
-It is not published on crates.io yet; depend on it from Git:
+It is not published on crates.io; depend on it from Git:
 
 ```toml
 [dependencies]

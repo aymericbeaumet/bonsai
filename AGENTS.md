@@ -15,10 +15,14 @@
   pinning prose fragments that would make editorial changes brittle.
 - The root package is `bonsai-cli` and builds the `bonsai` binary.
   `bonsai-lib` is the library, imported as `bonsai`. Keep both versions and
-  the CLI's dependency requirement in sync. `cargo install --path .` installs
-  the CLI. CLI sources and integration tests live in `bonsai-cli/`; library
-  sources live in `bonsai-lib/`. The root package embeds `skills/bonsai/SKILL.md`
-  so publication does not reach outside the library crate.
+  the CLI's dependency requirement in sync. The CLI is never published to
+  crates.io (`publish = false`; the `bonsai-cli` name there belongs to another
+  project): document `cargo install --locked --git
+  https://github.com/aymericbeaumet/bonsai`, or `cargo install --path .` from
+  a clone. CLI sources and integration tests live in `bonsai-cli/`; library
+  sources live in `bonsai-lib/`. The root package embeds
+  `skills/bonsai/SKILL.md` so packaging does not reach outside the library
+  crate.
 - Keep `readme.md` a short landing page: pitch, demo, install, quick start,
   command summary, and links. Detailed reference belongs in `docs/*.md`;
   update the page that owns a behavior when changing it.

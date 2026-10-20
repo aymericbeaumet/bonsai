@@ -12,7 +12,9 @@
   disposable benchmarks.
 - `docs/` — this documentation; `docs/demo/` — the README demo.
 
-Install the binary from a clone with `cargo install --path . --locked`.
+The CLI is not published to crates.io. Install the latest version from
+GitHub with `cargo install --locked --git https://github.com/aymericbeaumet/bonsai`,
+or your clone's version with `cargo install --path . --locked`.
 
 ## Checks
 
