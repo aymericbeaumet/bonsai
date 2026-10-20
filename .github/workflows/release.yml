@@ -13,6 +13,9 @@ concurrency:
 
 env:
   CARGO_TERM_COLOR: always
+  # Each job installs only the tools it lists; tasks must not add the rest.
+  MISE_AUTO_INSTALL: "false"
+  MISE_TASK_RUN_AUTO_INSTALL: "false"
 
 jobs:
   test:
@@ -86,7 +89,7 @@ jobs:
           perl -pi -e 's/^version = ".*"/version = "$ENV{VERSION}"/' Cargo.toml bonsai-lib/Cargo.toml
           perl -pi -e 's/(package = "bonsai-lib", path = "bonsai-lib", version = ")[^"]+/${1}$ENV{VERSION}/' Cargo.toml
       - run: cargo update --workspace
-      - run: cargo build --release --locked --target "$TARGET"
+      - run: mise run release -- --target "$TARGET"
         shell: bash
       - name: Verify the binary
         shell: bash
@@ -138,11 +141,17 @@ jobs:
     runs-on: ubuntu-26.04
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      # Only mise itself: the helper needs the runner's Python and nothing else.
+      - uses: jdx/mise-action@fc42bcc7ddbf51124c30f95a877a0c5168a3bfde # v5.2.1
+        with:
+          version: 2026.10.15
+          install: false
+          cache: false
       - name: Update aymericbeaumet/homebrew-tap
         env:
           GH_TOKEN: ${{ secrets.HOMEBREW_TAP_TOKEN }}
           VERSION: ${{ needs.version.outputs.version }}
-        run: python3 .github/scripts/release.py homebrew --tag "v$VERSION" --tap aymericbeaumet/homebrew-tap
+        run: mise run release-helper -- homebrew --tag "v$VERSION" --tap aymericbeaumet/homebrew-tap
 
   # Only the library is published; the CLI installs from GitHub.
   crate:
@@ -160,4 +169,4 @@ jobs:
         env:
           CARGO_REGISTRY_TOKEN: ${{ secrets.CARGO_REGISTRY_TOKEN }}
           VERSION: ${{ needs.version.outputs.version }}
-        run: python3 .github/scripts/release.py crate --version "$VERSION"
+        run: mise run release-helper -- crate --version "$VERSION"

@@ -1,8 +1,97 @@
 min_version = "2026.8.4"
 
+# The single development environment: these tools, and the tasks below for
+# every command contributors and CI run. `mise tasks` lists them.
 [tools]
 rust = { version = "1.99.1", profile = "default" }
 node = "26.12.0"
 python = "3.15.0"
 uv = "0.13.3"
 actionlint = "1.7.12"
+
+[tasks.build]
+description = "Build the workspace"
+run = "cargo build --workspace --locked"
+
+[tasks.release]
+description = "Build the optimized CLI (pass Cargo options after --)"
+run = "cargo build --release --locked"
+
+[tasks.run]
+description = "Run the CLI (pass its arguments after --)"
+run = "cargo run --locked --"
+
+[tasks.install]
+description = "Install this checkout's bonsai"
+run = "cargo install --locked --path ."
+
+[tasks.fmt]
+description = "Format Rust code"
+run = "cargo fmt --all"
+
+[tasks.fmt-check]
+description = "Check Rust formatting"
+run = "cargo fmt --all -- --check"
+
+[tasks.lint]
+description = "Lint every target with warnings denied"
+run = "cargo clippy --locked --all-targets -- -D warnings"
+
+[tasks.test]
+description = "Run the workspace tests (pass Cargo test options after --)"
+run = "cargo test --locked"
+
+[tasks.package]
+description = "Package both crates and verify the CLI against the packaged library"
+run = "cargo package --workspace --locked"
+
+[tasks.actionlint]
+description = "Lint the GitHub workflows"
+run = "actionlint"
+
+[tasks.release-helper]
+description = "Run the release helper (pass its command and options after --)"
+run = "python3 .github/scripts/release.py"
+
+[tasks.release-helper-tests]
+description = "Test the release helper"
+run = "python3 -m unittest discover -s .github/scripts -p 'test_*.py'"
+
+[tasks.check]
+description = "Run the checks every change needs: formatting, lints, tests, packaging, and workflows"
+run = [
+  { task = "fmt-check" },
+  { task = "lint" },
+  { task = "test" },
+  { task = "package" },
+  { task = "actionlint" },
+  { task = "release-helper-tests" },
+]
+
+[tasks.package-managers]
+description = "Smoke-test installs with real package managers (needs npm, uv, and Python)"
+run = "cargo test --locked --test cli real_package_managers_ -- --ignored"
+
+[tasks.terminal]
+description = "Run the release PTY checks against the optimized binary (Unix)"
+run = [{ task = "release" }, "python3 tests/terminal.py target/release/bonsai"]
+
+[tasks.bench]
+description = "Benchmark disposable repositories (pass benchmark options after --)"
+run = "python3 scripts/benchmark.py"
+
+[tasks.smoke]
+description = "Run the slower smoke tests CI adds on Linux"
+run = [
+  { task = "package-managers" },
+  { task = "terminal" },
+  "python3 scripts/benchmark.py --worktrees 1 --sessions 1000 --runs 3",
+]
+
+[tasks.doc]
+description = "Build and open the library documentation"
+run = "cargo doc --locked --no-deps --open -p bonsai-lib"
+
+[tasks.demo]
+description = "Re-record docs/demo/demo.gif in a container (Colima on macOS)"
+run = "docs/demo/record.sh"

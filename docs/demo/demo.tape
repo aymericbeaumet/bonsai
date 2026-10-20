@@ -1,5 +1,5 @@
 # Records demo.gif with VHS (https://github.com/charmbracelet/vhs).
-# Run ./record.sh rather than vhs directly: it builds the container this
+# Run `mise run demo` rather than vhs directly: it builds the container this
 # tape expects, with bonsai built from the checkout.
 
 Output demo.gif

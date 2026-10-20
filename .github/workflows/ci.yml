@@ -7,6 +7,9 @@ on:
 
 env:
   CARGO_TERM_COLOR: always
+  # Each job installs only the tools it lists; tasks must not add the rest.
+  MISE_AUTO_INSTALL: "false"
+  MISE_TASK_RUN_AUTO_INSTALL: "false"
 
 jobs:
   test:
@@ -35,25 +38,18 @@ jobs:
           sudo apt-get update
           sudo apt-get install --yes zsh fish
           echo "REQUIRE_TEST_SHELLS=1" >> "$GITHUB_ENV"
-      - run: cargo fmt --check
+      # Linux runs `mise run check`, split into its tasks so each reports on
+      # its own; every platform lints and tests.
+      - run: mise run fmt-check
         if: matrix.name == 'linux-amd64'
-      - run: actionlint .github/workflows/ci.yml .github/workflows/release.yml
+      - run: mise run actionlint
         if: matrix.name == 'linux-amd64'
-      - name: Release helper tests
+      - run: mise run release-helper-tests
         if: matrix.name == 'linux-amd64'
-        run: python3 -m unittest discover -s .github/scripts -p 'test_*.py'
-      - run: cargo clippy --locked --all-targets -- -D warnings
-      - run: cargo test --locked
-      - name: Package both crates
+      - run: mise run lint
+      - run: mise run test
+      - run: mise run package
         if: matrix.name == 'linux-amd64'
-        run: cargo package --workspace --locked
-      - name: Real package-manager smoke tests
+      - name: Package-manager, terminal, and benchmark smoke tests
         if: matrix.name == 'linux-amd64'
-        run: |
-          cargo test --locked --test cli real_package_managers_ -- --ignored
-      - name: Release terminal and benchmark smoke tests
-        if: matrix.name == 'linux-amd64'
-        run: |
-          cargo build --release --locked
-          python3 tests/terminal.py target/release/bonsai
-          python3 scripts/benchmark.py --worktrees 1 --sessions 1000 --runs 3
+        run: mise run smoke

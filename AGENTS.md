@@ -22,31 +22,32 @@
   https://github.com/aymericbeaumet/bonsai`. Releases publish only
   `bonsai-lib` to crates.io (`CARGO_REGISTRY_TOKEN`) and regenerate the tap
   formula (`HOMEBREW_TAP_TOKEN`) through `.github/scripts/release.py`; keep
-  its release archive names in sync with `release.yml`, and run its unittest
-  suite after changing it. CLI sources and integration tests live in `bonsai-cli/`; library
+  its release archive names in sync with `release.yml`, and run
+  `mise run release-helper-tests` after changing it. CLI sources and integration tests live in `bonsai-cli/`; library
   sources live in `bonsai-lib/`. The root package embeds
   `skills/bonsai/SKILL.md` so packaging does not reach outside the library
   crate.
 - Keep `readme.md` a short landing page: pitch, demo, install, quick start,
   command summary, and links. Detailed reference belongs in `docs/*.md`;
   update the page that owns a behavior when changing it.
-- `docs/demo/demo.gif` is recorded by `docs/demo/record.sh` (VHS in a
-  container, bonsai built from the checkout). Re-record it when the commands
-  or output it shows change.
-- Before finishing, run the CI checks through `mise exec --`:
-  `cargo fmt --check`, `cargo clippy --locked --all-targets -- -D warnings`,
-  `cargo test --locked`, `cargo package --workspace --locked`, and
-  `actionlint .github/workflows/ci.yml .github/workflows/release.yml`.
+- `docs/demo/demo.gif` is recorded by `mise run demo` (VHS in a container,
+  bonsai built from the checkout). Re-record it when the commands or output
+  it shows change.
+- mise is the single development environment: `.mise.toml` pins the tools
+  and defines a task for every command contributors and CI run. Add a task
+  rather than a Makefile, a shell alias, or a raw command in CI or the docs,
+  and keep `docs/development.md` listing them.
+- Before finishing, run `mise run check`: formatting, Clippy with warnings
+  denied, tests, packaging, actionlint, and the release helper tests.
 - Locally, `cargo package --workspace` may verify the CLI against a stale
   `bonsai-lib` because the placeholder version never changes: cargo reuses
   the unpacked copy in `~/.cargo/registry/src/*/bonsai-lib-0.1.1` and its
   build artifacts. If it reports errors the workspace build does not, delete
   that directory, run `cargo clean -p bonsai-lib`, and package again.
 - Trust `.mise.toml` with `mise trust .mise.toml` and run
-  `mise install --locked rust node python uv actionlint` for development tools. Run checks
-  through `mise exec --` unless mise is
-  activated in the shell. Tool pins and platform checksums live in `.mise.toml`
-  and `mise.lock`.
+  `mise install --locked`. Tool pins and platform checksums live in
+  `.mise.toml` and `mise.lock`. CI sets `MISE_TASK_RUN_AUTO_INSTALL=false`,
+  so each job uses only the tools it installs.
 - `bonsai hq` is a terminal worktree list that also runs commands. Inventory
   is Git checkouts under the bonsai root, workspace folder references, and
   the project where hq starts. Do not add a browser, a server, or a second

@@ -16,30 +16,33 @@ The CLI is not published to crates.io. Install the latest version from
 GitHub with `cargo install --locked --git https://github.com/aymericbeaumet/bonsai`,
 or your clone's version with `cargo install --path . --locked`.
 
-## Checks
+## Tasks
 
-Install [mise](https://mise.jdx.dev), then run `mise trust .mise.toml` and
-`mise install --locked rust node python uv actionlint` in the clone. `.mise.toml` and
-`mise.lock` pin Rust, Node.js, Python, uv, and actionlint for local development and CI.
-Use `mise exec --` for commands in shells without mise activation. The Linux
-CI shell tests also need Bash, Zsh, and Fish from the OS.
+mise is the single development environment. Install
+[mise](https://mise.jdx.dev), then in the clone run `mise trust .mise.toml`
+and `mise install --locked`: `.mise.toml` and `mise.lock` pin Rust,
+Node.js, Python, uv, and actionlint for local development and CI. Every
+command is a task; `mise tasks` lists them, and options after `--` reach the
+underlying command.
 
-```sh
-mise exec -- cargo test --locked
-mise exec -- cargo clippy --locked --all-targets -- -D warnings
-mise exec -- cargo fmt --check
-mise exec -- actionlint .github/workflows/ci.yml .github/workflows/release.yml
-mise exec -- cargo package --workspace --locked
-mise exec -- cargo build --release --locked
-mise exec -- python3 tests/terminal.py target/release/bonsai
-mise exec -- cargo test --locked --test cli real_package_managers_ -- --ignored
-mise exec -- python3 scripts/benchmark.py --worktrees 1 10 100 --sessions 1000 10000 100000
-```
+| Task | Runs |
+|---|---|
+| `mise run check` | Everything a change needs: `fmt-check`, `lint`, `test`, `package`, `actionlint`, `release-helper-tests` |
+| `mise run build` / `release` | Debug build of the workspace / optimized CLI |
+| `mise run test -- <filter>` | The workspace tests, optionally filtered |
+| `mise run fmt` | Format the code |
+| `mise run run -- <args>` | Run the CLI from the checkout |
+| `mise run install` | Install the checkout's `bonsai` |
+| `mise run doc` | Build and open the library documentation |
+| `mise run smoke` | The slower Linux CI checks: `package-managers`, `terminal`, and a quick benchmark |
+| `mise run bench -- <options>` | Benchmarks, for example `--worktrees 1 10 100 --sessions 1000 10000 100000` |
+| `mise run demo` | Re-record the README demo |
 
-The PTY checks require Unix. Package-manager smoke tests require npm, uv, and
-Python. Benchmarks use disposable repositories and synthetic session stores,
-report first-run and warm median/p95 latency plus Git process counts, and never
-access personal sessions.
+The PTY checks (`terminal`) require Unix. Package-manager smoke tests
+require npm, uv, and Python. The Linux CI shell tests also need Bash, Zsh,
+and Fish from the OS. Benchmarks use disposable repositories and synthetic
+session stores, report first-run and warm median/p95 latency plus Git
+process counts, and never access personal sessions.
 
 ## Releases
 
@@ -63,8 +66,7 @@ After the GitHub release, two jobs run `.github/scripts/release.py`:
   the CLI installs from GitHub, Homebrew, or mise.
 
 Both are idempotent: rerunning a failed job skips what is already done. Test
-the helper with
-`mise exec -- python3 -m unittest discover -s .github/scripts -p 'test_*.py'`.
+the helper with `mise run release-helper-tests`.
 
 ## Demo
 
@@ -73,10 +75,10 @@ from `docs/demo/demo.tape`. Re-record it after changing the commands or output
 it shows:
 
 ```sh
-docs/demo/record.sh
+mise run demo
 ```
 
-The script builds bonsai from the checkout inside a container and records in
+It runs `docs/demo/record.sh`, which builds bonsai from the checkout inside a container and records in
 a throwaway environment (`docs/demo/setup.sh`), so it never touches your
 repositories or `~/.bonsai`. It needs Docker; on macOS, run `colima start`
 first.
