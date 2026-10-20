@@ -52,13 +52,16 @@ jobs:
       fail-fast: false
       matrix:
         include:
-          - { name: linux-amd64, os: ubuntu-24.04 }
-          - { name: linux-arm64, os: ubuntu-24.04-arm }
-          - { name: darwin-amd64, os: macos-15-intel }
-          - { name: darwin-arm64, os: macos-26 }
-          - { name: windows-amd64, os: windows-2025 }
-          - { name: windows-arm64, os: windows-11-arm }
+          # Linux binaries link musl statically so they run on any distribution.
+          - { name: linux-amd64, os: ubuntu-24.04, target: x86_64-unknown-linux-musl }
+          - { name: linux-arm64, os: ubuntu-24.04-arm, target: aarch64-unknown-linux-musl }
+          - { name: darwin-amd64, os: macos-15-intel, target: x86_64-apple-darwin }
+          - { name: darwin-arm64, os: macos-26, target: aarch64-apple-darwin }
+          - { name: windows-amd64, os: windows-2025, target: x86_64-pc-windows-msvc }
+          - { name: windows-arm64, os: windows-11-arm, target: aarch64-pc-windows-msvc }
     runs-on: ${{ matrix.os }}
+    env:
+      TARGET: ${{ matrix.target }}
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
       - uses: jdx/mise-action@08ae2a091c038e1e05ec6f5115dc5c69d5a2a6b8 # v5.1.2
@@ -67,6 +70,13 @@ jobs:
           install_args: rust
           cache: false
       - uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2.9.2
+      - name: Add the static musl target
+        if: runner.os == 'Linux'
+        run: |
+          sudo apt-get update -qq
+          sudo apt-get install --yes -qq musl-tools
+          rustup target add "$TARGET"
+          echo "CC_${TARGET//-/_}=musl-gcc" >> "$GITHUB_ENV"
       # Stamp the computed version (not committed) on both crates so
       # `bonsai --version` matches the library it was built with.
       - shell: bash
@@ -76,16 +86,26 @@ jobs:
           perl -pi -e 's/^version = ".*"/version = "$ENV{VERSION}"/' Cargo.toml bonsai-lib/Cargo.toml
           perl -pi -e 's/(package = "bonsai-lib", path = "bonsai-lib", version = ")[^"]+/${1}$ENV{VERSION}/' Cargo.toml
       - run: cargo update --workspace
-      - run: cargo build --release --locked
+      - run: cargo build --release --locked --target "$TARGET"
+        shell: bash
+      - name: Verify the binary
+        shell: bash
+        env:
+          VERSION: ${{ needs.version.outputs.version }}
+        run: |
+          "target/$TARGET/release/bonsai" --version | grep -Fx "bonsai $VERSION"
+          if [[ "$RUNNER_OS" == Linux ]]; then
+            file "target/$TARGET/release/bonsai" | tee /dev/stderr | grep -Eq 'static(ally|-pie) linked'
+          fi
       - shell: bash
         env:
           ARCHIVE: bonsai-${{ matrix.name }}
         run: |
           mkdir dist
           if [[ "$ARCHIVE" == bonsai-windows-* ]]; then
-            (cd target/release && 7z a "../../dist/$ARCHIVE.zip" bonsai.exe)
+            (cd "target/$TARGET/release" && 7z a "$GITHUB_WORKSPACE/dist/$ARCHIVE.zip" bonsai.exe)
           else
-            tar -C target/release -czf "dist/$ARCHIVE.tar.gz" bonsai
+            tar -C "target/$TARGET/release" -czf "dist/$ARCHIVE.tar.gz" bonsai
           fi
       - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
         with:
@@ -111,3 +131,33 @@ jobs:
             --target "$GITHUB_SHA" \
             --generate-notes \
             dist/*
+
+  # The formula installs the prebuilt archives of the release above.
+  homebrew:
+    needs: [version, release]
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - name: Update aymericbeaumet/homebrew-tap
+        env:
+          GH_TOKEN: ${{ secrets.HOMEBREW_TAP_TOKEN }}
+          VERSION: ${{ needs.version.outputs.version }}
+        run: python3 .github/scripts/release.py homebrew --tag "v$VERSION" --tap aymericbeaumet/homebrew-tap
+
+  # Only the library is published; the CLI installs from GitHub.
+  crate:
+    needs: [version, release]
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - uses: jdx/mise-action@08ae2a091c038e1e05ec6f5115dc5c69d5a2a6b8 # v5.1.2
+        with:
+          version: 2026.10.11
+          install_args: rust
+          cache: false
+      - uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2.9.2
+      - name: Publish bonsai-lib to crates.io
+        env:
+          CARGO_REGISTRY_TOKEN: ${{ secrets.CARGO_REGISTRY_TOKEN }}
+          VERSION: ${{ needs.version.outputs.version }}
+        run: python3 .github/scripts/release.py crate --version "$VERSION"

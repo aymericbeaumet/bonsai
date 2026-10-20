@@ -48,6 +48,23 @@ release with binaries for Linux, macOS, and Windows (amd64 and arm64). The
 version is derived from Conventional Commits since the last tag: a breaking
 change bumps the major version, `feat` the minor, anything else the patch.
 The `version` in `Cargo.toml` is a placeholder stamped at release time.
+Linux binaries link musl statically; each build checks that `--version`
+reports the release version.
+
+After the GitHub release, two jobs run `.github/scripts/release.py`:
+
+- `homebrew` regenerates `Formula/bonsai.rb` in
+  [aymericbeaumet/homebrew-tap](https://github.com/aymericbeaumet/homebrew-tap)
+  from the release's `SHA256SUMS`. It needs the `HOMEBREW_TAP_TOKEN` secret,
+  with write access to the tap.
+- `crate` publishes `bonsai-lib` at the release version. It needs the
+  `CARGO_REGISTRY_TOKEN` secret. The `bonsai-cli` package has
+  `publish = false`: that name on crates.io belongs to another project, so
+  the CLI installs from GitHub, Homebrew, or mise.
+
+Both are idempotent: rerunning a failed job skips what is already done. Test
+the helper with
+`mise exec -- python3 -m unittest discover -s .github/scripts -p 'test_*.py'`.
 
 ## Demo
 

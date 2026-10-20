@@ -17,9 +17,13 @@
   `bonsai-lib` is the library, imported as `bonsai`. Keep both versions and
   the CLI's dependency requirement in sync. The CLI is never published to
   crates.io (`publish = false`; the `bonsai-cli` name there belongs to another
-  project): document `cargo install --locked --git
-  https://github.com/aymericbeaumet/bonsai`, or `cargo install --path .` from
-  a clone. CLI sources and integration tests live in `bonsai-cli/`; library
+  project): document Homebrew (`aymericbeaumet/tap/bonsai`), mise
+  (`github:aymericbeaumet/bonsai`), and `cargo install --locked --git
+  https://github.com/aymericbeaumet/bonsai`. Releases publish only
+  `bonsai-lib` to crates.io (`CARGO_REGISTRY_TOKEN`) and regenerate the tap
+  formula (`HOMEBREW_TAP_TOKEN`) through `.github/scripts/release.py`; keep
+  its release archive names in sync with `release.yml`, and run its unittest
+  suite after changing it. CLI sources and integration tests live in `bonsai-cli/`; library
   sources live in `bonsai-lib/`. The root package embeds
   `skills/bonsai/SKILL.md` so packaging does not reach outside the library
   crate.

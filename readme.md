@@ -43,19 +43,29 @@ request was squash-merged. bonsai does the bookkeeping:
 
 ## Install
 
-Prebuilt binaries for Linux, macOS, and Windows (amd64 and arm64) are on the
-[releases page](https://github.com/aymericbeaumet/bonsai/releases/latest).
-With [mise](https://mise.jdx.dev):
+**Homebrew** (macOS and Linux):
+
+```sh
+brew install aymericbeaumet/tap/bonsai
+```
+
+**mise** (Linux, macOS, and Windows):
 
 ```sh
 mise use -g github:aymericbeaumet/bonsai
 ```
 
-Or build from source with Cargo (Rust 1.99.1 or newer):
+**Cargo** (Rust 1.99.1 or newer):
 
 ```sh
 cargo install --locked --git https://github.com/aymericbeaumet/bonsai
 ```
+
+All three install the `bonsai` command. Prebuilt binaries support Linux,
+macOS, and Windows on amd64 and arm64; Linux binaries are static and run on
+any distribution. You can also download them from
+[GitHub Releases](https://github.com/aymericbeaumet/bonsai/releases/latest),
+verify the archive against `SHA256SUMS`, and put the binary on your `PATH`.
 
 Then enable the shell integration, which lets bonsai `cd` you into worktrees
 and adds completions:

@@ -39,6 +39,9 @@ jobs:
         if: matrix.name == 'linux-amd64'
       - run: actionlint .github/workflows/ci.yml .github/workflows/release.yml
         if: matrix.name == 'linux-amd64'
+      - name: Release helper tests
+        if: matrix.name == 'linux-amd64'
+        run: python3 -m unittest discover -s .github/scripts -p 'test_*.py'
       - run: cargo clippy --locked --all-targets -- -D warnings
       - run: cargo test --locked
       - name: Package both crates

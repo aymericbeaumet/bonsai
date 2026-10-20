@@ -20,11 +20,11 @@ locking guarantees.
 
 Worktree discovery and the commands behind the CLI are packaged as
 `bonsai-lib`, which the CLI builds on and which is imported as `bonsai`.
-It is not published on crates.io; depend on it from Git:
+Each release publishes it to [crates.io](https://crates.io/crates/bonsai-lib)
+at the CLI's version:
 
-```toml
-[dependencies]
-bonsai = { package = "bonsai-lib", git = "https://github.com/aymericbeaumet/bonsai" }
+```sh
+cargo add bonsai-lib --rename bonsai
 ```
 
 ```rust
@@ -34,4 +34,5 @@ let id = repo_id_from_url("https://github.com/aymericbeaumet/bonsai.git");
 assert_eq!(id.as_deref(), Some("github.com/aymericbeaumet/bonsai"));
 ```
 
-In a clone, run `cargo doc --open -p bonsai-lib` for the API documentation.
+API documentation is on [docs.rs](https://docs.rs/bonsai-lib); in a clone,
+run `cargo doc --open -p bonsai-lib`.
