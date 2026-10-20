@@ -629,8 +629,8 @@ struct Model {
     filtering: bool,
     /// Counts and two-key prefixes between keys, shared by every view.
     keys: keys::Keys,
-    /// Home list nests host, owner, repository, then each checkout.
-    tree: bool,
+    /// How the home list groups projects; `t` cycles through the trees.
+    tree: Tree,
     /// `s` cycles this. Alphabetical is the order the list opens in.
     sort: Sort,
     view: View,
@@ -696,6 +696,54 @@ impl Sort {
             Self::Name => "name",
             Self::Recent => "recent",
             Self::Size => "size",
+        }
+    }
+}
+
+/// The home list's grouping. `t` cycles through the three trees, from most
+/// to least nested, then back to the table.
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+enum Tree {
+    /// One row per project.
+    Off,
+    /// Host, then owner, then project.
+    Nested,
+    /// `host/owner`, then project.
+    Owners,
+    /// One `host/owner/project` group per project.
+    Projects,
+}
+
+impl Tree {
+    fn cycle(self) -> Self {
+        match self {
+            Self::Off => Self::Nested,
+            Self::Nested => Self::Owners,
+            Self::Owners => Self::Projects,
+            Self::Projects => Self::Off,
+        }
+    }
+
+    fn is_on(self) -> bool {
+        self != Self::Off
+    }
+
+    fn label(self) -> &'static str {
+        match self {
+            Self::Off => "table",
+            Self::Nested => "tree by host, owner, and project",
+            Self::Owners => "tree by owner",
+            Self::Projects => "tree by project",
+        }
+    }
+
+    /// What the next `t` shows, for the key hints.
+    fn next_hint(self) -> &'static str {
+        match self.cycle() {
+            Self::Off => "t table",
+            Self::Nested => "t tree",
+            Self::Owners => "t group by owner",
+            Self::Projects => "t group by project",
         }
     }
 }
@@ -872,8 +920,8 @@ const COMMANDS: &[CommandSpec] = &[
     CommandSpec {
         name: "tree",
         aliases: &[],
-        args: "",
-        hint: "show or hide the tree",
+        args: "[host|owner|project|off]",
+        hint: "cycle the trees: by host, by owner, by project, off",
         key: "t",
         cmd: Cmd::Tree,
     },
@@ -949,7 +997,7 @@ impl Model {
             filter: LineInput::default(),
             filtering: false,
             keys: keys::Keys::default(),
-            tree: false,
+            tree: Tree::Off,
             sort: Sort::Name,
             view: View::List,
             palette: None,
@@ -1355,7 +1403,13 @@ impl Model {
                 Effect::None
             }
             Cmd::Tree => {
-                self.tree = !self.tree;
+                self.tree = match args.trim() {
+                    "host" => Tree::Nested,
+                    "owner" => Tree::Owners,
+                    "project" => Tree::Projects,
+                    "off" | "table" => Tree::Off,
+                    _ => self.tree.cycle(),
+                };
                 self.view = View::List;
                 self.rebuild();
                 Effect::None
@@ -3469,7 +3523,7 @@ mod tests {
             }),
             ("home", |model| {
                 model.on_key(press(KeyCode::Esc));
-                model.tree = false;
+                model.tree = Tree::Off;
                 model.rebuild();
             }),
         ];
@@ -3922,8 +3976,10 @@ mod tests {
         let repo_at = tree.find("└─ bonsai").expect("repository");
         let branch_at = tree.find("├─ ab/dev").expect("checkout");
         assert!(owner_at < repo_at && repo_at < branch_at);
-        assert!(!tree.contains("host"));
-        assert!(!tree.contains("owner"));
+        // The tree's banners name the groups; its heading has no host column.
+        let heading = tree.lines().nth(1).unwrap();
+        assert!(!heading.contains("host"), "{heading}");
+        assert!(!heading.contains("owner"), "{heading}");
         assert_eq!(tree_buf[(0, 0)].style().fg, Some(Color::Cyan));
         let y = row_index(&tree, "├─ ab/dev");
         let selected = tree_buf[(1, y)].style();
@@ -4118,7 +4174,7 @@ mod tests {
         assert_eq!(model.rows[0].owner, "aymericbeaumet");
         assert_eq!(model.rows[0].project, "bonsai");
         assert_eq!(model.rows[0].title, "");
-        assert!(!model.tree);
+        assert_eq!(model.tree, Tree::Off);
         assert_eq!(checkouts(&model.rows[0]), 2);
         assert_eq!(model.rows[1].host, "github.com");
         assert_eq!(model.rows[1].owner, "interfaceinc");
@@ -4307,37 +4363,94 @@ mod tests {
         );
     }
 
+    /// Each tree row as (depth, label as drawn, elbow, rails).
+    fn tree_shape(model: &Model) -> Vec<(Depth, String, &'static str, String)> {
+        model
+            .rows
+            .iter()
+            .map(|row| {
+                let label: String = table::cell(row, Col::Name)
+                    .iter()
+                    .map(|span| span.content.to_string())
+                    .collect();
+                (
+                    row.depth,
+                    label.trim().to_string(),
+                    row.guide,
+                    row.prefix.clone(),
+                )
+            })
+            .collect()
+    }
+
     #[test]
-    fn t_opens_and_closes_the_worktree_tree() {
+    fn t_cycles_three_trees_then_the_table() {
         let mut model = Model::from_snapshot(sample());
+        assert_eq!(model.tree, Tree::Off);
+
         model.on_key(press(KeyCode::Char('t')));
-        assert!(model.tree);
+        assert_eq!(model.tree, Tree::Nested);
         assert!(matches!(model.view, View::List));
-        assert!(
-            model
-                .rows
-                .iter()
-                .any(|row| row.depth == Depth::Repo && row.project == "bonsai")
+        let labels: Vec<String> = tree_shape(&model).into_iter().map(|row| row.1).collect();
+        assert_eq!(
+            labels,
+            [
+                "┌─ github.com",
+                "│  ├─ aymericbeaumet",
+                "│  │  └─ bonsai",
+                "│  │     ├─ ab/dev",
+                "│  │     └─ main",
+                "│  └─ interfaceinc",
+                "│     └─ other",
+                "│        └─ feature",
+            ]
         );
-        assert!(
-            model
-                .rows
-                .iter()
-                .any(|row| row.guide == "├ " && row.title == "ab/dev")
-        );
-        assert!(
-            model
-                .rows
-                .iter()
-                .any(|row| row.guide == "└ " && row.title == "main")
-        );
-        assert!(model.rows.iter().any(|row| row.title == "feature"));
-        assert!(model.rows[model.cursor].path.is_some());
+        let (screen, _) = painted(&mut model);
+        assert!(screen.contains(" bonsai · tree by host, owner, and project · "));
+        assert!(screen.contains("t group by owner"));
         let selected = model.selected_path();
+
+        model.on_key(press(KeyCode::Char('t')));
+        assert_eq!(model.tree, Tree::Owners);
+        let labels: Vec<String> = tree_shape(&model).into_iter().map(|row| row.1).collect();
+        assert_eq!(
+            labels,
+            [
+                "┌─ github.com/aymericbeaumet",
+                "│  └─ bonsai",
+                "│     ├─ ab/dev",
+                "│     └─ main",
+                "┌─ github.com/interfaceinc",
+                "│  └─ other",
+                "│     └─ feature",
+            ]
+        );
+        assert_eq!(model.selected_path(), selected, "the selection follows");
+        let (screen, _) = painted(&mut model);
+        assert!(screen.contains(" bonsai · tree by owner · "));
+        assert!(screen.contains("t group by project"));
+
+        model.on_key(press(KeyCode::Char('t')));
+        assert_eq!(model.tree, Tree::Projects);
+        let labels: Vec<String> = tree_shape(&model).into_iter().map(|row| row.1).collect();
+        assert_eq!(
+            labels,
+            [
+                "┌─ github.com/aymericbeaumet/bonsai",
+                "│  ├─ ab/dev",
+                "│  └─ main",
+                "┌─ github.com/interfaceinc/other",
+                "│  └─ feature",
+            ]
+        );
+        let (screen, _) = painted(&mut model);
+        assert!(screen.contains(" bonsai · tree by project · "));
+        assert!(screen.contains("t table"));
+
         model.on_key(press(KeyCode::Enter));
         assert!(matches!(model.view, View::Detail { .. }));
         model.on_key(press(KeyCode::Char('t')));
-        assert!(!model.tree);
+        assert_eq!(model.tree, Tree::Off);
         assert!(matches!(model.view, View::List));
         assert_eq!(model.rows.len(), 2);
         assert!(model.rows.iter().all(|row| row.title.is_empty()));
@@ -4346,7 +4459,85 @@ mod tests {
         model.on_key(press(KeyCode::Char('/')));
         model.on_key(press(KeyCode::Char('t')));
         assert_eq!(model.filter.text(), "t");
-        assert!(!model.tree);
+        assert_eq!(model.tree, Tree::Off);
+    }
+
+    #[test]
+    fn joined_tree_labels_keep_each_part_s_colour_and_sum_their_groups() {
+        let mut model = Model::from_snapshot(sample());
+        model
+            .footprints
+            .insert("/trees/bonsai/ab/dev".into(), sized(1_500));
+        model
+            .footprints
+            .insert("/trees/bonsai/main".into(), sized(2_500));
+        model.command(Cmd::Tree, "owner");
+        let owner = model
+            .rows
+            .iter()
+            .find(|row| row.depth == Depth::Owner && row.owner == "aymericbeaumet")
+            .unwrap();
+        let name = table::cell(owner, Col::Name);
+        let style = |text: &str| {
+            name.iter()
+                .find(|span| span.content == text)
+                .unwrap_or_else(|| panic!("no {text} in {name:?}"))
+                .style
+        };
+        assert_eq!(style("github.com").fg, Some(Color::LightBlue));
+        assert_eq!(style("aymericbeaumet").fg, Some(Color::LightMagenta));
+        assert!(words(owner).contains("4 kB"), "{}", words(owner));
+        model.command(Cmd::Tree, "project");
+        let repo = model
+            .rows
+            .iter()
+            .find(|row| row.depth == Depth::Repo && row.project == "bonsai")
+            .unwrap();
+        let name = table::cell(repo, Col::Name);
+        assert_eq!(
+            name.iter()
+                .find(|span| span.content == "bonsai")
+                .unwrap()
+                .style
+                .fg,
+            Some(Color::LightGreen)
+        );
+        assert!(words(repo).contains("4 kB"));
+        model.command(Cmd::Tree, "off");
+        assert_eq!(model.tree, Tree::Off);
+        model.command(Cmd::Tree, "host");
+        assert_eq!(model.tree, Tree::Nested);
+    }
+
+    #[test]
+    fn a_host_without_owner_and_a_project_without_remote_stay_readable() {
+        let mut snapshot = sample();
+        snapshot.projects.push(Project {
+            id: "local".to_string(),
+            name: "local".to_string(),
+            path: "/trees/local".into(),
+            remote: Some("git@example:local.git".to_string()),
+            worktrees: vec![worktree("main", "/trees/local/main", true, Some(false))],
+        });
+        snapshot.projects.push(Project {
+            id: "plain".to_string(),
+            name: "plain".to_string(),
+            path: "/trees/plain".into(),
+            remote: None,
+            worktrees: vec![worktree("main", "/trees/plain/main", true, Some(false))],
+        });
+        let mut model = Model::from_snapshot(snapshot);
+        model.command(Cmd::Tree, "owner");
+        let labels: Vec<String> = tree_shape(&model).into_iter().map(|row| row.1).collect();
+        assert!(labels.contains(&"┌─ example".to_string()), "{labels:?}");
+        assert!(labels.contains(&"┌─ plain".to_string()), "{labels:?}");
+        model.command(Cmd::Tree, "project");
+        let labels: Vec<String> = tree_shape(&model).into_iter().map(|row| row.1).collect();
+        assert!(
+            labels.contains(&"┌─ example/local".to_string()),
+            "{labels:?}"
+        );
+        assert!(labels.contains(&"┌─ plain".to_string()), "{labels:?}");
     }
 
     #[test]

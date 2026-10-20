@@ -152,7 +152,7 @@ fn kind(model: &Model) -> Kind {
     match &model.view {
         View::Detail { .. } => Kind::Checkouts,
         View::List if searching => Kind::Search,
-        View::List if model.tree => Kind::Tree,
+        View::List if model.tree.is_on() => Kind::Tree,
         View::List => Kind::Projects,
     }
 }
@@ -203,8 +203,8 @@ fn title(model: &Model) -> Line<'static> {
         }
         View::List => {
             let mut parts = Vec::new();
-            if model.tree {
-                parts.push("tree".to_string());
+            if model.tree.is_on() {
+                parts.push(model.tree.label().to_string());
             }
             let (projects, checkouts, bytes, sized) = model.overall();
             parts.push(plural(projects, "project"));
@@ -234,7 +234,7 @@ pub(super) fn framed(model: &Model) -> bool {
 fn tree_frame(model: &Model) -> bool {
     model.palette.is_none()
         && matches!(model.view, View::List)
-        && model.tree
+        && model.tree.is_on()
         && model.filter.is_empty()
 }
 
@@ -276,13 +276,13 @@ fn keys(model: &Model) -> String {
         View::List if !model.filter.is_empty() => {
             keys.extend(["enter open", "c cd", "dd remove", "/ edit", "esc clear"]);
         }
-        View::List if model.tree => {
+        View::List if model.tree.is_on() => {
             keys.extend([
                 "enter open",
                 "c cd",
                 "a add",
                 "dd remove",
-                "t table",
+                model.tree.next_hint(),
                 "s sort",
             ]);
         }
@@ -529,7 +529,11 @@ pub(super) const HELP: &[(&str, &[(&str, &str)])] = &[
             ("c", "cd into the selected checkout and quit"),
             ("h  ←  esc", "back"),
             ("/", "search; enter keeps the results, esc clears them"),
-            ("t  s  r", "tree view, sort (name, recent, size), refresh"),
+            (
+                "t",
+                "tree by host, owner, and project; by owner; by project; then the table",
+            ),
+            ("s  r", "sort by name, recent activity, or size; refresh"),
         ],
     ),
     (

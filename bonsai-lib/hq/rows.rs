@@ -13,7 +13,7 @@ use std::time::Duration;
 use super::footprint::{Dependency, Footprint};
 use super::inventory::{Project, WorktreeEntry};
 use super::owner;
-use super::{Model, Sort, View};
+use super::{Model, Sort, Tree, View};
 
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
 pub(super) enum Depth {
@@ -41,6 +41,9 @@ pub(super) struct Row {
     pub(super) path: Option<PathBuf>,
     /// Owning project. Empty on host and owner rows.
     pub(super) project_id: String,
+    /// The label spells out its ancestors: `host/owner` on an owner row,
+    /// `host/owner/project` on a repository row.
+    pub(super) joined: bool,
     pub(super) info: Info,
 }
 
@@ -232,8 +235,8 @@ pub(super) fn project_totals(model: &Model, project: &Project) -> Totals {
 pub(super) fn visible_rows(model: &Model, now: u64) -> Vec<Row> {
     let query = owner::parse_query(model.filter.text());
     let list = matches!(model.view, View::List) && query_is_empty(&query);
-    let overview = list && !model.tree;
-    let tree = list && model.tree;
+    let overview = list && !model.tree.is_on();
+    let tree = list && model.tree.is_on();
     let mut projects: Vec<&Project> = model.snapshot.projects.iter().collect();
     sort_projects(model, &mut projects);
     if let View::Detail { project } = &model.view {
@@ -279,7 +282,11 @@ pub(super) fn visible_rows(model: &Model, now: u64) -> Vec<Row> {
     }
     let context = Context { model, now };
     if tree {
-        tree_rows(&shown, &context)
+        match model.tree {
+            Tree::Owners => owner_rows(&shown, &context),
+            Tree::Projects => project_rows(&shown, &context),
+            Tree::Nested | Tree::Off => tree_rows(&shown, &context),
+        }
     } else {
         list_rows(&shown, overview, &context)
     }
@@ -406,6 +413,54 @@ fn tree_rows(shown: &[Shown<'_>], context: &Context<'_>) -> Vec<Row> {
     rows
 }
 
+/// `host/owner` banners, each listing its projects.
+fn owner_rows(shown: &[Shown<'_>], context: &Context<'_>) -> Vec<Row> {
+    let mut groups: Vec<((&str, &str), Vec<&Shown<'_>>)> = Vec::new();
+    for item in shown {
+        let key = (item.host.as_str(), item.owner.as_str());
+        if let Some(index) = groups.iter().position(|group| group.0 == key) {
+            groups[index].1.push(item);
+        } else {
+            groups.push((key, vec![item]));
+        }
+    }
+    let mut rows = Vec::new();
+    for ((host, owner), items) in groups {
+        if host.is_empty() && owner.is_empty() {
+            for item in items {
+                push_repo_banner(&mut rows, item, context);
+            }
+            continue;
+        }
+        let mut row = empty_row();
+        row.depth = Depth::Owner;
+        row.host = host.to_string();
+        row.owner = owner.to_string();
+        row.joined = true;
+        row.info = Info::Group(sum(&items));
+        rows.push(row);
+        let last = items.len().saturating_sub(1);
+        for (index, item) in items.iter().enumerate() {
+            push_repo(&mut rows, item, TREE_RAIL, index != last, context);
+        }
+    }
+    rows
+}
+
+/// One `host/owner/project` banner per project, listing its checkouts.
+fn project_rows(shown: &[Shown<'_>], context: &Context<'_>) -> Vec<Row> {
+    let mut rows = Vec::new();
+    for item in shown {
+        let mut row = repo_row(item, context);
+        row.host.clone_from(&item.host);
+        row.owner.clone_from(&item.owner);
+        row.joined = true;
+        rows.push(row);
+        push_branches(&mut rows, item, TREE_RAIL, context);
+    }
+    rows
+}
+
 fn host_children<'a>(items: &[&'a Shown<'a>]) -> Vec<Child<'a>> {
     let mut children = Vec::new();
     for item in items {
@@ -522,6 +577,7 @@ pub(super) fn empty_row() -> Row {
         main: false,
         path: None,
         project_id: String::new(),
+        joined: false,
         info: Info::Group(Totals::default()),
     }
 }

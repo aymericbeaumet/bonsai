@@ -460,30 +460,52 @@ pub(super) fn note_word(note: Note) -> &'static str {
     }
 }
 
+/// The label of a tree row, in parts with their own colours. A joined label
+/// spells out its ancestors, such as `github.com/owner/project`.
+fn label_parts(row: &Row) -> Vec<(String, Style)> {
+    let host = (row.host.clone(), host_style());
+    let owner = (row.owner.clone(), owner_style());
+    let project = (row.project.clone(), project_style());
+    let parts = match (row.depth, row.joined) {
+        (Depth::Host, _) => vec![host],
+        (Depth::Owner, false) => vec![owner],
+        (Depth::Owner, true) => vec![host, owner],
+        (Depth::Repo, false) => vec![project],
+        (Depth::Repo, true) => vec![host, owner, project],
+        (Depth::Branch | Depth::Flat, _) => vec![(row.title.clone(), branch_style(row))],
+    };
+    parts
+        .into_iter()
+        .filter(|(text, _)| !text.is_empty())
+        .collect()
+}
+
 fn name_cell(row: &Row) -> Vec<Span<'static>> {
-    let (label, style) = match row.depth {
-        Depth::Host => (row.host.clone(), host_style()),
-        Depth::Owner => (row.owner.clone(), owner_style()),
-        Depth::Repo => (row.project.clone(), project_style()),
-        Depth::Branch | Depth::Flat => (row.title.clone(), branch_style(row)),
-    };
-    if row.prefix.is_empty() && row.guide.is_empty() {
-        // A banner: a host, or a repository without a host.
-        return vec![Span::styled(format!("┌─ {label}"), style)];
-    }
-    let mark = if row.guide.starts_with('└') {
-        "└─ "
-    } else {
-        "├─ "
-    };
+    let parts = label_parts(row);
+    let lead = parts.first().map(|(_, style)| *style).unwrap_or_default();
     let mut spans = Vec::new();
-    // The table margin already provides the rail's leading space.
-    let prefix = row.prefix.strip_prefix(' ').unwrap_or(&row.prefix);
-    if !prefix.is_empty() {
-        spans.push(Span::styled(prefix.to_string(), rule_style()));
+    if row.prefix.is_empty() && row.guide.is_empty() {
+        // A banner: a top-level group of the tree.
+        spans.push(Span::styled("┌─ ", lead));
+    } else {
+        // The table margin already provides the rail's leading space.
+        let prefix = row.prefix.strip_prefix(' ').unwrap_or(&row.prefix);
+        if !prefix.is_empty() {
+            spans.push(Span::styled(prefix.to_string(), rule_style()));
+        }
+        let mark = if row.guide.starts_with('└') {
+            "└─ "
+        } else {
+            "├─ "
+        };
+        spans.push(Span::styled(mark, lead));
     }
-    spans.push(Span::styled(mark, style));
-    spans.push(Span::styled(label, style));
+    for (index, (text, style)) in parts.into_iter().enumerate() {
+        if index > 0 {
+            spans.push(Span::styled("/", Style::new().add_modifier(Modifier::DIM)));
+        }
+        spans.push(Span::styled(text, style));
+    }
     spans
 }
 

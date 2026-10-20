@@ -228,8 +228,9 @@ outside the root.
 The home list is one row per project with its checkouts, uncommitted
 changes, total size, age, stack, coding agents, and deleted checkouts. Open a
 project to list each checkout with its changes, upstream, size, and
-dependency directories. t shows the tree of host, owner, and repository,
-each with its totals. s sorts by name, recent activity, or size. Sizes from
+dependency directories. t cycles through three trees, each group with its
+totals, then back to the table: by host, owner, and project; by owner
+(host/owner, then project); and by project (host/owner/project). s sorts by name, recent activity, or size. Sizes from
 the previous session show at once and update as they are measured again.
 
 Keys follow vim: j/k with counts (5j), gg/G, ctrl-d/u, ctrl-f/b, ctrl-e/y,

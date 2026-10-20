@@ -46,8 +46,16 @@ project's totals, and suggests `P` when checkouts were deleted by hand.
 `upstream gone` usually means the pull request was merged and its branch
 deleted; `C` cleans those.
 
-`t` shows the **tree**: host, then owner, then repository, then checkouts.
-Every group sums what it contains. A **search** (`/`) lists matching
+`t` cycles through three **trees**, then back to the table:
+
+| Tree | Groups |
+|---|---|
+| By host, owner, and project | `github.com`, then `aymericbeaumet`, then `bonsai`, then its checkouts |
+| By owner | `github.com/aymericbeaumet`, then `bonsai`, then its checkouts |
+| By project | `github.com/aymericbeaumet/bonsai`, then its checkouts |
+
+Every group sums what it contains. `:tree host`, `:tree owner`,
+`:tree project`, and `:tree off` go straight to one. A **search** (`/`) lists matching
 checkouts from every project. Columns that have nothing to show are hidden,
 and on a narrow terminal the least useful ones go first.
 
@@ -88,7 +96,7 @@ the full-screen output (`O`), which they scroll like a pager.
 | `l`, →, Tab | Open a project |
 | `h`, ←, Esc, Ctrl-O | Back: close the output, clear a search, leave the project |
 | `/` | Fuzzy-find by host, owner, project, branch, path, stack, or agent |
-| `t` | Toggle the tree |
+| `t` | Next tree: by host, owner, and project; by owner; by project; then the table |
 | `s` | Sort by name, recent activity, or size |
 | `r` | Refresh |
 | `O` | Show the latest command's output full screen |
