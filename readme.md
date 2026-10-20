@@ -17,7 +17,15 @@ you pick.
 
 ## Install
 
-With [mise](https://mise.jdx.dev) (prebuilt binaries for Linux, macOS, and
+One line on Linux and macOS installs the latest release to `~/.local/bin`
+(`| sh -s -- <dir>` picks another directory), verifies its checksum, and installs the
+Agent Skill for detected harnesses such as Claude Code:
+
+```sh
+curl -fsSL https://raw.githubusercontent.com/aymericbeaumet/bonsai/main/install.sh | sh
+```
+
+Or with [mise](https://mise.jdx.dev) (prebuilt binaries for Linux, macOS, and
 Windows — amd64 and arm64):
 
 ```sh

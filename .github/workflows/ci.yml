@@ -35,6 +35,13 @@ jobs:
           sudo apt-get update
           sudo apt-get install --yes zsh fish
           echo "REQUIRE_TEST_SHELLS=1" >> "$GITHUB_ENV"
+      - name: Install script
+        if: runner.os != 'Windows'
+        run: |
+          mkdir -p "$RUNNER_TEMP/home/.claude"
+          HOME="$RUNNER_TEMP/home" sh install.sh
+          "$RUNNER_TEMP/home/.local/bin/bonsai" --version
+          test -f "$RUNNER_TEMP/home/.claude/skills/bonsai/SKILL.md"
       - run: cargo fmt --check
         if: matrix.name == 'linux-amd64'
       - run: actionlint .github/workflows/ci.yml .github/workflows/release.yml
