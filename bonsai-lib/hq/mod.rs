@@ -1,6 +1,7 @@
 mod footprint;
 mod inventory;
 mod jobs;
+mod keys;
 mod owner;
 mod rows;
 mod table;
@@ -616,36 +617,18 @@ fn scroll_top(scroll: usize, cursor: usize, height: usize, len: usize, scrolloff
     top.min(max_top)
 }
 
-/// A key with Shift folded into the character, as terminals report either.
-fn shifted(key: &KeyEvent) -> KeyCode {
-    match key.code {
-        KeyCode::Char(ch) if key.modifiers.contains(KeyModifiers::SHIFT) => {
-            KeyCode::Char(ch.to_ascii_uppercase())
-        }
-        code => code,
-    }
-}
-
 fn ctrl_letter(key: &KeyEvent, ch: char) -> bool {
     key.modifiers.contains(KeyModifiers::CONTROL)
         && !key.modifiers.contains(KeyModifiers::ALT)
         && matches!(key.code, KeyCode::Char(got) if got.eq_ignore_ascii_case(&ch))
 }
 
-fn plain(key: &KeyEvent) -> bool {
-    !key.modifiers
-        .intersects(KeyModifiers::CONTROL | KeyModifiers::ALT | KeyModifiers::SUPER)
-}
-
 struct Model {
     snapshot: Snapshot,
     filter: LineInput,
     filtering: bool,
-    /// First key of a two-key command: `g` (gg), `z` (zz zt zb), `d` (dd),
-    /// or `y` (yy).
-    pending_key: Option<char>,
-    /// A count typed before a motion, as in vim: `5j`.
-    count: Option<usize>,
+    /// Counts and two-key prefixes between keys, shared by every view.
+    keys: keys::Keys,
     /// Home list nests host, owner, repository, then each checkout.
     tree: bool,
     /// `s` cycles this. Alphabetical is the order the list opens in.
@@ -653,7 +636,10 @@ struct Model {
     view: View,
     palette: Option<Palette>,
     confirm: Option<Confirm>,
-    help: bool,
+    /// The `?` list of keys, scrolled like a pager.
+    help: Option<keys::Pager>,
+    /// The latest command's output, full screen (`O`).
+    output: Option<keys::Pager>,
     /// Output of the latest background command.
     pane: Option<jobs::Pane>,
     /// Checkout to select once the next reload finishes.
@@ -736,6 +722,8 @@ struct Confirm {
     /// Opened by a command finishing rather than by a key: keys before this
     /// moment were typed for something else.
     ready_at: Option<Instant>,
+    /// Scroll position of a plan too long for the screen.
+    pager: keys::Pager,
 }
 
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
@@ -751,6 +739,7 @@ enum Cmd {
     Resume,
     Edit,
     Copy,
+    Output,
     Refresh,
     Sort,
     Tree,
@@ -857,6 +846,14 @@ const COMMANDS: &[CommandSpec] = &[
         cmd: Cmd::Copy,
     },
     CommandSpec {
+        name: "output",
+        aliases: &["log"],
+        args: "",
+        hint: "show the latest command's output in full",
+        key: "O",
+        cmd: Cmd::Output,
+    },
+    CommandSpec {
         name: "refresh",
         aliases: &["reload"],
         args: "",
@@ -931,6 +928,13 @@ enum Effect {
     Run(Action),
 }
 
+/// Text views that scroll like a pager over the list.
+#[derive(Clone, Copy)]
+enum Overlay {
+    Help,
+    Output,
+}
+
 #[derive(Clone, Copy)]
 enum Place {
     Top,
@@ -944,14 +948,14 @@ impl Model {
             snapshot,
             filter: LineInput::default(),
             filtering: false,
-            pending_key: None,
-            count: None,
+            keys: keys::Keys::default(),
             tree: false,
             sort: Sort::Name,
             view: View::List,
             palette: None,
             confirm: None,
-            help: false,
+            help: None,
+            output: None,
             pane: None,
             select_after: None,
             ready_plan: None,
@@ -998,14 +1002,11 @@ impl Model {
             return Effect::None;
         }
         self.notice = None;
-        if self.help {
-            if matches!(key.code, KeyCode::Esc | KeyCode::Char('?' | 'q')) || ctrl_letter(&key, 'o')
-            {
-                self.help = false;
-            } else if ctrl_letter(&key, 'c') {
-                return Effect::Quit;
-            }
-            return Effect::None;
+        if self.help.is_some() {
+            return self.on_pager_key(key, Overlay::Help);
+        }
+        if self.output.is_some() {
+            return self.on_pager_key(key, Overlay::Output);
         }
         if self.confirm.is_some() {
             return self.on_confirm_key(key);
@@ -1017,6 +1018,43 @@ impl Model {
             return self.on_filter_key(key);
         }
         self.on_normal_key(key)
+    }
+
+    /// Help and the output view scroll with the list's keys; `q`, Esc, or
+    /// their own key closes them.
+    fn on_pager_key(&mut self, key: KeyEvent, overlay: Overlay) -> Effect {
+        let input = self.keys.feed(key, &[]);
+        let pager = match overlay {
+            Overlay::Help => self.help.as_mut(),
+            Overlay::Output => self.output.as_mut(),
+        };
+        let Some(pager) = pager else {
+            return Effect::None;
+        };
+        match input {
+            keys::Input::Motion(motion, count) => pager.apply(motion, count),
+            keys::Input::Key(key, _) => {
+                if ctrl_letter(&key, 'c') {
+                    return Effect::Quit;
+                }
+                let own = match overlay {
+                    Overlay::Help => '?',
+                    Overlay::Output => 'O',
+                };
+                let close = matches!(key.code, KeyCode::Esc | KeyCode::Char('q'))
+                    || keys::shifted(&key) == KeyCode::Char(own)
+                    || ctrl_letter(&key, 'o');
+                if close {
+                    self.keys.reset();
+                    match overlay {
+                        Overlay::Help => self.help = None,
+                        Overlay::Output => self.output = None,
+                    }
+                }
+            }
+            keys::Input::Pair(_) | keys::Input::Pending => {}
+        }
+        Effect::None
     }
 
     fn on_confirm_key(&mut self, key: KeyEvent) -> Effect {
@@ -1031,6 +1069,17 @@ impl Model {
         {
             return Effect::None;
         }
+        // A long plan scrolls with the usual keys; only y answers yes.
+        let key = match self.keys.feed(key, &[]) {
+            keys::Input::Motion(motion, count) => {
+                if let Some(confirm) = self.confirm.as_mut() {
+                    confirm.pager.apply(motion, count);
+                }
+                return Effect::None;
+            }
+            keys::Input::Key(key, _) => key,
+            keys::Input::Pair(_) | keys::Input::Pending => return Effect::None,
+        };
         match key.code {
             KeyCode::Char('y' | 'Y') => {
                 let confirm = self.confirm.take().expect("a confirmation");
@@ -1055,8 +1104,9 @@ impl Model {
             KeyCode::Char('n') if ctrl => self.move_selection(1),
             KeyCode::PageUp => self.move_rows(-self.page_delta(false)),
             KeyCode::PageDown => self.move_rows(self.page_delta(false)),
-            KeyCode::Enter | KeyCode::Tab => self.finish_filter(),
-            KeyCode::Char('i') if ctrl => self.finish_filter(),
+            KeyCode::Enter => self.filtering = false,
+            KeyCode::Tab => self.go_in(),
+            KeyCode::Char('i') if ctrl => self.go_in(),
             KeyCode::Esc => self.go_up(),
             KeyCode::Char('o') if ctrl => self.go_up(),
             _ if self.filter.edit(&key) => self.rebuild(),
@@ -1065,99 +1115,40 @@ impl Model {
         Effect::None
     }
 
-    /// Enter in search: open the project of the match on the home list, or
-    /// keep the filter and return to the keys inside a project.
-    fn finish_filter(&mut self) {
-        if matches!(self.view, View::List) {
-            self.go_in();
-        } else {
-            self.filtering = false;
-        }
-    }
-
-    fn take_count(&mut self) -> Option<usize> {
-        self.count.take()
-    }
-
     fn on_normal_key(&mut self, key: KeyEvent) -> Effect {
-        let ctrl = key.modifiers.contains(KeyModifiers::CONTROL);
-        let code = shifted(&key);
-        if let Some(first) = self.pending_key.take()
-            && plain(&key)
-        {
-            let count = self.take_count();
-            match (first, code) {
-                ('g', KeyCode::Char('g')) => {
-                    self.jump_to(count, false);
-                    return Effect::None;
-                }
-                ('z', KeyCode::Char('z')) => return self.align(Place::Middle),
-                ('z', KeyCode::Char('t')) => return self.align(Place::Top),
-                ('z', KeyCode::Char('b')) => return self.align(Place::Bottom),
-                ('d', KeyCode::Char('d')) => return self.command(Cmd::Remove, ""),
-                ('y', KeyCode::Char('y')) => return self.command(Cmd::Copy, ""),
-                _ => {}
+        let key = match self.keys.feed(key, &['d', 'y']) {
+            keys::Input::Pending => return Effect::None,
+            keys::Input::Motion(motion, count) => {
+                self.move_by(motion, count);
+                return Effect::None;
             }
-        }
-        if let KeyCode::Char(digit @ '0'..='9') = code
-            && plain(&key)
-            && (digit != '0' || self.count.is_some())
-        {
-            let value = u32::from(digit) - u32::from('0');
-            let next = self
-                .count
-                .unwrap_or(0)
-                .saturating_mul(10)
-                .saturating_add(value as usize)
-                .min(99_999);
-            self.count = Some(next);
-            return Effect::None;
-        }
-        let count = self.take_count();
-        let times = isize::try_from(count.unwrap_or(1)).unwrap_or(1);
-        if ctrl {
-            match code {
-                KeyCode::Char('c' | 'C') => return Effect::Quit,
-                KeyCode::Char('p' | 'P') => self.move_selection(-times),
-                KeyCode::Char('n' | 'N') => self.move_selection(times),
-                KeyCode::Char('d' | 'D') => self.move_rows(self.page_delta(true) * times),
-                KeyCode::Char('u' | 'U') => self.move_rows(-self.page_delta(true) * times),
-                KeyCode::Char('f' | 'F') => self.move_rows(self.page_delta(false) * times),
-                KeyCode::Char('b' | 'B') => self.move_rows(-self.page_delta(false) * times),
-                KeyCode::Char('e' | 'E') => self.scroll_view(times),
-                KeyCode::Char('y' | 'Y') => self.scroll_view(-times),
-                KeyCode::Char('i' | 'I') => self.go_in(),
-                KeyCode::Char('o' | 'O') => self.go_up(),
-                _ => {}
+            keys::Input::Pair('d') => return self.command(Cmd::Remove, ""),
+            keys::Input::Pair(_) => return self.command(Cmd::Copy, ""),
+            keys::Input::Key(key, _) => key,
+        };
+        if key.modifiers.contains(KeyModifiers::CONTROL) {
+            if ctrl_letter(&key, 'c') {
+                return Effect::Quit;
+            } else if ctrl_letter(&key, 'i') {
+                self.go_in();
+            } else if ctrl_letter(&key, 'o') {
+                self.go_up();
             }
             return Effect::None;
         }
-        if !plain(&key) {
+        if key
+            .modifiers
+            .intersects(KeyModifiers::ALT | KeyModifiers::SUPER)
+        {
             return Effect::None;
         }
-        match code {
-            KeyCode::Up | KeyCode::Char('k') => self.move_selection(-times),
-            KeyCode::Down | KeyCode::Char('j') => self.move_selection(times),
+        match keys::shifted(&key) {
             KeyCode::Left | KeyCode::Char('h') | KeyCode::Esc => self.go_up(),
             KeyCode::Right | KeyCode::Char('l') | KeyCode::Tab => self.go_in(),
             KeyCode::Enter | KeyCode::Char('o') => return self.open(),
-            KeyCode::PageUp => self.move_rows(-self.page_delta(false) * times),
-            KeyCode::PageDown => self.move_rows(self.page_delta(false) * times),
-            KeyCode::Home => self.jump_to(None, false),
-            KeyCode::End => self.jump_to(None, true),
-            KeyCode::Char('G') => self.jump_to(count, true),
-            KeyCode::Char(first @ ('g' | 'z' | 'd' | 'y')) => {
-                self.pending_key = Some(first);
-                self.count = count;
-            }
-            KeyCode::Char('H') => self.screen_jump(Place::Top),
-            KeyCode::Char('M') => self.screen_jump(Place::Middle),
-            KeyCode::Char('L') => self.screen_jump(Place::Bottom),
-            KeyCode::Char('{') => self.jump_group(-times),
-            KeyCode::Char('}') => self.jump_group(times),
             KeyCode::Char('/') => self.filtering = true,
             KeyCode::Char(':') => self.open_palette(""),
-            KeyCode::Char('?') => self.help = true,
+            KeyCode::Char('?') => return self.command(Cmd::Help, ""),
             KeyCode::Char('q') => return Effect::Quit,
             KeyCode::Char('r') => return Effect::Refresh,
             KeyCode::Char('t') => return self.command(Cmd::Tree, ""),
@@ -1171,9 +1162,36 @@ impl Model {
             KeyCode::Char('e') => return self.command(Cmd::Edit, ""),
             KeyCode::Char('A') => return self.command(Cmd::Start, ""),
             KeyCode::Char('R') => return self.command(Cmd::Resume, ""),
+            KeyCode::Char('O') => return self.command(Cmd::Output, ""),
             _ => {}
         }
         Effect::None
+    }
+
+    /// Apply a vim motion to the list cursor.
+    fn move_by(&mut self, motion: keys::Motion, count: Option<usize>) {
+        use keys::Motion;
+        let times = isize::try_from(count.unwrap_or(1)).unwrap_or(1);
+        match motion {
+            Motion::Down => self.move_selection(times),
+            Motion::Up => self.move_selection(-times),
+            Motion::HalfDown => self.move_rows(self.page_delta(true) * times),
+            Motion::HalfUp => self.move_rows(-self.page_delta(true) * times),
+            Motion::PageDown => self.move_rows(self.page_delta(false) * times),
+            Motion::PageUp => self.move_rows(-self.page_delta(false) * times),
+            Motion::ScrollDown => self.scroll_view(times),
+            Motion::ScrollUp => self.scroll_view(-times),
+            Motion::First => self.jump_to(count, false),
+            Motion::Last => self.jump_to(count, true),
+            Motion::ScreenTop => self.screen_jump(Place::Top),
+            Motion::ScreenMiddle => self.screen_jump(Place::Middle),
+            Motion::ScreenBottom => self.screen_jump(Place::Bottom),
+            Motion::AlignTop => self.align(Place::Top),
+            Motion::AlignMiddle => self.align(Place::Middle),
+            Motion::AlignBottom => self.align(Place::Bottom),
+            Motion::PreviousGroup => self.jump_group(-times),
+            Motion::NextGroup => self.jump_group(times),
+        }
     }
 
     fn open_palette(&mut self, text: &str) {
@@ -1343,7 +1361,15 @@ impl Model {
                 Effect::None
             }
             Cmd::Help => {
-                self.help = true;
+                self.help = Some(keys::Pager::default());
+                Effect::None
+            }
+            Cmd::Output => {
+                if self.pane.is_none() {
+                    return self.say("no command has run yet");
+                }
+                // Follow a running command; otherwise start at its end too.
+                self.output = Some(keys::Pager::following());
                 Effect::None
             }
             Cmd::Quit => Effect::Quit,
@@ -1518,6 +1544,7 @@ impl Model {
                 project: Some(id),
             },
             ready_at: None,
+            pager: keys::Pager::default(),
         });
         Effect::None
     }
@@ -1528,9 +1555,9 @@ impl Model {
         let busy = self.palette.is_some()
             || self.filtering
             || self.confirm.is_some()
-            || self.help
-            || self.pending_key.is_some()
-            || self.count.is_some();
+            || self.help.is_some()
+            || self.output.is_some()
+            || self.keys.waiting();
         if busy {
             self.ready_plan = Some((project.to_path_buf(), report.to_string()));
             self.notice = Some("the clean plan is ready; press C to review it".to_string());
@@ -1629,6 +1656,7 @@ impl Model {
             tone: Color::Yellow,
             action: Action::Background { spec, project: id },
             ready_at,
+            pager: keys::Pager::default(),
         });
     }
 
@@ -2001,8 +2029,7 @@ impl Model {
 
     /// Leave one level: the command line, the output, a search, a project.
     fn go_up(&mut self) {
-        self.pending_key = None;
-        self.count = None;
+        self.keys.reset();
         if self.palette.is_some() {
             self.palette = None;
             return;
@@ -2166,10 +2193,10 @@ impl Model {
     }
 
     /// zt, zz, and zb.
-    fn align(&mut self, place: Place) -> Effect {
+    fn align(&mut self, place: Place) {
         let (height, margin) = self.window();
         if height == 0 {
-            return Effect::None;
+            return;
         }
         let max_top = self.rows.len() - height;
         let top = match place {
@@ -2178,7 +2205,6 @@ impl Model {
             Place::Bottom => (self.cursor + margin + 1).saturating_sub(height),
         };
         self.scroll = top.min(max_top);
-        Effect::None
     }
 
     /// `{` and `}`: the first checkout of the previous or next project.
@@ -2490,6 +2516,14 @@ mod tests {
     fn typed(model: &mut Model, text: &str) {
         for ch in text.chars() {
             model.on_key(press(KeyCode::Char(ch)));
+        }
+    }
+
+    impl Model {
+        fn on_key_text(&mut self, text: &str) {
+            for ch in text.chars() {
+                self.on_key(press(KeyCode::Char(ch)));
+            }
         }
     }
 
@@ -3387,7 +3421,7 @@ mod tests {
     fn help_lists_every_command_key() {
         let mut model = Model::from_snapshot(sample());
         model.on_key(press(KeyCode::Char('?')));
-        assert!(model.help);
+        assert!(model.help.is_some());
         let (screen, _) = paint(&mut model, 120, 50);
         assert!(screen.contains("bonsai hq keys"));
         for spec in COMMANDS {
@@ -3402,9 +3436,189 @@ mod tests {
             );
         }
         model.on_key(press(KeyCode::Char('j')));
-        assert!(model.help);
+        assert!(model.help.is_some());
         model.on_key(press(KeyCode::Esc));
-        assert!(!model.help);
+        assert!(model.help.is_none());
+    }
+
+    /// The same motion keys move in every list view.
+    #[test]
+    fn every_list_view_takes_the_same_motions() {
+        let mut snapshot = sample();
+        for index in 0..6 {
+            snapshot.projects[0].worktrees.push(worktree(
+                &format!("feat-{index}"),
+                &format!("/trees/bonsai/feat-{index}"),
+                false,
+                Some(false),
+            ));
+        }
+        let mut model = Model::from_snapshot(snapshot);
+        model.viewport = 4;
+        type Enter = fn(&mut Model);
+        let views: [(&str, Enter); 4] = [
+            ("tree", |model| model.on_key_text("t")),
+            ("project", |model| {
+                model.on_key_text("t");
+                model.on_key(press(KeyCode::Enter));
+            }),
+            ("search", |model| {
+                model.on_key(press(KeyCode::Esc));
+                model.on_key_text("/trees");
+                model.on_key(press(KeyCode::Enter));
+            }),
+            ("home", |model| {
+                model.on_key(press(KeyCode::Esc));
+                model.tree = false;
+                model.rebuild();
+            }),
+        ];
+        for (name, enter) in views {
+            enter(&mut model);
+            assert!(!model.filtering, "{name}");
+            let selectable = model.selectable();
+            let first = selectable[0];
+            let last = *selectable.last().unwrap();
+            model.on_key_text("gg");
+            assert_eq!(model.cursor, first, "{name}: gg");
+            model.on_key_text("G");
+            assert_eq!(model.cursor, last, "{name}: G");
+            model.on_key_text("gg");
+            if selectable.len() > 1 {
+                model.on_key_text("j");
+                assert_eq!(model.cursor, selectable[1], "{name}: j");
+                model.on_key(ctrl('p'));
+                assert_eq!(model.cursor, first, "{name}: ctrl-p");
+                model.on_key(ctrl('n'));
+                assert_eq!(model.cursor, selectable[1], "{name}: ctrl-n");
+                model.on_key_text("k");
+                model.on_key(ctrl('d'));
+                assert!(model.cursor > first, "{name}: ctrl-d");
+                model.on_key(ctrl('u'));
+                assert_eq!(model.cursor, first, "{name}: ctrl-u");
+                model.on_key(ctrl('f'));
+                model.on_key(ctrl('b'));
+                assert_eq!(model.cursor, first, "{name}: ctrl-f ctrl-b");
+            }
+            model.on_key(ctrl('e'));
+            model.on_key(ctrl('y'));
+            assert!(selectable.contains(&model.cursor), "{name}: ctrl-e ctrl-y");
+        }
+    }
+
+    #[test]
+    fn enter_in_search_keeps_the_results_for_vim_keys() {
+        let mut model = Model::from_snapshot(sample());
+        model.on_key_text("/trees");
+        assert!(model.filtering);
+        model.on_key(press(KeyCode::Enter));
+        assert!(!model.filtering);
+        assert_eq!(model.filter.text(), "trees");
+        assert!(matches!(model.view, View::List));
+        model.on_key_text("j");
+        assert!(model.selected_path().unwrap().ends_with("bonsai/main"));
+        model.on_key_text("G");
+        assert!(model.selected_path().unwrap().ends_with("other/feature"));
+        // Enter on a result opens its project; Tab still opens from the line.
+        model.on_key(press(KeyCode::Enter));
+        assert!(matches!(&model.view, View::Detail { project } if project == "other"));
+        model.on_key(press(KeyCode::Esc));
+        model.on_key(press(KeyCode::Esc));
+        model.on_key_text("/feat");
+        model.on_key(press(KeyCode::Tab));
+        assert!(matches!(&model.view, View::Detail { project } if project == "other"));
+    }
+
+    #[test]
+    fn help_scrolls_with_the_list_keys() {
+        let mut model = Model::from_snapshot(sample());
+        model.on_key_text("?");
+        let (screen, _) = paint(&mut model, 100, 16);
+        let pager = model.help.unwrap();
+        assert!(pager.len > pager.height, "{pager:?}");
+        assert!(screen.contains("j k scroll"), "{screen}");
+        model.on_key_text("j");
+        assert_eq!(model.help.unwrap().top, 1);
+        model.on_key_text("3j");
+        assert_eq!(model.help.unwrap().top, 4);
+        model.on_key(ctrl('u'));
+        assert_eq!(model.help.unwrap().top, 0);
+        model.on_key(ctrl('d'));
+        assert!(model.help.unwrap().top > 0);
+        model.on_key_text("G");
+        assert_eq!(model.help.unwrap().top, pager.max_top());
+        model.on_key_text("gg");
+        assert_eq!(model.help.unwrap().top, 0);
+        // List keys do not leak through to the list behind.
+        assert!(matches!(model.view, View::List));
+        model.on_key_text("q");
+        assert!(model.help.is_none());
+    }
+
+    #[test]
+    fn a_long_plan_scrolls_and_keeps_its_answers_in_view() {
+        let mut model = Model::from_snapshot(sample());
+        let planned: Vec<String> = (0..40)
+            .map(|index| {
+                format!(r#"{{"branch":"feat-{index:02}","reason":"merged","path":"/trees/bonsai/feat-{index:02}"}}"#)
+            })
+            .collect();
+        let report = format!(
+            r#"{{"dry_run":true,"planned":[{}],"skipped_dirty":[],"skipped_missing":[]}}"#,
+            planned.join(",")
+        );
+        model.open_clean_plan(Path::new("/trees/bonsai"), &report, None);
+        let (screen, _) = paint(&mut model, 100, 20);
+        assert!(screen.contains("y clean"), "{screen}");
+        assert!(screen.contains("feat-00"));
+        assert!(!screen.contains("feat-39"));
+        model.on_key_text("G");
+        let (screen, _) = paint(&mut model, 100, 20);
+        assert!(screen.contains("feat-39"), "{screen}");
+        assert!(screen.contains("y clean"));
+        model.on_key(ctrl('u'));
+        model.on_key_text("k");
+        assert!(model.confirm.is_some(), "scrolling does not answer");
+        assert!(matches!(
+            model.on_key(press(KeyCode::Char('y'))),
+            Effect::Run(Action::Background { .. })
+        ));
+    }
+
+    #[test]
+    fn the_output_view_scrolls_and_follows_a_running_command() {
+        let mut model = Model::from_snapshot(sample());
+        model.on_key_text("O");
+        assert!(model.output.is_none());
+        assert!(model.status_line().contains("no command has run yet"));
+        let mut pane = jobs::Pane::new("bonsai add feat-x");
+        for index in 0..100 {
+            pane.push(jobs::Chunk {
+                text: format!("line {index}"),
+                progress: false,
+                stdout: false,
+            });
+        }
+        model.pane = Some(pane);
+        model.on_key_text("O");
+        let (screen, _) = paint(&mut model, 80, 20);
+        assert!(screen.contains("line 99"), "follows the end: {screen}");
+        model.on_key_text("gg");
+        let (screen, _) = paint(&mut model, 80, 20);
+        assert!(screen.contains("line 0 "), "{screen}");
+        model.pane.as_mut().unwrap().push(jobs::Chunk {
+            text: "line 100".to_string(),
+            progress: false,
+            stdout: false,
+        });
+        let (screen, _) = paint(&mut model, 80, 20);
+        assert!(!screen.contains("line 100"), "stays put away from the end");
+        model.on_key_text("G");
+        let (screen, _) = paint(&mut model, 80, 20);
+        assert!(screen.contains("line 100"));
+        model.on_key(press(KeyCode::Esc));
+        assert!(model.output.is_none());
+        assert!(model.pane.is_some(), "closing the view keeps the pane");
     }
 
     #[test]

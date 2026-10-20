@@ -71,29 +71,38 @@ space actually used.
 
 ## Keys
 
+The motion keys work the same in every view: the home list, an open project,
+the tree, search results, and also the `?` help, confirmation dialogs, and
+the full-screen output (`O`), which they scroll like a pager.
+
 | Keys | Action |
 |---|---|
 | `j` `k`, arrows, Ctrl-N/P | Move one row; a count repeats (`5j`) |
-| `gg` `G` | First / last row; `3G` goes to the third |
-| Ctrl-D/U, Ctrl-F/B | Half a page / a page down and up |
-| Ctrl-E/Y | Scroll the list, keeping the cursor where it is |
+| `gg` `G`, Home End | First / last row; `3G` goes to the third |
+| Ctrl-D/U, Ctrl-F/B, Page Down/Up | Half a page / a page down and up |
+| Ctrl-E/Y | Scroll, keeping the cursor where it is |
 | `H` `M` `L` | Top / middle / bottom of the screen |
 | `zz` `zt` `zb` | Put the cursor row at the center / top / bottom |
 | `{` `}` | Previous / next project |
-| Enter, `l`, →, Tab | Open a project; on a checkout, Enter quits and changes into it |
+| Enter, `o` | Open a project; on a checkout, quit and change into it |
+| `l`, →, Tab | Open a project |
 | `h`, ←, Esc, Ctrl-O | Back: close the output, clear a search, leave the project |
 | `/` | Fuzzy-find by host, owner, project, branch, path, stack, or agent |
 | `t` | Toggle the tree |
 | `s` | Sort by name, recent activity, or size |
 | `r` | Refresh |
+| `O` | Show the latest command's output full screen |
 | `?` | List every key |
-| `q` | Quit |
+| `q` | Quit, or close help and the output view |
 
 The cursor moves inside the window, and the list scrolls when it comes within
-`hq.scrolloff` rows of the top or bottom (default 10). The `/` line and the
-`:` command line take the usual readline keys: Ctrl-B/F move, Ctrl-A/E jump,
-Ctrl-W deletes a word, Ctrl-U deletes back to the start, and Ctrl-K deletes to
-the end. `user:<name>` and `organisation:<name>` (also `org:` and
+`hq.scrolloff` rows of the top or bottom (default 10).
+
+`/` searches as you type; Enter keeps the results and returns to the motion
+keys, and Esc clears the search. While typing, ↑ ↓ and Ctrl-N/P still move
+through the matches, and the `/` line and the `:` command line take the usual
+readline keys: Ctrl-B/F move, Ctrl-A/E jump, Ctrl-W deletes a word, Ctrl-U
+deletes back to the start, and Ctrl-K deletes to the end. `user:<name>` and `organisation:<name>` (also `org:` and
 `organization:`) match the owner. A GitHub owner is classified in the
 background; until that is known, or on any other host, either prefix matches
 the owner text.

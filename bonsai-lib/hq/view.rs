@@ -7,6 +7,7 @@ use ratatui::style::{Color, Modifier, Style};
 use ratatui::text::{Line, Span};
 use ratatui::widgets::{Block, Clear, List, ListItem, ListState, Paragraph};
 
+use super::keys::Pager;
 use super::rows::Info;
 use super::table::{self, Kind};
 use super::{Model, View, footprint, jobs, palette_matches, path_label, truncate};
@@ -130,11 +131,19 @@ pub(super) fn draw(frame: &mut Frame, model: &mut Model) {
         ]),
         layout[2],
     );
-    if let Some(confirm) = &model.confirm {
-        draw_confirm(frame, area, confirm);
+    // Overlays leave the key hints and status line in view.
+    let above_footer = Rect {
+        height: area.height.saturating_sub(2),
+        ..area
+    };
+    if let (Some(pager), Some(pane)) = (model.output.as_mut(), model.pane.as_ref()) {
+        draw_output(frame, above_footer, pane, pager);
     }
-    if model.help {
-        draw_help(frame, area);
+    if let Some(confirm) = model.confirm.as_mut() {
+        draw_confirm(frame, above_footer, confirm);
+    }
+    if let Some(pager) = model.help.as_mut() {
+        draw_help(frame, above_footer, pager);
     }
 }
 
@@ -230,6 +239,16 @@ fn tree_frame(model: &Model) -> bool {
 }
 
 fn keys(model: &Model) -> String {
+    let scroll = "j k  ctrl-d ctrl-u  ctrl-f ctrl-b  gg G  scroll";
+    if model.help.is_some() {
+        return format!("{scroll}   ? or esc close");
+    }
+    if model.confirm.is_some() {
+        return format!("y confirm   n or esc cancel   {scroll}");
+    }
+    if model.output.is_some() {
+        return format!("{scroll}   O or esc close");
+    }
     if model.palette.is_some() {
         return "enter run   tab complete   ↑↓ choose   ctrl-w word   esc cancel".to_string();
     }
@@ -239,6 +258,9 @@ fn keys(model: &Model) -> String {
     let mut keys = Vec::new();
     if model.pane.as_ref().is_some_and(|pane| !pane.running()) {
         keys.push("esc close output");
+    }
+    if model.pane.is_some() {
+        keys.push("O full output");
     }
     match &model.view {
         View::Detail { .. } => keys.extend([
@@ -386,12 +408,16 @@ fn palette_items(model: &Model, width: usize) -> Vec<ListItem<'static>> {
         .collect()
 }
 
-fn draw_pane(frame: &mut Frame, area: Rect, pane: &jobs::Pane) {
-    let (state, style) = match &pane.state {
+fn pane_state(pane: &jobs::Pane) -> (String, Style) {
+    match &pane.state {
         jobs::State::Running => ("running".to_string(), Style::new().fg(Color::Yellow)),
         jobs::State::Succeeded => ("finished".to_string(), Style::new().fg(Color::Green)),
         jobs::State::Failed(reason) => (format!("failed: {reason}"), Style::new().fg(Color::Red)),
-    };
+    }
+}
+
+fn draw_pane(frame: &mut Frame, area: Rect, pane: &jobs::Pane) {
+    let (state, style) = pane_state(pane);
     let block = Block::bordered()
         .border_style(style)
         .title(format!(" {} · {state} ", pane.label));
@@ -418,10 +444,21 @@ fn centered(area: Rect, width: u16, height: u16) -> Rect {
     }
 }
 
-fn draw_confirm(frame: &mut Frame, area: Rect, confirm: &super::Confirm) {
-    let mut lines = confirm.lines.clone();
-    lines.push(Line::raw(""));
-    lines.push(Line::from(vec![
+/// Lines of a scrolled text view, with its position for the border.
+fn scrolled(lines: Vec<Line<'static>>, pager: &mut Pager, height: usize) -> Vec<Line<'static>> {
+    pager.fit(height, lines.len());
+    lines.into_iter().skip(pager.top).take(height).collect()
+}
+
+fn position_title(pager: &Pager) -> String {
+    pager
+        .position()
+        .map(|position| format!(" {position} · j k scroll "))
+        .unwrap_or_default()
+}
+
+fn draw_confirm(frame: &mut Frame, area: Rect, confirm: &mut super::Confirm) {
+    let buttons = Line::from(vec![
         Span::styled(
             format!(" y {} ", confirm.yes),
             Style::new()
@@ -430,9 +467,11 @@ fn draw_confirm(frame: &mut Frame, area: Rect, confirm: &super::Confirm) {
                 .add_modifier(Modifier::BOLD),
         ),
         Span::raw("   n cancel"),
-    ]));
-    let width = lines
+    ]);
+    let width = confirm
+        .lines
         .iter()
+        .chain(std::iter::once(&buttons))
         .map(Line::width)
         .max()
         .unwrap_or(0)
@@ -441,14 +480,20 @@ fn draw_confirm(frame: &mut Frame, area: Rect, confirm: &super::Confirm) {
     let rect = centered(
         area,
         u16::try_from(width).unwrap_or(u16::MAX),
-        u16::try_from(lines.len() + 2).unwrap_or(u16::MAX),
+        u16::try_from(confirm.lines.len() + 4).unwrap_or(u16::MAX),
     );
+    // The answers stay in view; the body scrolls when it does not fit.
+    let body_height = usize::from(rect.height).saturating_sub(4).max(1);
+    let mut lines = scrolled(confirm.lines.clone(), &mut confirm.pager, body_height);
+    lines.push(Line::raw(""));
+    lines.push(buttons);
     frame.render_widget(Clear, rect);
     frame.render_widget(
         Paragraph::new(lines).block(
             Block::bordered()
                 .border_style(Style::new().fg(confirm.tone))
-                .title(format!(" {} ", confirm.title)),
+                .title(format!(" {} ", confirm.title))
+                .title_bottom(position_title(&confirm.pager)),
         ),
         rect,
     );
@@ -457,13 +502,14 @@ fn draw_confirm(frame: &mut Frame, area: Rect, confirm: &super::Confirm) {
 /// Keys and commands, grouped as in the documentation.
 pub(super) const HELP: &[(&str, &[(&str, &str)])] = &[
     (
-        "Move",
+        "Move (also scrolls this help, dialogs, and the output view)",
         &[
             ("j k  ↓ ↑", "down / up; a count repeats: 5j"),
             ("gg  G", "first / last row; 3G goes to the third"),
             ("ctrl-d  ctrl-u", "half a page down / up"),
             ("ctrl-f  ctrl-b", "a page down / up"),
-            ("ctrl-e  ctrl-y", "scroll the list, keeping the cursor"),
+            ("ctrl-e  ctrl-y", "scroll, keeping the cursor"),
+            ("ctrl-n  ctrl-p", "down / up, also while typing a search"),
             ("H  M  L", "top / middle / bottom of the screen"),
             (
                 "zz  zt  zb",
@@ -482,7 +528,7 @@ pub(super) const HELP: &[(&str, &[(&str, &str)])] = &[
             ("l  →  tab", "open a project"),
             ("c", "cd into the selected checkout and quit"),
             ("h  ←  esc", "back"),
-            ("/", "search; user: and org: match owners"),
+            ("/", "search; enter keeps the results, esc clears them"),
             ("t  s  r", "tree view, sort (name, recent, size), refresh"),
         ],
     ),
@@ -497,13 +543,23 @@ pub(super) const HELP: &[(&str, &[(&str, &str)])] = &[
             ("e", "open the checkout in $VISUAL or $EDITOR"),
             ("A  R", "start / resume a coding agent there"),
             ("yy", "copy the checkout's path"),
+            ("O", "the latest command's output, full screen"),
             (":", "command line; tab completes, :add <branch>"),
             ("q  ?", "quit, this help"),
         ],
     ),
+    (
+        "Typing in / and :",
+        &[
+            ("ctrl-a  ctrl-e", "start / end of the line"),
+            ("ctrl-w  ctrl-u", "delete a word / to the start"),
+            ("↑ ↓", "choose a match or a command"),
+            ("enter  esc", "leave the line"),
+        ],
+    ),
 ];
 
-fn draw_help(frame: &mut Frame, area: Rect) {
+fn draw_help(frame: &mut Frame, area: Rect, pager: &mut Pager) {
     let mut lines = Vec::new();
     for (group, keys) in HELP {
         if !lines.is_empty() {
@@ -534,15 +590,36 @@ fn draw_help(frame: &mut Frame, area: Rect) {
         u16::try_from(width).unwrap_or(u16::MAX),
         u16::try_from(lines.len() + 2).unwrap_or(u16::MAX),
     );
+    let lines = scrolled(lines, pager, usize::from(rect.height).saturating_sub(2));
     frame.render_widget(Clear, rect);
     frame.render_widget(
         Paragraph::new(lines).block(
             Block::bordered()
                 .border_style(Style::new().fg(Color::Cyan))
-                .title(" bonsai hq keys "),
+                .title(" bonsai hq keys ")
+                .title_bottom(position_title(pager)),
         ),
         rect,
     );
+}
+
+/// The latest command's output over the whole list, like a pager.
+fn draw_output(frame: &mut Frame, area: Rect, pane: &jobs::Pane, pager: &mut Pager) {
+    let (state, style) = pane_state(pane);
+    let block = Block::bordered()
+        .border_style(style)
+        .title(format!(" {} · {state} ", pane.label));
+    let inner = block.inner(area);
+    let width = usize::from(inner.width);
+    let lines: Vec<Line> = pane
+        .lines
+        .iter()
+        .map(|line| Line::raw(truncate(line, width)))
+        .collect();
+    let lines = scrolled(lines, pager, usize::from(inner.height));
+    let block = block.title_bottom(position_title(pager));
+    frame.render_widget(Clear, area);
+    frame.render_widget(Paragraph::new(lines).block(block), area);
 }
 
 /// How a checkout relates to its upstream, naming the upstream.

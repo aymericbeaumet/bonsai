@@ -67,7 +67,10 @@
   their colours in the table and the tree; an open project or tree uses a
   ruled frame. Deleted checkouts sort last and are not counted as warnings.
 - Keys follow vim: counts, `gg`/`G`, Ctrl-D/U/F/B, Ctrl-E/Y scroll without
-  moving the cursor, `H`/`M`/`L`, `zz`/`zt`/`zb`, `{`/`}`, `h`/`l`. Every
+  moving the cursor, `H`/`M`/`L`, `zz`/`zt`/`zb`, `{`/`}`, `h`/`l`. Parse
+  them once with `keys::Keys` so every view takes the same motions: lists
+  move the cursor, while help, dialogs, and the output view scroll through
+  `keys::Pager`. Enter in `/` keeps the results for those keys. Every
   command has a key and a `:` name; keep `COMMANDS`, `view::HELP`, and
   `docs/hq.md` in sync (a test checks the help lists every command key). The
   `/` filter and `:` line edit through `LineInput`; do not append or pop
