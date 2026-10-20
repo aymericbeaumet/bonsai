@@ -37,10 +37,11 @@
   `cargo fmt --check`, `cargo clippy --locked --all-targets -- -D warnings`,
   `cargo test --locked`, `cargo package --workspace --locked`, and
   `actionlint .github/workflows/ci.yml .github/workflows/release.yml`.
-- Locally, `cargo package --workspace` may verify the CLI against stale
-  `bonsai-lib` artifacts because the placeholder version never changes. If
-  it reports API mismatches the workspace build does not, run
-  `cargo clean -p bonsai-lib` and package again.
+- Locally, `cargo package --workspace` may verify the CLI against a stale
+  `bonsai-lib` because the placeholder version never changes: cargo reuses
+  the unpacked copy in `~/.cargo/registry/src/*/bonsai-lib-0.1.1` and its
+  build artifacts. If it reports errors the workspace build does not, delete
+  that directory, run `cargo clean -p bonsai-lib`, and package again.
 - Trust `.mise.toml` with `mise trust .mise.toml` and run
   `mise install --locked rust node python uv actionlint` for development tools. Run checks
   through `mise exec --` unless mise is

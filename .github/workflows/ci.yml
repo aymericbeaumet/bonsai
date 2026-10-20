@@ -15,20 +15,20 @@ jobs:
       fail-fast: false
       matrix:
         include:
-          - { name: linux-amd64, os: ubuntu-24.04, tools: "rust node python uv actionlint" }
-          - { name: linux-arm64, os: ubuntu-24.04-arm, tools: rust }
+          - { name: linux-amd64, os: ubuntu-26.04, tools: "rust node python uv actionlint" }
+          - { name: linux-arm64, os: ubuntu-26.04-arm, tools: rust }
           - { name: macos-arm64, os: macos-26, tools: rust }
-          - { name: macos-amd64, os: macos-15-intel, tools: rust }
+          - { name: macos-amd64, os: macos-26-intel, tools: rust }
           - { name: windows-amd64, os: windows-2025, tools: rust }
           - { name: windows-arm64, os: windows-11-arm, tools: rust }
     runs-on: ${{ matrix.os }}
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
-      - uses: jdx/mise-action@08ae2a091c038e1e05ec6f5115dc5c69d5a2a6b8 # v5.1.2
+      - uses: jdx/mise-action@fc42bcc7ddbf51124c30f95a877a0c5168a3bfde # v5.2.1
         with:
-          version: 2026.10.11
+          version: 2026.10.15
           install_args: ${{ matrix.tools }}
-      - uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2.9.2
+      - uses: Swatinem/rust-cache@d1527c8f67ef9af357290475d4af4b0fab8f12e0 # v2.9.3
       - name: Install supported shells
         if: matrix.name == 'linux-amd64'
         run: |
