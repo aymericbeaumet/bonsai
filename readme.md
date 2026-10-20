@@ -32,6 +32,9 @@ request was squash-merged. bonsai does the bookkeeping:
 - **Safe cleanup.** `bonsai clean` detects merged *and* squash-merged
   branches, shows the plan before acting, and never touches a worktree with
   uncommitted changes.
+- **A headquarters.** `bonsai hq` shows every project with its checkouts,
+  uncommitted changes, upstream state, and disk size, and runs all of the
+  above from one screen with vim keys.
 - **Ready for coding agents.** Idempotent commands, `--json` output, and a
   bundled [Agent Skill](docs/agents.md) for Claude Code, Codex, OpenCode, and
   Cursor. `bonsai resume` finds agent sessions across all your worktrees.
@@ -82,8 +85,9 @@ bonsai list             # show this repository's worktrees
 bonsai clean            # once merged: remove the worktree and delete the branch
 ```
 
-Leave out an argument and commands open a fuzzy picker. Run `bonsai hq` for a
-terminal overview of every project and worktree.
+Leave out an argument and commands open a fuzzy picker. Run `bonsai hq` to
+see every project and worktree with its changes and size, and act on them
+from one screen.
 
 ## Commands
 
@@ -95,7 +99,7 @@ terminal overview of every project and worktree.
 | `bonsai remove [branch…]` | Remove worktrees; `-d` also deletes their branches |
 | `bonsai clean` | Remove merged and squash-merged worktrees and their branches |
 | `bonsai prune` | Tidy stale registrations and orphaned directories |
-| `bonsai hq` | Browse every project and worktree in a terminal UI |
+| `bonsai hq` | See and manage every project and worktree in a terminal UI |
 | `bonsai start` / `resume` | Start or resume Claude Code, Codex, or OpenCode sessions |
 | `bonsai workspace` | Print the `.code-workspace` file for VS Code-style editors |
 | `bonsai skill` / `agents` | Teach your coding agents to use bonsai |
@@ -108,7 +112,7 @@ terminal overview of every project and worktree.
 - [Commands](docs/commands.md): reference, worktree-relative behavior, and safety guarantees
 - [Configuration](docs/configuration.md): `.bonsai.toml`, `git config bonsai.*`, and environment variables
 - [AI coding agents](docs/agents.md): Agent Skill, AGENTS.md, scripting, and session resume
-- [Headquarters](docs/hq.md): the `bonsai hq` terminal UI
+- [Headquarters](docs/hq.md): the `bonsai hq` terminal UI, its columns, keys, and commands
 - [Desktop editors](docs/editors.md): VS Code and Cursor workspaces, folder-based apps
 - [Integrations](docs/integrations.md): shells, direnv, package managers, Cargo, and backups
 - [How it works](docs/how-it-works.md): layout, repository ids, and the Rust library

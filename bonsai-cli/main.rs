@@ -98,10 +98,7 @@ fn run(cli: Cli) -> Result<Option<PathBuf>> {
     let scope = |all: bool| scope::Scope::resolve(&config, current, all, cli.remote.as_deref());
 
     match cli.command {
-        Commands::Hq { json, all } => {
-            hq::run(&config, json, all || !in_repo)?;
-            Ok(None)
-        }
+        Commands::Hq { json, all } => hq::run(&config, json, all || !in_repo),
         Commands::Start {
             provider,
             prompt,

@@ -111,7 +111,7 @@ const POSIX_WRAPPER: &str = r#"bonsai() {
       --root=*|--remote=*|--cwd=*) ;;
       -*) ;;
         *)
-        case "$arg" in add|cd|remove|rm|clean|prune) capture=1 ;; esac
+        case "$arg" in add|cd|remove|rm|clean|prune|hq) capture=1 ;; esac
         break
         ;;
     esac
@@ -160,7 +160,7 @@ const FISH_WRAPPER: &str = r#"function bonsai
             case '--root=*' '--remote=*' '--cwd=*'
             case '-*'
             case '*'
-                if contains -- "$arg" add cd remove rm clean prune
+                if contains -- "$arg" add cd remove rm clean prune hq
                     set capture 1
                 end
                 break
@@ -209,7 +209,7 @@ mod tests {
 case "$1" in
  completions) exit 0;;
  list) printf '%s' direct; exit 0;;
- hq|start|resume)
+ start|resume)
    test -t 1 || exit 81
    test -z "${_BONSAI_WRAPPED:-}" || exit 82
    printf '%s' "$1"
@@ -285,14 +285,18 @@ if [ -n "${_BONSAI_WRAPPED:-}" ]; then printf '__bonsai_cd\037%s\n' "$DESTINATIO
                 );
                 continue;
             }
-            let output = run(shell, "bonsai hq; bonsai start; bonsai resume");
+            // hq draws on stderr and hands back a directory like cd does.
+            let output = run(
+                shell,
+                "bonsai start; bonsai resume; bonsai hq; test \"$PWD\" = \"$DESTINATION\"",
+            );
             assert!(
                 output.status.success(),
                 "{}: {}",
                 shell.name(),
                 String::from_utf8_lossy(&output.stderr)
             );
-            assert_eq!(output.stdout, b"hqstartresume", "{}", shell.name());
+            assert_eq!(output.stdout, b"startresume", "{}", shell.name());
         }
     }
 

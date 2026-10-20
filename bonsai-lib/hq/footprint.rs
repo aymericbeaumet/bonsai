@@ -103,14 +103,11 @@ pub struct Measured {
     pub generation: u64,
     pub path: PathBuf,
     pub footprint: Footprint,
-    // The headquarters list treats partial and complete updates alike for now.
-    #[cfg_attr(not(test), allow(dead_code))]
     pub complete: bool,
 }
 
 /// The last complete measurement of a checkout, kept across sessions.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
-#[cfg_attr(not(test), allow(dead_code))]
 pub struct Cached {
     pub footprint: Footprint,
     /// Seconds since the Unix epoch.
@@ -692,7 +689,6 @@ struct CacheFile<'a> {
 /// `$XDG_STATE_HOME/bonsai/footprints.json`, else
 /// `~/.local/state/bonsai/footprints.json`. `_BONSAI_HQ_FOOTPRINTS` overrides
 /// the file; empty or `0` disables the cache.
-#[cfg_attr(not(test), allow(dead_code))]
 pub fn cache_path() -> Option<PathBuf> {
     if let Some(value) = std::env::var_os("_BONSAI_HQ_FOOTPRINTS") {
         if value.is_empty() || value == "0" {
@@ -716,7 +712,6 @@ pub fn cache_path() -> Option<PathBuf> {
 
 /// A missing, unreadable, corrupt, or other-version file loads as empty.
 /// Entries that do not parse are skipped.
-#[cfg_attr(not(test), allow(dead_code))]
 pub fn load_cache(path: &Path) -> HashMap<PathBuf, Cached> {
     let Ok(text) = std::fs::read_to_string(path) else {
         return HashMap::new();
@@ -740,7 +735,6 @@ pub fn load_cache(path: &Path) -> HashMap<PathBuf, Cached> {
 
 /// Replaces the file atomically, entries sorted by path. Paths that are not
 /// UTF-8 cannot be JSON keys and are skipped.
-#[cfg_attr(not(test), allow(dead_code))]
 pub fn save_cache(path: &Path, entries: &HashMap<PathBuf, Cached>) -> std::io::Result<()> {
     let dir = match path.parent() {
         Some(parent) if !parent.as_os_str().is_empty() => parent,

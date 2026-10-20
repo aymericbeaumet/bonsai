@@ -26,7 +26,7 @@ impl LineInput {
         self.cursor = 0;
     }
 
-    #[cfg(test)]
+    /// Replace the text and put the cursor at its end.
     pub fn set(&mut self, text: impl Into<String>) {
         self.text = text.into();
         self.cursor = self.text.len();

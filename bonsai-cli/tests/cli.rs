@@ -3230,8 +3230,9 @@ fn hq_help_describes_the_terminal_list() {
         .success()
         .stdout(
             predicate::str::contains("--json")
-                .and(predicate::str::contains("Enter and o"))
-                .and(predicate::str::contains("shell").not())
+                .and(predicate::str::contains("Enter opens a project"))
+                .and(predicate::str::contains("dd removes"))
+                .and(predicate::str::contains("tmux").not())
                 .and(predicate::str::contains("--port").not())
                 .and(predicate::str::contains("--no-tui").not())
                 .and(predicate::str::contains("browser").not()),

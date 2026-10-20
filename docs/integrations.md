@@ -17,10 +17,11 @@ Without the wrapper everything still works — cd-capable commands print the
 target path, so `cd "$(bonsai add foo)"` composes.
 
 The wrapper captures directory changes only for `add`, `cd`, `remove`/`rm`,
-`clean`, and `prune`, and only when stdout is a terminal. Command substitutions,
-pipes, and redirections preserve machine output even after initialization.
-Other commands stream stdout directly, including `hq`, `start`, and `resume`.
-Use `command bonsai` to bypass the wrapper explicitly.
+`clean`, `prune`, and `hq`, and only when stdout is a terminal. `hq` draws its
+interface on stderr so it can hand back the checkout you open. Command
+substitutions, pipes, and redirections preserve machine output even after
+initialization. Other commands stream stdout directly, including `start` and
+`resume`. Use `command bonsai` to bypass the wrapper explicitly.
 
 After upgrading Bonsai, an already-running shell may still have an older
 wrapper loaded. The binary detects that mismatch and prints the exact

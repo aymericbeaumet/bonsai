@@ -33,50 +33,56 @@
   `cargo fmt --check`, `cargo clippy --locked --all-targets -- -D warnings`,
   `cargo test --locked`, `cargo package --workspace --locked`, and
   `actionlint .github/workflows/ci.yml .github/workflows/release.yml`.
+- Locally, `cargo package --workspace` may verify the CLI against stale
+  `bonsai-lib` artifacts because the placeholder version never changes. If
+  it reports API mismatches the workspace build does not, run
+  `cargo clean -p bonsai-lib` and package again.
 - Trust `.mise.toml` with `mise trust .mise.toml` and run
   `mise install --locked rust node python uv actionlint` for development tools. Run checks
   through `mise exec --` unless mise is
   activated in the shell. Tool pins and platform checksums live in `.mise.toml`
   and `mise.lock`.
-- `bonsai hq` is a terminal worktree list. Enter, `o`, and Ctrl-I open the
-  selected project and list its checkouts by branch. Ctrl-O and Esc go up
-  one step: clear a search, leave the command line, then leave the project.
-  `:` runs
-  add, remove, clean, and prune for that project, with the same confirmation
-  rules as the CLI (`yes` stays false; remove does not pass `--force`).
-  Inventory is Git checkouts under the bonsai root, workspace folder
-  references, and the project where hq starts. Do not add a browser, a
-  server, or a second UI. Do not run a shell or tmux inside hq.
-- Paint the worktree list before git status. Status and footprints stream in
-  afterwards. `--json` waits for both. The on-screen list starts in
-  alphabetical order by host, owner, and repository. `s` cycles between that
-  and most recent. Keep the JSON inventory in project-name order. The home list is
-  one row per project and shows the host, then the repository owner parsed
-  from the remote, not the branch. A heading names each visible column:
-  host, owner, project, branch, and age. An open tree and an open project use
-  a ruled frame; the home list stays a table. `t` toggles the home list between that row and a tree of
-  host, then owner, then repository, and leaves a project detail to show the tree.
-  Host, owner, and project each have their own colour, in the table and the tree.
-  Enter, `o`, and Ctrl-I, and any non-empty `/` search, list that project's
-  checkouts by branch. Ctrl-O and Esc step back. The `/` filter and `:` command line share readline
-  editing (Ctrl-B/F, Ctrl-A/E, Ctrl-W, Ctrl-U, Ctrl-K, Ctrl-D, Alt word
-  keys). Do not append or pop those strings directly. Outside those fields,
-  arrows, Ctrl-Y, and Ctrl-E move one row, Ctrl-U and Ctrl-D move half a
-  page, `gg` jumps to the top, and `G` jumps to the bottom. The cursor moves
-  inside the window, and the list scrolls when it comes within `hq.scrolloff`
-  rows of the top or bottom (default 10). `/` also accepts
-  `user:` and `organisation:` (`org:`,
-  `organization:`). GitHub owner kind is resolved off the input thread and
-  cached at `$XDG_CONFIG_HOME/bonsai/owners.json`; until it is known, or for
-  any other host, either prefix matches the owner text. Do not block the list
-  on that lookup. Paths stay on the status line. A missing checkout is marked
-  `missing` and is not passed to git. Every hq warning is appended to
-  `~/.local/state/bonsai/hq.log` (`XDG_STATE_HOME` overrides the directory,
-  `_BONSAI_HQ_LOG` overrides the file, and `0` disables it).
-- Measure `bonsai hq` footprints off the input thread, after the list is on
-  screen. `shared` means a dependency directory is a symlink, contains
-  hardlinked files, or lives in an external store such as Go modules.
-  Copy-on-write and clonefile clones report their full logical size as `local`.
+- `bonsai hq` is a terminal worktree list that also runs commands. Inventory
+  is Git checkouts under the bonsai root, workspace folder references, and
+  the project where hq starts. Do not add a browser, a server, or a second
+  UI, and do not run a shell or tmux inside hq. Bonsai commands run as child
+  processes (`bonsai -C <project> …`) streaming into the output pane; coding
+  agents and editors run in the foreground on `/dev/tty` while the interface
+  is suspended. Removal, branch deletion, and clean ask inside hq first
+  (clean shows its `--dry-run --json` plan, then runs `--yes --no-fetch`);
+  never pass `--force`.
+- hq draws on stderr so the shell wrapper can capture stdout for the cd
+  target (Enter on a checkout, or `c`). Never call `Terminal::clear`: it
+  queries the cursor position on stdout. Clear with an escape sequence and
+  `resize` to force a redraw.
+- Spell every value out under a column heading; no bare symbols or counts.
+  Views: the home list (one row per project with its totals), an open project
+  (one row per checkout), search results, and the host → owner → repository
+  tree, whose groups sum their checkouts. `table.rs` drops the least useful
+  columns first when the terminal is narrow. Host, owner, and project keep
+  their colours in the table and the tree; an open project or tree uses a
+  ruled frame. Deleted checkouts sort last and are not counted as warnings.
+- Keys follow vim: counts, `gg`/`G`, Ctrl-D/U/F/B, Ctrl-E/Y scroll without
+  moving the cursor, `H`/`M`/`L`, `zz`/`zt`/`zb`, `{`/`}`, `h`/`l`. Every
+  command has a key and a `:` name; keep `COMMANDS`, `view::HELP`, and
+  `docs/hq.md` in sync (a test checks the help lists every command key). The
+  `/` filter and `:` line edit through `LineInput`; do not append or pop
+  their strings directly. `/` accepts `user:` and `organisation:` (`org:`,
+  `organization:`); GitHub owner kind is resolved off the input thread and
+  cached at `$XDG_CONFIG_HOME/bonsai/owners.json`, and until it is known
+  either prefix matches the owner text.
+- Paint the list before git status; status, sizes, and owner kinds stream in
+  off the input thread. `--json` waits for status and sizes and keeps
+  project-name order. The last size of each checkout is kept in
+  `~/.local/state/bonsai/footprints.json` (`_BONSAI_HQ_FOOTPRINTS` overrides
+  the file, `0` disables it) so totals show at once; a partial walk never
+  lowers a remembered size, and after a command only the affected project is
+  measured again. `shared` means a dependency directory is a symlink,
+  contains hardlinked files, or lives in an external store such as Go
+  modules; copy-on-write clones report their full logical size as `local`.
+  Every hq warning is appended to `~/.local/state/bonsai/hq.log`
+  (`XDG_STATE_HOME` overrides the directory, `_BONSAI_HQ_LOG` the file, and
+  `0` disables it).
 - `BONSAI_*` environment variables whose first segment names a setting are
   strict: unknown nested keys (`BONSAI_ADD__FETHC`) fail. Other `BONSAI_*`
   variables (e.g. Heroku's `BONSAI_URL`) are ignored. Prefix internal

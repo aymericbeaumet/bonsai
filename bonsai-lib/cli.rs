@@ -19,8 +19,8 @@ in scope, and commands that need a single project prompt for one.
 composes with -a/--all.
 
 Interactive use: enable the shell wrapper with `eval \"$(bonsai init zsh)\"`
-so add, cd, remove (rm), and clean move your shell automatically, and omit
-arguments to get fuzzy pickers.
+so add, cd, remove (rm), clean, and hq move your shell automatically, and
+omit arguments to get fuzzy pickers.
 
 Scripted use (CI, AI agents): pass arguments explicitly; cd-capable commands
 print the target path on stdout, so `cd \"$(bonsai add foo)\"` composes.
@@ -181,8 +181,8 @@ Print the shell integration for zsh, bash, or fish. Add to your shell rc:
   eval \"$(bonsai init bash)\"    # bash
   bonsai init fish | source     # fish
 
-The wrapper makes add, cd, remove (rm), and clean move your shell into the
-right directory when stdout is a terminal. Substitutions, pipes, and
+The wrapper makes add, cd, remove (rm), clean, and hq move your shell into
+the right directory when stdout is a terminal. Substitutions, pipes, and
 redirections preserve the raw path; `command bonsai` always bypasses the
 wrapper. It uses a plain `cd`, so directory-change hooks keep working.";
 
@@ -219,38 +219,36 @@ Claude Code and Codex desktop open plain folders: point them at a worktree
 directory (<root>/<repo-id>/<branch>) or use `bonsai cd`.";
 
 const HQ_LONG: &str = "\
-Browse projects in the terminal, including each project's main checkout
-and all Git-registered worktrees. Inside a repository hq shows that project,
-even when it has no Bonsai-managed worktrees yet; -a/--all, and running
-outside a repository, show every project under the Bonsai root. Editor
-workspace files contribute checkouts that live outside the root.
+Browse projects in the terminal and act on them without leaving it. Inside a
+repository hq shows that project, even when it has no Bonsai-managed
+worktrees yet; -a/--all, and running outside a repository, show every project
+under the Bonsai root. Editor workspace files contribute checkouts that live
+outside the root.
 
-The home list is one row per project, in alphabetical order by host, owner,
-and repository. s cycles between that and most recent. Each row
-shows the host, the repository owner, and the name, not the branch. A heading
-names each visible column. An open tree and an open project use a ruled
-frame; the home list stays a table. t opens
-and closes the tree, grouping checkouts by host, then owner, then
-repository. Host, owner, and project each have their own colour, in the table and in the tree. j/k or the
-arrow keys move one row, as do ctrl-e and ctrl-y. ctrl-d and ctrl-u move
-half a page. gg jumps to the top and G to the bottom. The cursor moves
-inside the window, and the list scrolls when it comes within hq.scrolloff
-rows of the top or bottom (default 10). / fuzzy-finds by host, owner, project, branch, path, stack,
-or harness.
-The / line and the : command line take readline keys (Ctrl-B/F, Ctrl-A/E,
-Ctrl-W, Ctrl-U, Ctrl-K). user:<name> and organisation:<name> (also org: and
-organization:) match the
-owner. Enter and o open that project, listing its checkouts by branch.
-ctrl-i does the same. A search that matches does too. ctrl-o and esc go up
-one step, clearing a search or leaving the project. : runs add, remove,
-clean, and prune.
-r refreshes. q quits. The checkout path stays on the status line.
+The home list is one row per project with its checkouts, uncommitted
+changes, total size, age, stack, coding agents, and deleted checkouts. Open a
+project to list each checkout with its changes, upstream, size, and
+dependency directories. t shows the tree of host, owner, and repository,
+each with its totals. s sorts by name, recent activity, or size. Sizes from
+the previous session show at once and update as they are measured again.
 
-Git status and checkout sizes fill in on that same row after the list
-appears. A missing checkout is marked missing and is not passed to git.
-Warnings are appended to ~/.local/state/bonsai/hq.log. --json prints the
-inventory, including status and each footprint, and exits without a
-terminal.
+Keys follow vim: j/k with counts (5j), gg/G, ctrl-d/u, ctrl-f/b, ctrl-e/y,
+H/M/L, zz/zt/zb, { and } between projects, h/l to go back and in, and /
+to search (user: and org: match owners). Enter opens a project; on a
+checkout it quits and, with the shell wrapper, changes into it.
+
+Commands act on the selection: a adds a worktree, dd removes one, D also
+deletes its branch, C cleans merged worktrees, P prunes deleted ones, f
+fetches, e opens $VISUAL or $EDITOR, A and R start or resume a coding agent,
+and yy copies the path. Removals ask first. : opens a command line with the
+same commands (:add <branch>). Bonsai commands stream into an output pane;
+agents and editors take over the terminal until they exit. ? lists every
+key.
+
+Git status and checkout sizes fill in after the list appears. Warnings are
+appended to ~/.local/state/bonsai/hq.log; sizes are remembered in
+~/.local/state/bonsai/footprints.json. --json prints the inventory,
+including status and each footprint, and exits without a terminal.
 
 Examples:
   bonsai hq
