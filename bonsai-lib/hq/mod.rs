@@ -3003,6 +3003,7 @@ mod tests {
                 dependencies: vec![],
                 harnesses: vec!["claude".to_string(), "grok".to_string()],
             },
+            complete: true,
         };
         assert!(!model.apply_footprint(stale));
         assert!(model.footprints.is_empty());
@@ -3015,6 +3016,7 @@ mod tests {
                 dependencies: vec![],
                 harnesses: vec!["claude".to_string(), "grok".to_string()],
             },
+            complete: true,
         }));
         let summary = model
             .footprints
@@ -3022,7 +3024,7 @@ mod tests {
             .unwrap()
             .summary();
         assert!(summary.contains("rust"));
-        assert!(summary.contains("1.5K"));
+        assert!(summary.contains("1.5 kB"));
         assert!(summary.contains("claude grok"));
         model.on_key(press(KeyCode::Enter));
         model.on_key(press(KeyCode::Char('j')));

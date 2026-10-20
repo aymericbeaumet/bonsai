@@ -1,23 +1,31 @@
 //! Checkout size, dependency directories, and coding-harness presence.
 //!
-//! Walks run off the headquarters input thread. `shared` means a symlink, a
-//! hardlinked file, or an external store such as Go modules. Copy-on-write
-//! clones still report their full logical size as `local`.
+//! Walks run off the headquarters input thread and stream partial sizes while
+//! a checkout is walked. `shared` means a symlink, a hardlinked file, or an
+//! external store such as Go modules. Copy-on-write clones still report their
+//! full logical size as `local`. The last complete measurement of each
+//! checkout can be kept across sessions with [`save_cache`].
 
-use std::collections::HashMap;
+use std::collections::{BTreeMap, HashMap};
 use std::ffi::OsStr;
-use std::io::{BufRead, Read};
+use std::io::{BufRead, Read, Write};
 use std::path::{Component, Path, PathBuf};
 use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 use std::sync::mpsc::{Receiver, Sender};
 use std::sync::{Arc, Mutex};
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
-use serde::Serialize;
+use serde::{Deserialize, Serialize};
 
 use crate::parallel;
 
-#[derive(Debug, Clone, PartialEq, Serialize)]
+/// Partial sizes are sent at most this often for each checkout being walked.
+const PROGRESS_INTERVAL: Duration = Duration::from_millis(250);
+
+/// Any other `version` in the cache file loads as an empty cache.
+const CACHE_VERSION: u64 = 1;
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct Footprint {
     pub ecosystems: Vec<String>,
     pub bytes: u64,
@@ -25,14 +33,14 @@ pub struct Footprint {
     pub harnesses: Vec<String>,
 }
 
-#[derive(Debug, Clone, PartialEq, Serialize)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct Dependency {
     pub name: String,
     pub bytes: Option<u64>,
     pub sharing: Sharing,
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "lowercase")]
 pub enum Sharing {
     Local,
@@ -87,10 +95,26 @@ fn sharing_word(sharing: Sharing) -> &'static str {
     }
 }
 
+/// One size update for a checkout. While the walk runs, `complete` is false
+/// and `footprint` holds the bytes counted so far (harnesses may still be
+/// empty). Each measured checkout ends with exactly one complete update.
+#[derive(Debug)]
 pub struct Measured {
     pub generation: u64,
     pub path: PathBuf,
     pub footprint: Footprint,
+    // The headquarters list treats partial and complete updates alike for now.
+    #[cfg_attr(not(test), allow(dead_code))]
+    pub complete: bool,
+}
+
+/// The last complete measurement of a checkout, kept across sessions.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[cfg_attr(not(test), allow(dead_code))]
+pub struct Cached {
+    pub footprint: Footprint,
+    /// Seconds since the Unix epoch.
+    pub measured_at: u64,
 }
 
 pub struct MeasureJob {
@@ -129,12 +153,27 @@ pub fn measure_all(paths: &[PathBuf]) -> HashMap<PathBuf, Footprint> {
     .collect()
 }
 
+/// Measures `paths` in the background. Each checkout streams partial updates
+/// while it is walked, then one complete update. Dropping the job stops it.
 pub fn start(paths: Vec<PathBuf>, generation: u64) -> MeasureJob {
+    start_with(paths, generation, PROGRESS_INTERVAL, HarnessIndex::load)
+}
+
+type LoadIndex = fn(&AtomicBool) -> HarnessIndex;
+
+fn start_with(
+    paths: Vec<PathBuf>,
+    generation: u64,
+    every: Duration,
+    load_index: LoadIndex,
+) -> MeasureJob {
     let cancel = Arc::new(AtomicBool::new(false));
     let (sender, receiver) = std::sync::mpsc::channel();
     if !paths.is_empty() {
         let cancel_worker = Arc::clone(&cancel);
-        std::thread::spawn(move || run_measure(paths, generation, cancel_worker, sender));
+        std::thread::spawn(move || {
+            run_measure(paths, generation, every, load_index, cancel_worker, sender);
+        });
     }
     MeasureJob { cancel, receiver }
 }
@@ -142,6 +181,8 @@ pub fn start(paths: Vec<PathBuf>, generation: u64) -> MeasureJob {
 fn run_measure(
     paths: Vec<PathBuf>,
     generation: u64,
+    every: Duration,
+    load_index: LoadIndex,
     cancel: Arc<AtomicBool>,
     sender: Sender<Measured>,
 ) {
@@ -153,7 +194,7 @@ fn run_measure(
         let slot = Arc::clone(&index_slot);
         let index_cancel = Arc::clone(&cancel);
         scope.spawn(move || {
-            let index = Arc::new(HarnessIndex::load(&index_cancel));
+            let index = Arc::new(load_index(&index_cancel));
             if let Ok(mut guard) = slot.lock() {
                 *guard = Some(index);
             }
@@ -178,18 +219,38 @@ fn run_measure(
                         cancel: &cancel,
                         cache,
                     };
-                    let Some(mut footprint) = measure_disk(path, &scan) else {
+                    let mut harnesses = None::<Vec<String>>;
+                    let mut partial = |mut footprint: Footprint| {
+                        if harnesses.is_none() {
+                            harnesses = loaded_index(&slot).map(|index| index.matching(path));
+                        }
+                        footprint.harnesses = harnesses.clone().unwrap_or_default();
+                        // A closed channel means the job was dropped, which
+                        // also sets the cancel flag that stops the walk.
+                        let _ = sender.send(Measured {
+                            generation,
+                            path: path.clone(),
+                            footprint,
+                            complete: false,
+                        });
+                    };
+                    let mut progress = Progress::new(every, &mut partial);
+                    let Some(mut footprint) = measure_disk(path, &scan, Some(&mut progress)) else {
                         break;
                     };
-                    let Some(index) = wait_for_index(&slot, &cancel) else {
-                        break;
+                    footprint.harnesses = match harnesses {
+                        Some(harnesses) => harnesses,
+                        None => match wait_for_index(&slot, &cancel) {
+                            Some(index) => index.matching(path),
+                            None => break,
+                        },
                     };
-                    footprint.harnesses = index.matching(path);
                     if sender
                         .send(Measured {
                             generation,
                             path: path.clone(),
                             footprint,
+                            complete: true,
                         })
                         .is_err()
                     {
@@ -201,6 +262,10 @@ fn run_measure(
     });
 }
 
+fn loaded_index(slot: &Mutex<Option<Arc<HarnessIndex>>>) -> Option<Arc<HarnessIndex>> {
+    slot.lock().ok().and_then(|guard| guard.clone())
+}
+
 fn wait_for_index(
     slot: &Mutex<Option<Arc<HarnessIndex>>>,
     cancel: &AtomicBool,
@@ -209,10 +274,36 @@ fn wait_for_index(
         if cancel.load(Ordering::Relaxed) {
             return None;
         }
-        if let Some(index) = slot.lock().ok().and_then(|guard| guard.clone()) {
+        if let Some(index) = loaded_index(slot) {
             return Some(index);
         }
         std::thread::sleep(Duration::from_millis(20));
+    }
+}
+
+/// Throttles the partial updates of one checkout walk.
+struct Progress<'a> {
+    every: Duration,
+    due: Instant,
+    send: &'a mut dyn FnMut(Footprint),
+}
+
+impl<'a> Progress<'a> {
+    fn new(every: Duration, send: &'a mut dyn FnMut(Footprint)) -> Self {
+        Self {
+            every,
+            due: Instant::now() + every,
+            send,
+        }
+    }
+
+    fn due(&mut self) -> bool {
+        let now = Instant::now();
+        if now < self.due {
+            return false;
+        }
+        self.due = now + self.every;
+        true
     }
 }
 
@@ -228,21 +319,39 @@ impl Scan<'_> {
 }
 
 fn measure(path: &Path, index: &HarnessIndex, scan: &Scan) -> Option<Footprint> {
-    let mut footprint = measure_disk(path, scan)?;
+    let mut footprint = measure_disk(path, scan, None)?;
     footprint.harnesses = index.matching(path);
     Some(footprint)
 }
 
-fn measure_disk(path: &Path, scan: &Scan) -> Option<Footprint> {
+/// Harnesses are left empty. `progress` receives partial footprints while
+/// the checkout tree is walked.
+fn measure_disk(
+    path: &Path,
+    scan: &Scan,
+    mut progress: Option<&mut Progress>,
+) -> Option<Footprint> {
     if scan.cancelled() {
         return None;
     }
     let ecosystems = detect_ecosystems(path);
-    let (bytes, dependencies) = disk(path, &ecosystems, scan)?;
+    let mut slots = plan(path, &ecosystems, scan)?;
+    let bytes = sum_tree(path, &mut slots, scan, &mut |bytes, slots| {
+        if let Some(progress) = progress.as_deref_mut()
+            && progress.due()
+        {
+            (progress.send)(Footprint {
+                ecosystems: ecosystems.clone(),
+                bytes,
+                dependencies: dependencies(slots),
+                harnesses: Vec::new(),
+            });
+        }
+    })?;
     Some(Footprint {
         ecosystems,
         bytes,
-        dependencies,
+        dependencies: dependencies(&slots),
         harnesses: Vec::new(),
     })
 }
@@ -269,21 +378,19 @@ fn detect_ecosystems(root: &Path) -> Vec<String> {
         .collect()
 }
 
-fn disk(root: &Path, ecosystems: &[String], scan: &Scan) -> Option<(u64, Vec<Dependency>)> {
-    let mut slots = plan(root, ecosystems, scan)?;
-    let bytes = sum_tree(root, &mut slots, scan)?;
-    let dependencies = slots
-        .into_iter()
+/// Dependency sizes counted so far, in plan order.
+fn dependencies(slots: &[Slot]) -> Vec<Dependency> {
+    slots
+        .iter()
         .map(|slot| match slot {
-            Slot::Ready(dependency) => dependency,
+            Slot::Ready(dependency) => dependency.clone(),
             Slot::Dir(acc) => Dependency {
-                name: acc.name,
+                name: acc.name.clone(),
                 bytes: Some(acc.bytes),
                 sharing: acc.sharing,
             },
         })
-        .collect();
-    Some((bytes, dependencies))
+        .collect()
 }
 
 enum Slot {
@@ -454,10 +561,16 @@ fn directory_size(path: &Path, scan: &Scan) -> Option<u64> {
     if !file_type.is_dir() {
         return Some(0);
     }
-    sum_tree(path, &mut [], scan)
+    sum_tree(path, &mut [], scan, &mut |_, _| {})
 }
 
-fn sum_tree(root: &Path, slots: &mut [Slot], scan: &Scan) -> Option<u64> {
+/// `tick` sees the running total and slots after each directory.
+fn sum_tree(
+    root: &Path,
+    slots: &mut [Slot],
+    scan: &Scan,
+    tick: &mut dyn FnMut(u64, &[Slot]),
+) -> Option<u64> {
     let mut total = 0u64;
     let mut stack = vec![root.to_path_buf()];
     while let Some(dir) = stack.pop() {
@@ -489,6 +602,7 @@ fn sum_tree(root: &Path, slots: &mut [Slot], scan: &Scan) -> Option<u64> {
                 attribute(slots, &path, len, Some(&meta));
             }
         }
+        tick(total, slots);
     }
     Some(total)
 }
@@ -539,22 +653,114 @@ fn hard_linked(meta: &std::fs::Metadata) -> bool {
     }
 }
 
+/// Decimal SI units: one decimal below 10 (`1.5 kB`, `2 GB`), whole numbers
+/// from 10 (`34 MB`).
 pub(crate) fn format_bytes(bytes: u64) -> String {
-    const UNITS: [&str; 5] = ["B", "K", "M", "G", "T"];
-    let mut value = bytes as f64;
+    const UNITS: [&str; 5] = ["B", "kB", "MB", "GB", "TB"];
+    let bytes = u128::from(bytes);
     let mut unit = 0;
-    while value >= 1024.0 && unit < UNITS.len() - 1 {
-        value /= 1024.0;
+    let mut scale = 1u128;
+    while unit + 1 < UNITS.len() && bytes >= scale * 1000 {
+        scale *= 1000;
         unit += 1;
     }
     if unit == 0 {
-        return format!("{bytes}B");
+        return format!("{bytes} B");
     }
-    if value >= 10.0 || (value - value.round()).abs() < 0.05 {
-        format!("{}{}", value.round() as u64, UNITS[unit])
-    } else {
-        format!("{value:.1}{}", UNITS[unit])
+    let tenths = (bytes * 10 + scale / 2) / scale;
+    if tenths < 100 {
+        let (whole, fraction) = (tenths / 10, tenths % 10);
+        return if fraction == 0 {
+            format!("{whole} {}", UNITS[unit])
+        } else {
+            format!("{whole}.{fraction} {}", UNITS[unit])
+        };
     }
+    let whole = (bytes + scale / 2) / scale;
+    if whole >= 1000 && unit + 1 < UNITS.len() {
+        return format!("1 {}", UNITS[unit + 1]);
+    }
+    format!("{whole} {}", UNITS[unit])
+}
+
+#[derive(Serialize)]
+struct CacheFile<'a> {
+    version: u64,
+    checkouts: BTreeMap<&'a str, &'a Cached>,
+}
+
+/// `$XDG_STATE_HOME/bonsai/footprints.json`, else
+/// `~/.local/state/bonsai/footprints.json`. `_BONSAI_HQ_FOOTPRINTS` overrides
+/// the file; empty or `0` disables the cache.
+#[cfg_attr(not(test), allow(dead_code))]
+pub fn cache_path() -> Option<PathBuf> {
+    if let Some(value) = std::env::var_os("_BONSAI_HQ_FOOTPRINTS") {
+        if value.is_empty() || value == "0" {
+            return None;
+        }
+        return Some(PathBuf::from(value));
+    }
+    #[cfg(test)]
+    {
+        None
+    }
+    #[cfg(not(test))]
+    {
+        let state = match std::env::var_os("XDG_STATE_HOME") {
+            Some(dir) if !dir.is_empty() => PathBuf::from(dir),
+            _ => std::env::home_dir()?.join(".local/state"),
+        };
+        Some(state.join("bonsai").join("footprints.json"))
+    }
+}
+
+/// A missing, unreadable, corrupt, or other-version file loads as empty.
+/// Entries that do not parse are skipped.
+#[cfg_attr(not(test), allow(dead_code))]
+pub fn load_cache(path: &Path) -> HashMap<PathBuf, Cached> {
+    let Ok(text) = std::fs::read_to_string(path) else {
+        return HashMap::new();
+    };
+    let Ok(serde_json::Value::Object(mut document)) = serde_json::from_str(&text) else {
+        return HashMap::new();
+    };
+    if document.get("version").and_then(serde_json::Value::as_u64) != Some(CACHE_VERSION) {
+        return HashMap::new();
+    }
+    let Some(serde_json::Value::Object(checkouts)) = document.remove("checkouts") else {
+        return HashMap::new();
+    };
+    checkouts
+        .into_iter()
+        .filter_map(|(path, entry)| {
+            Some((PathBuf::from(path), serde_json::from_value(entry).ok()?))
+        })
+        .collect()
+}
+
+/// Replaces the file atomically, entries sorted by path. Paths that are not
+/// UTF-8 cannot be JSON keys and are skipped.
+#[cfg_attr(not(test), allow(dead_code))]
+pub fn save_cache(path: &Path, entries: &HashMap<PathBuf, Cached>) -> std::io::Result<()> {
+    let dir = match path.parent() {
+        Some(parent) if !parent.as_os_str().is_empty() => parent,
+        _ => Path::new("."),
+    };
+    std::fs::create_dir_all(dir)?;
+    let document = CacheFile {
+        version: CACHE_VERSION,
+        checkouts: entries
+            .iter()
+            .filter_map(|(path, cached)| Some((path.to_str()?, cached)))
+            .collect(),
+    };
+    let mut text = serde_json::to_string_pretty(&document).map_err(std::io::Error::other)?;
+    text.push('\n');
+    // A file torn by a crash loads as empty and is measured again: no fsync.
+    let mut temporary = tempfile::NamedTempFile::new_in(dir)?;
+    temporary.write_all(text.as_bytes())?;
+    temporary.persist(path)?;
+    Ok(())
 }
 
 #[derive(Default)]
@@ -932,14 +1138,262 @@ mod tests {
         crate::paths::canonicalize_or_self(path)
     }
 
+    fn without_harnesses(_: &AtomicBool) -> HarnessIndex {
+        HarnessIndex::default()
+    }
+
+    fn harnesses_after_cancel(cancel: &AtomicBool) -> HarnessIndex {
+        while !cancel.load(Ordering::Relaxed) {
+            std::thread::sleep(Duration::from_millis(5));
+        }
+        HarnessIndex::default()
+    }
+
+    /// Every update until the job's workers have all exited.
+    fn drain(job: &MeasureJob) -> Vec<Measured> {
+        let mut updates = Vec::new();
+        loop {
+            match job.receiver.recv_timeout(Duration::from_secs(30)) {
+                Ok(update) => updates.push(update),
+                Err(std::sync::mpsc::RecvTimeoutError::Disconnected) => return updates,
+                Err(std::sync::mpsc::RecvTimeoutError::Timeout) => {
+                    panic!("measurement did not finish: {updates:?}")
+                }
+            }
+        }
+    }
+
+    fn rust_checkout(root: &Path) {
+        std::fs::create_dir_all(root.join("src")).unwrap();
+        std::fs::create_dir_all(root.join("target/debug/deps")).unwrap();
+        std::fs::write(root.join("Cargo.toml"), "[package]\n").unwrap();
+        std::fs::write(root.join("src/main.rs"), "fn main() {}\n").unwrap();
+        std::fs::write(root.join("target/debug/deps/a"), vec![0_u8; 300]).unwrap();
+        std::fs::write(root.join("target/debug/b"), vec![0_u8; 200]).unwrap();
+    }
+
+    fn cached(bytes: u64, measured_at: u64) -> Cached {
+        Cached {
+            footprint: Footprint {
+                ecosystems: vec!["rust".to_string()],
+                bytes,
+                dependencies: vec![
+                    Dependency {
+                        name: "target".to_string(),
+                        bytes: Some(bytes / 2),
+                        sharing: Sharing::Local,
+                    },
+                    Dependency {
+                        name: "modules".to_string(),
+                        bytes: None,
+                        sharing: Sharing::Shared,
+                    },
+                ],
+                harnesses: vec!["claude".to_string()],
+            },
+            measured_at,
+        }
+    }
+
     #[test]
-    fn formats_binary_sizes() {
-        assert_eq!(format_bytes(0), "0B");
-        assert_eq!(format_bytes(1023), "1023B");
-        assert_eq!(format_bytes(1024), "1K");
-        assert_eq!(format_bytes(512 * 1024), "512K");
-        assert_eq!(format_bytes(12 * 1024 * 1024), "12M");
-        assert_eq!(format_bytes(14 * 1024 * 1024 * 1024 / 10), "1.4G");
+    fn formats_decimal_sizes() {
+        for (bytes, expected) in [
+            (0, "0 B"),
+            (512, "512 B"),
+            (999, "999 B"),
+            (1_000, "1 kB"),
+            (1_500, "1.5 kB"),
+            (1_536, "1.5 kB"),
+            (9_949, "9.9 kB"),
+            (9_950, "10 kB"),
+            (999_499, "999 kB"),
+            (999_500, "1 MB"),
+            (34_000_000, "34 MB"),
+            (2_000_000_000, "2 GB"),
+            (2_040_000_000, "2 GB"),
+            (5_600_000_000, "5.6 GB"),
+            (67_000_000_000, "67 GB"),
+            (1_200_000_000_000, "1.2 TB"),
+            (247_000_000_000_000, "247 TB"),
+            (u64::MAX, "18446744 TB"),
+        ] {
+            assert_eq!(format_bytes(bytes), expected, "{bytes}");
+        }
+    }
+
+    #[test]
+    fn labels_use_the_decimal_format() {
+        let footprint = cached(3_000_000, 0).footprint;
+        assert_eq!(
+            footprint.summary(),
+            "rust · 3 MB · target 1.5 MB local · modules shared · claude"
+        );
+    }
+
+    #[test]
+    fn footprints_round_trip_through_json() {
+        let footprint = cached(42, 0).footprint;
+        let value = serde_json::to_value(&footprint).unwrap();
+        assert_eq!(value["dependencies"][1]["sharing"], "shared");
+        assert_eq!(
+            serde_json::from_value::<Footprint>(value).unwrap(),
+            footprint
+        );
+    }
+
+    #[test]
+    fn start_sends_one_complete_update_per_checkout() {
+        let temporary = tempfile::tempdir().unwrap();
+        let first = temporary.path().join("first");
+        let second = temporary.path().join("second");
+        rust_checkout(&first);
+        std::fs::create_dir_all(&second).unwrap();
+        std::fs::write(second.join("file"), "hello").unwrap();
+        let job = start_with(
+            vec![first.clone(), second.clone()],
+            3,
+            PROGRESS_INTERVAL,
+            without_harnesses,
+        );
+        let updates = drain(&job);
+        for (path, expected) in [(&first, inspect(&first)), (&second, inspect(&second))] {
+            let complete: Vec<_> = updates
+                .iter()
+                .filter(|update| &update.path == path && update.complete)
+                .collect();
+            assert_eq!(complete.len(), 1, "{updates:?}");
+            assert_eq!(complete[0].generation, 3);
+            assert_eq!(complete[0].footprint, expected);
+            let last = updates.iter().rfind(|update| &update.path == path).unwrap();
+            assert!(last.complete, "the complete update comes last: {updates:?}");
+        }
+        assert_eq!(
+            updates
+                .iter()
+                .find(|update| update.path == second && update.complete)
+                .unwrap()
+                .footprint
+                .bytes,
+            5
+        );
+    }
+
+    #[test]
+    fn start_streams_partial_sizes_while_a_walk_is_slow() {
+        let temporary = tempfile::tempdir().unwrap();
+        let root = temporary.path().join("checkout");
+        rust_checkout(&root);
+        // A zero interval makes every directory of the walk report progress.
+        let job = start_with(vec![root.clone()], 9, Duration::ZERO, without_harnesses);
+        let updates = drain(&job);
+        let (last, partial) = updates.split_last().unwrap();
+        assert!(last.complete);
+        assert_eq!(last.footprint, inspect(&root));
+        assert!(!partial.is_empty(), "{updates:?}");
+        for update in partial {
+            assert!(!update.complete);
+            assert_eq!(update.generation, 9);
+            assert_eq!(update.path, root);
+            assert_eq!(update.footprint.ecosystems, vec!["rust".to_string()]);
+            assert_eq!(update.footprint.dependencies.len(), 1);
+            assert!(update.footprint.bytes <= last.footprint.bytes);
+        }
+        assert!(
+            partial
+                .windows(2)
+                .all(|pair| pair[0].footprint.bytes <= pair[1].footprint.bytes)
+        );
+        assert!(partial[0].footprint.bytes < last.footprint.bytes);
+        let target = |update: &Measured| update.footprint.dependencies[0].bytes.unwrap();
+        assert!(partial.iter().all(|update| target(update) <= 500));
+        assert_eq!(target(last), 500);
+    }
+
+    #[test]
+    fn cancelling_a_job_stops_it_without_a_complete_update() {
+        let temporary = tempfile::tempdir().unwrap();
+        let root = temporary.path().join("checkout");
+        rust_checkout(&root);
+        // The harness index only loads once cancelled, so the walk finishes
+        // and the worker waits until the cancel flag releases it.
+        let job = start_with(vec![root], 1, Duration::ZERO, harnesses_after_cancel);
+        let first = job.receiver.recv_timeout(Duration::from_secs(30)).unwrap();
+        assert!(!first.complete);
+        job.cancel.store(true, Ordering::Relaxed);
+        assert!(drain(&job).iter().all(|update| !update.complete));
+    }
+
+    #[test]
+    fn the_cache_round_trips_and_replaces_an_existing_file() {
+        let temporary = tempfile::tempdir().unwrap();
+        let path = temporary.path().join("state/bonsai/footprints.json");
+        let mut entries = HashMap::new();
+        entries.insert(PathBuf::from("/trees/b"), cached(2_000, 10));
+        entries.insert(PathBuf::from("/trees/a"), cached(1_000, 20));
+        save_cache(&path, &entries).unwrap();
+        assert_eq!(load_cache(&path), entries);
+        let text = std::fs::read_to_string(&path).unwrap();
+        let value: serde_json::Value = serde_json::from_str(&text).unwrap();
+        assert_eq!(value["version"], 1);
+        assert_eq!(value["checkouts"]["/trees/a"]["measured_at"], 20);
+        assert!(text.find("/trees/a").unwrap() < text.find("/trees/b").unwrap());
+        save_cache(&path, &entries).unwrap();
+        assert_eq!(std::fs::read_to_string(&path).unwrap(), text);
+
+        let mut replaced = HashMap::new();
+        replaced.insert(PathBuf::from("/trees/c"), cached(3_000, 30));
+        save_cache(&path, &replaced).unwrap();
+        assert_eq!(load_cache(&path), replaced);
+        let names: Vec<_> = std::fs::read_dir(path.parent().unwrap())
+            .unwrap()
+            .map(|entry| entry.unwrap().file_name())
+            .collect();
+        assert_eq!(names, vec![std::ffi::OsString::from("footprints.json")]);
+    }
+
+    #[test]
+    fn tests_use_no_cache_file_unless_one_is_named() {
+        if std::env::var_os("_BONSAI_HQ_FOOTPRINTS").is_none() {
+            assert_eq!(cache_path(), None);
+        }
+    }
+
+    #[test]
+    fn a_missing_corrupt_or_other_version_cache_loads_empty() {
+        let temporary = tempfile::tempdir().unwrap();
+        let path = temporary.path().join("footprints.json");
+        assert!(load_cache(&path).is_empty());
+        for text in [
+            "",
+            "not json",
+            "[]",
+            r#"{"checkouts": {}}"#,
+            r#"{"version": 2, "checkouts": {"/trees/a": {"footprint": {"ecosystems": [], "bytes": 1, "dependencies": [], "harnesses": []}, "measured_at": 1}}}"#,
+            r#"{"version": 1, "checkouts": []}"#,
+        ] {
+            std::fs::write(&path, text).unwrap();
+            assert!(load_cache(&path).is_empty(), "{text}");
+        }
+        std::fs::create_dir(temporary.path().join("directory")).unwrap();
+        assert!(load_cache(&temporary.path().join("directory")).is_empty());
+    }
+
+    #[test]
+    fn a_cache_entry_that_does_not_parse_is_skipped() {
+        let temporary = tempfile::tempdir().unwrap();
+        let path = temporary.path().join("footprints.json");
+        let good = cached(7, 70);
+        let document = serde_json::json!({
+            "version": 1,
+            "checkouts": {
+                "/trees/good": good,
+                "/trees/bad": {"footprint": {"bytes": "many"}, "measured_at": 1},
+            },
+        });
+        std::fs::write(&path, document.to_string()).unwrap();
+        let loaded = load_cache(&path);
+        assert_eq!(loaded.len(), 1);
+        assert_eq!(loaded.get(Path::new("/trees/good")), Some(&good));
     }
 
     #[test]
