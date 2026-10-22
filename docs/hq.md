@@ -177,8 +177,10 @@ the space it frees, its largest ignored paths, and the local configuration
 and nested repositories it keeps. Confirming runs `bonsai trim --yes` on
 exactly the worktrees you reviewed, then measures the project again. On a
 worktree, `x` trims that worktree; on a project row or the main checkout,
-and with `:trim project`, it trims every worktree of the project. The main
-checkout and external worktrees are never trimmed.
+and with `:trim project`, it trims every linked worktree of the project. The main
+checkout is never trimmed. External worktrees have the same trim and removal
+actions and safeguards; their `external` note only means they live outside the
+Bonsai root.
 
 Bonsai commands run in the background and stream their output into a pane
 below the list, which stays usable; Esc closes the pane. Coding agents,

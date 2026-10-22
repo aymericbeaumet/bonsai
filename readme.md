@@ -4,11 +4,12 @@
 [![latest release](https://img.shields.io/github/v/release/aymericbeaumet/bonsai)](https://github.com/aymericbeaumet/bonsai/releases/latest)
 [![license: MIT](https://img.shields.io/badge/license-MIT-blue)](LICENSE)
 
-**Git worktrees without the bookkeeping.** bonsai creates the branch and the
-worktree in one command, keeps every worktree in one predictable place, lets
-you fuzzy-jump between them, and cleans them up once they are merged, even
-when squash-merged. Built for running several coding agents in parallel, and
-just as handy by hand.
+**Git worktrees without the bookkeeping.** bonsai manages every registered
+worktree, wherever it lives and whatever created it. Fuzzy-jump between
+checkouts, switch coding agents, reclaim build caches, and clean up merged
+branches, including squash-merges. Create through bonsai when you want a
+predictable layout and automatic setup. Built for running several coding
+agents in parallel, and just as handy by hand.
 
 ![bonsai demo: create a worktree, push a fix, fuzzy-jump to another worktree, and clean up after the squash-merge](docs/demo/demo.gif)
 
@@ -24,17 +25,19 @@ request was squash-merged. bonsai does the bookkeeping:
   latest default branch, creates the worktree, copies untracked local config
   (`.env*`, `.envrc`, `.mcp.json`, ...), installs dependencies from the
   lockfile, and drops you into it.
-- **One place for everything.** Worktrees live outside your clone, at
+- **An optional shared layout.** New worktrees live outside your clone, at
   `~/.bonsai/github.com/<owner>/<repo>/<branch>`, so they never clutter the
-  repository and every tool can find them.
+  repository and every tool can find them. Existing worktrees from Git or
+  any coding harness work in place, with no import or skill required.
 - **Fuzzy navigation.** `bonsai cd` jumps between worktrees, most recently
   used first; `-a` jumps across all your projects.
 - **Safe cleanup.** `bonsai clean` detects merged *and* squash-merged
   branches, shows the plan before acting, and never touches a worktree with
   uncommitted changes.
 - **Free disk, keep your work.** `bonsai trim` deletes what git ignores
-  (`node_modules`, `target`, `.venv`, build caches) across worktrees on every
-  core, and keeps worktrees, branches, local config, and databases.
+  (`node_modules`, `target`, `.venv`, build caches) across worktrees, with a
+  live progress bar, and preserves local state outside dependency/build
+  directories. Explicit keep rules apply everywhere.
 - **A headquarters.** `bonsai` (or `bonsai hq`) shows every project with its
   checkouts, running coding agents, uncommitted changes, upstream state, and
   disk size, and runs all of the above from one screen with vim keys.

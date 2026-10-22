@@ -132,8 +132,7 @@ segment-by-segment (`Fix API/Login` becomes `fix-api/login`); `/` remains the
 branch and directory delimiter.
 
 Branch resolution, in order:
-  - already checked out in a bonsai worktree: reuse it (idempotent)
-  - checked out in an external worktree: refuse it (external paths are read-only)
+  - already checked out in any registered worktree: reuse it in place (idempotent)
   - exists locally: check it out in the new worktree
   - exists on the remote: create a local branch tracking it
   - otherwise: create it from --base, or from the default branch
@@ -235,14 +234,14 @@ Examples:
 
 const TRIM_LONG: &str = "\
 Free disk space by deleting what git ignores (node_modules, target, .venv,
-build output, caches) from Bonsai-managed worktrees. Worktrees, branches,
+build output, caches) from Git-registered linked worktrees. Worktrees, branches,
 tracked files, and untracked files stay.
 
-Without arguments, every Bonsai-managed worktree of the current project is
+Without arguments, every linked worktree of the current project is
 planned (-a/--all, the default outside a repo: of every project); branches
-or exact checkout paths narrow it. The main checkout, external worktrees,
-and worktrees another coding agent is working in (see `bonsai ps`) are
-never touched.
+or exact checkout paths narrow it. Worktrees created by other tools are
+fully supported in place. The main checkout, locked worktrees, and worktrees
+another coding agent is working in (see `bonsai ps`) are never touched.
 
 Kept even when ignored, with everything inside them: nested repositories,
 local state no rebuild restores (.env*, .envrc, *.local, *.local.*,
@@ -251,7 +250,11 @@ local state no rebuild restores (.env*, .envrc, *.local, *.local.*,
 patterns, a glob without `/` matches a name at any depth. Other ignored
 files are deleted, so review the plan: it shows the largest paths with
 their disk usage, --dry-run lists every path, and --json details them all.
-Measuring and deleting fan out across cores.
+Inside ignored dependency and build directories (node_modules, target,
+.build, etc.), only explicit [trim] keep globs and registered nested
+worktrees are protected; package fixtures and dependency checkouts can be
+rebuilt. Terminal deletion progress shows entries removed, throughput, and
+completed paths.
 
 Examples:
   bonsai trim --dry-run         # how much would be reclaimed, and where
@@ -261,8 +264,8 @@ Examples:
 
 const PS_LONG: &str = "\
 List the coding agents running on this machine (Claude Code, Codex,
-OpenCode, Cursor Agent, Gemini CLI, Copilot, Amp, Aider, Goose, Crush, Qwen
-Code, Pi) with the checkout each one works in, its pid, and its uptime.
+OpenCode, Grok, Cursor Agent, Gemini CLI, Copilot, Amp, Aider, Goose, Crush,
+Qwen Code, Pi) with the checkout each one works in, its pid, and its uptime.
 Inside a repository, only agents working in its checkouts are listed; with
 -a/--all (the default outside a repo), every agent is, labelled
 `<repo-id>: <branch>` when it works in a known checkout and by directory
@@ -337,18 +340,18 @@ worktrees. Workspace settings, tasks, launch configuration, comments, and
 custom folders are preserved when Bonsai refreshes its folders.
 
   <root>/<repo-id>/<repo>.code-workspace   per repo: all registered worktrees
-  <root>/bonsai.code-workspace             global: Bonsai-managed worktrees
+  <root>/bonsai.code-workspace             global: linked worktrees of known projects
 
 Both are kept up to date by add/remove/clean/prune (disable with
 `workspace = false`). This command refreshes one and prints its path:
 
   code \"$(bonsai workspace)\"          # this repo's worktrees
-  cursor \"$(bonsai workspace -a)\"     # everything under the bonsai root
+  cursor \"$(bonsai workspace -a)\"     # linked worktrees of known projects
 
 Outside a repo, the global file is the default.
 
-The per-repo file includes external worktrees registered by other tools. The
-global file cannot discover those paths without a current repo context.
+Both files include external worktrees registered by other tools. Global
+discovery uses the Bonsai root, workspace references, and the current project.
 
 Claude Code and Codex desktop open plain folders: point them at a worktree
 directory (<root>/<repo-id>/<branch>) or use `bonsai cd`.";
@@ -559,8 +562,8 @@ pub enum Commands {
     /// Delete ignored files (node_modules, target, ...); worktrees stay
     #[command(long_about = TRIM_LONG)]
     Trim {
-        /// Branches or exact managed paths to trim (default: every
-        /// Bonsai-managed worktree in scope)
+        /// Branches or exact checkout paths to trim (default: every
+        /// linked worktree in scope)
         targets: Vec<String>,
         /// Show what would be deleted without touching anything
         #[arg(short = 'n', long)]

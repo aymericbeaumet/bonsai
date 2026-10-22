@@ -7,8 +7,12 @@
   → branch and directory `fix-api/login`).
 - Git-registered worktrees elsewhere under the configured global root remain
   managed, so moving the main checkout or changing its repo ID does not orphan
-  them. Registered worktrees outside that root are external and merged into the
-  project's read-only views; Bonsai never creates there.
+  them. Every Git-registered linked worktree can be listed, opened, trimmed,
+  cleaned, and removed in place, including worktrees created by coding agents
+  outside that root. `external` describes the location, not a restriction.
+  Bonsai creates new worktrees only under its configured root. The main checkout
+  stays protected; locks, local changes, nested worktrees, and running agents
+  retain their usual safeguards.
 - For interactive cd-capable commands, the shell wrapper watches for a sentinel
   line to cd. Other commands and captured output pass through directly. Prompts
   render on stderr, so fuzzy pickers work even inside `$(...)`.

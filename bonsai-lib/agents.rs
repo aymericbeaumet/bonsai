@@ -14,6 +14,7 @@ use sysinfo::{Pid, ProcessRefreshKind, ProcessesToUpdate, System, UpdateKind};
 pub enum Kind {
     Claude,
     Codex,
+    Grok,
     OpenCode,
     CursorAgent,
     Gemini,
@@ -31,6 +32,7 @@ pub enum Kind {
 const AGENTS: &[(Kind, &str, &[&str])] = &[
     (Kind::Claude, "claude", &["@anthropic-ai/claude-code"]),
     (Kind::Codex, "codex", &["@openai/codex"]),
+    (Kind::Grok, "grok", &["grok-dev"]),
     (Kind::OpenCode, "opencode", &["opencode-ai"]),
     (Kind::CursorAgent, "cursor-agent", &[]),
     (Kind::Gemini, "gemini", &["@google/gemini-cli"]),
@@ -46,7 +48,7 @@ const AGENTS: &[(Kind, &str, &[&str])] = &[
 const INTERPRETERS: &[&str] = &["node", "bun", "deno", "python", "python3"];
 
 impl Kind {
-    /// Every known agent, most common first.
+    /// Every recognized agent, in display order; this is not a popularity ranking.
     pub fn all() -> impl Iterator<Item = Kind> {
         AGENTS.iter().map(|(kind, _, _)| *kind)
     }
@@ -302,6 +304,23 @@ mod tests {
             None
         );
         assert_eq!(classify("node", &argv(&["node"])), None);
+    }
+
+    #[test]
+    fn recognizes_every_supported_agent_and_its_interpreted_packages() {
+        for &(kind, executable, packages) in AGENTS {
+            assert_eq!(classify(executable, &argv(&[executable])), Some(kind));
+            for package in packages {
+                let script = format!("/x/node_modules/{package}/dist/index.js");
+                assert_eq!(classify("bun", &argv(&["bun", &script])), Some(kind));
+            }
+        }
+        assert_eq!(classify("Grok", &argv(&["Grok"])), None);
+        assert_eq!(classify("grok-helper", &argv(&["grok-helper"])), None);
+        assert_eq!(
+            classify("node", &argv(&["node", "/x/grok-dev-helper/index.js"])),
+            None
+        );
     }
 
     #[test]

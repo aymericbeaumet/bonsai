@@ -178,6 +178,7 @@ impl Background {
             .stdout(Stdio::piped())
             .stderr(Stdio::piped())
             .env("GIT_TERMINAL_PROMPT", "0")
+            .env("_BONSAI_PROGRESS", "1")
             .spawn()
             .with_context(|| format!("cannot run {}", spec.label))?;
         let (sender, chunks) = std::sync::mpsc::channel();

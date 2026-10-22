@@ -54,7 +54,8 @@ protected = ["release/*"]   # branch globs never cleaned
 [trim]
 # ignored paths trim never deletes, on top of [add] copy and the built-in
 # local state (.env*, .envrc, *.local*, databases, Terraform state, keys,
-# .idea, .vscode); like gitignore, a glob without `/` matches at any depth
+# .idea, .vscode) outside dependency/build directories. Explicit keep globs
+# apply everywhere; like gitignore, a glob without `/` matches at any depth
 keep = ["fixtures/*.dump", "secrets"]
 
 [hq]

@@ -338,8 +338,12 @@ fn acquiring_mutation_lock_discards_initial_worktree_inventory() {
     std::fs::create_dir(&shims).unwrap();
     let shim = shims.join("git");
     // Add a worktree after initial discovery, immediately before the caller
-    // opens its repository lock. The locked operation must discover it anew.
-    std::fs::write(&shim, "#!/bin/sh\ncase \"$*\" in\n  *' rev-parse --path-format=absolute --git-common-dir') PATH=\"$ORIGINAL_PATH\" \"$TEST_BINARY\" add ab/late >/dev/null || exit $? ;;\nesac\nexec \"$REAL_GIT\" \"$@\"\n").unwrap();
+    // opens its repository lock. Inject once: later registration checks query
+    // the common directory while holding that lock.
+    std::fs::write(
+        &shim,
+        "#!/bin/sh\ncase \"$*\" in\n  *' rev-parse --path-format=absolute --git-common-dir')\n    if mkdir \"$TEST_INVENTORY_MARKER\" 2>/dev/null; then\n      PATH=\"$ORIGINAL_PATH\" \"$TEST_BINARY\" add ab/late >/dev/null || exit $?\n    fi ;;\nesac\nexec \"$REAL_GIT\" \"$@\"\n",
+    ).unwrap();
     std::fs::set_permissions(&shim, std::fs::Permissions::from_mode(0o755)).unwrap();
     let original_path = std::env::var_os("PATH").unwrap_or_default();
     let mut paths = vec![shims];
@@ -349,6 +353,10 @@ fn acquiring_mutation_lock_discards_initial_worktree_inventory() {
         .env("PATH", std::env::join_paths(paths).unwrap())
         .env("ORIGINAL_PATH", original_path)
         .env("TEST_BINARY", env!("CARGO_BIN_EXE_bonsai"))
+        .env(
+            "TEST_INVENTORY_MARKER",
+            fixture.temp.path().join("injected"),
+        )
         .env("REAL_GIT", String::from_utf8_lossy(&real_git.stdout).trim())
         .args(["remove", "ab/late"])
         .output()

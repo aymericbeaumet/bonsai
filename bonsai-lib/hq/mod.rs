@@ -1544,9 +1544,6 @@ impl Model {
             if worktree.missing {
                 return self.say("its directory was deleted; press P to prune it");
             }
-            if worktree.external {
-                return self.say("external worktrees are read-only to bonsai");
-            }
             // The main checkout itself is never trimmed: it stands for the
             // project, as on the home list.
             if !worktree.main {
@@ -1680,9 +1677,6 @@ impl Model {
         };
         if worktree.main {
             return self.say("the main checkout cannot be removed");
-        }
-        if worktree.external {
-            return self.say("external worktrees are read-only to bonsai");
         }
         if delete_branch && worktree.branch.is_none() {
             return self.say("a detached checkout has no branch to delete; use dd");
@@ -5583,16 +5577,16 @@ mod tests {
     }
 
     #[test]
-    fn x_refuses_external_and_deleted_worktrees() {
+    fn x_plans_external_worktrees_and_refuses_deleted_worktrees() {
         let mut snapshot = sample();
         snapshot.projects[0].worktrees[0].external = true;
         let mut model = Model::from_snapshot(snapshot);
         model.on_key(press(KeyCode::Enter));
-        assert!(matches!(
-            model.on_key(press(KeyCode::Char('x'))),
-            Effect::None
-        ));
-        assert!(model.status_line().contains("read-only"));
+        let spec = background(model.on_key(press(KeyCode::Char('x'))));
+        assert_eq!(
+            arguments(&spec)[2..],
+            ["trim", "--dry-run", "--json", "/trees/bonsai/ab/dev"]
+        );
         model.snapshot.projects[0].worktrees[0].missing = true;
         model.rebuild();
         model.reveal(Path::new("/trees/bonsai/ab/dev"));
@@ -5601,6 +5595,25 @@ mod tests {
             Effect::None
         ));
         assert!(model.status_line().contains("press P"));
+    }
+
+    #[test]
+    fn external_worktree_removal_uses_the_cli_confirmation() {
+        let mut snapshot = sample();
+        snapshot.projects[0].worktrees[0].external = true;
+        let mut model = Model::from_snapshot(snapshot);
+        model.on_key(press(KeyCode::Enter));
+        model.on_key(press(KeyCode::Char('d')));
+        model.on_key(press(KeyCode::Char('d')));
+        let confirm = model
+            .confirm
+            .as_ref()
+            .expect("external removal is confirmable");
+        assert!(confirm.title.contains("Remove"));
+        let Action::Background { spec, .. } = &confirm.action else {
+            panic!("removal runs through bonsai");
+        };
+        assert_eq!(arguments(spec)[2..], ["remove", "/trees/bonsai/ab/dev"]);
     }
 
     #[test]

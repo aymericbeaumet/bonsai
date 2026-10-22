@@ -11,9 +11,11 @@ and every other VS Code derivative): bonsai maintains two
 
 - `~/.bonsai/<repo-id>/<repo>.code-workspace` — this repo's main checkout
   plus every Git-registered worktree, including external ones
-- `~/.bonsai/bonsai.code-workspace` — every worktree of every repo,
-  labelled `repo · branch` (Bonsai-managed paths only, because this global
-  view has no current repository from which to discover external worktrees)
+- `~/.bonsai/bonsai.code-workspace` — every linked worktree of every known
+  repo, labelled `repo · branch`, including external checkouts created by
+  other tools. Projects are discovered from the Bonsai root, workspace folder
+  references, and the current checkout; existing orphan directories under the
+  root stay listed too.
 
 Open one and each worktree appears as a root folder in the Explorer's left
 tree, with per-root git status in the Source Control panel. Editors watch
@@ -21,7 +23,7 @@ the file, so the tree updates live as bonsai creates and removes worktrees:
 
 ```sh
 code "$(bonsai workspace)"           # this repo's worktrees
-cursor "$(bonsai workspace -a)"      # everything under the bonsai root
+cursor "$(bonsai workspace -a)"      # linked worktrees of every known project
 ```
 
 Disable the file maintenance with `workspace = false`.
@@ -33,7 +35,8 @@ is removed.
 
 ## Folder-based apps
 
-Claude Code desktop, Codex desktop, and other folder-based apps: every
-worktree is a plain directory named after its branch under
-`~/.bonsai/<host>/<owner>/<repo>/`, so folder pickers and recent-project
-lists stay readable. Jump from a terminal with `bonsai cd`.
+Claude Code desktop, Codex desktop, and other folder-based apps open worktrees
+as plain directories. Bonsai creates them under
+`~/.bonsai/<host>/<owner>/<repo>/`, named after their branch; checkouts created
+elsewhere keep their existing paths. Jump to either from a terminal with
+`bonsai cd`.

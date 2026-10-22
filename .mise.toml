@@ -80,6 +80,10 @@ run = [{ task = "release" }, "python3 tests/terminal.py target/release/bonsai"]
 description = "Benchmark disposable repositories (pass benchmark options after --)"
 run = "python3 scripts/benchmark.py"
 
+[tasks.bench-trim]
+description = "Compare tree deletion on disposable package trees (packages, files/package, runs)"
+run = "cargo run --release --locked -p bonsai-lib --example trim-benchmark --"
+
 [tasks.smoke]
 description = "Run the slower smoke tests CI adds on Linux"
 run = [

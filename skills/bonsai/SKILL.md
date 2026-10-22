@@ -83,9 +83,11 @@ plans, `--json` reports, and `--yes` skips the prompt.
   from the intended cleanup. For named targets or a subset of the plan, use
   `bonsai remove <branch>`; add `-d` only when branch deletion is intended.
 - `trim` deletes git-ignored files (dependencies, build output, caches) from
-  Bonsai-managed worktrees. It keeps worktrees, branches, tracked and
-  untracked files, nested repositories, and common local state (`.env*`,
-  databases, keys, Terraform state; see `bonsai trim --help`), but other
+  all Git-registered linked worktrees, including other tools’ checkouts. It keeps worktrees, branches, tracked and
+  untracked files and common local state (`.env*`, databases, keys, Terraform
+  state). Inside ignored dependency/build directories, only explicit `[trim]
+  keep` globs and registered nested worktrees are protected; package fixtures
+  and dependency checkouts are regenerable (see `bonsai trim --help`). Other
   ignored files are lost, so read the `--dry-run --json` plan. A request to
   free disk space or trim authorizes `--yes` within the planned scope; name
   branches to narrow it, and ask before deleting plan entries that look like

@@ -9,7 +9,8 @@
 - `skills/bonsai/SKILL.md` — the bundled Agent Skill, embedded at build time
   and printed by `bonsai skill` and `bonsai agents`.
 - `tests/terminal.py` — release PTY checks; `scripts/benchmark.py` —
-  disposable benchmarks.
+  disposable benchmarks; `bonsai-lib/examples/trim-benchmark.rs` —
+  deletion benchmarks.
 - `docs/` — this documentation; `docs/demo/` — the README demo.
 
 The CLI is not published to crates.io. Install the latest version from
@@ -36,6 +37,7 @@ underlying command.
 | `mise run doc` | Build and open the library documentation |
 | `mise run smoke` | The slower Linux CI checks: `package-managers`, `terminal`, and a quick benchmark |
 | `mise run bench -- <options>` | Benchmarks, for example `--worktrees 1 10 100 --sessions 1000 10000 100000` |
+| `mise run bench-trim -- <packages> <files/package> <runs>` | Compare deletion primitives on disposable npm-like trees; defaults to `200 100 3` |
 | `mise run demo` | Re-record the README demo |
 
 The PTY checks (`terminal`) require Unix. Package-manager smoke tests
@@ -43,6 +45,15 @@ require npm, uv, and Python. The Linux CI shell tests also need Bash, Zsh,
 and Fish from the OS. Benchmarks use disposable repositories and synthetic
 session stores, report first-run and warm median/p95 latency plus Git
 process counts, and never access personal sessions.
+
+`bench-trim` creates fresh package trees in a temporary directory and compares
+the former metadata-based progress walker, the standard library remover,
+and Bonsai's progress remover with 1, 2, 4, and default worker counts.
+Creation and compilation are excluded from
+the reported deletion times. It accepts only tree dimensions and run count,
+so it cannot target an existing checkout. Tree deletion fans out the first
+directory levels inside the caller's worker pool. On macOS, CLI deletion
+shares a four-worker pool to reduce APFS unlink contention.
 
 ## Releases
 
@@ -80,5 +91,4 @@ mise run demo
 
 It runs `docs/demo/record.sh`, which builds bonsai from the checkout inside a container and records in
 a throwaway environment (`docs/demo/setup.sh`), so it never touches your
-repositories or `~/.bonsai`. It needs Docker; on macOS, run `colima start`
-first.
+repositories or `~/.bonsai`. It needs native Docker Engine on Linux or Colima on macOS (`colima start`).

@@ -930,7 +930,7 @@ fn cd_skips_deleted_worktrees_and_explains_unresolved_queries() {
 }
 
 #[test]
-fn external_worktrees_are_visible_but_not_bonsai_owned() {
+fn external_worktrees_are_visible_and_manageable_in_place() {
     let repo = TestRepo::new();
     let external = repo.add_external("feat-external");
 
@@ -964,19 +964,174 @@ fn external_worktrees_are_visible_but_not_bonsai_owned() {
     assert_eq!(entry["main"], false);
     assert_eq!(entry["external"], true);
 
-    // Creation/adoption remains exclusive to the configured Bonsai root.
-    repo.bonsai(&external)
+    // Existing external checkouts are reused without provisioning or moving.
+    let reused = repo
+        .bonsai(&repo.clone)
         .args(["add", "feat-external"])
-        .assert()
-        .failure()
-        .stderr(predicate::str::contains("checked out at"));
+        .output()
+        .unwrap();
+    assert!(
+        reused.status.success(),
+        "{}",
+        String::from_utf8_lossy(&reused.stderr)
+    );
+    assert_eq!(
+        PathBuf::from(String::from_utf8_lossy(&reused.stdout).trim()),
+        external
+    );
 
-    // Destructive lifecycle commands continue to target managed worktrees.
+    // Registered worktrees can be removed in place, without adoption or moving.
     repo.bonsai(&external)
         .args(["remove", "feat-external"])
         .assert()
+        .success();
+    assert!(!external.exists());
+    assert!(external.parent().unwrap().is_dir());
+    assert!(repo.clone.is_dir());
+}
+
+#[test]
+fn external_worktrees_keep_dirty_locked_and_main_checkout_protections() {
+    let repo = TestRepo::new();
+    let external = repo.add_external("feat-external-safety");
+    std::fs::write(external.join("local.txt"), "uncommitted work").unwrap();
+    repo.bonsai(&repo.clone)
+        .args(["remove", "feat-external-safety"])
+        .assert()
+        .failure()
+        .stderr(predicate::str::contains("uncommitted changes"));
+    std::fs::remove_file(external.join("local.txt")).unwrap();
+    repo.git(
+        &repo.clone,
+        &["worktree", "lock", external.to_str().unwrap()],
+    );
+    repo.bonsai(&repo.clone)
+        .args(["remove", "feat-external-safety", "--force"])
+        .assert()
+        .failure()
+        .stderr(predicate::str::contains("locked"));
+    repo.bonsai(&repo.clone)
+        .args(["remove", repo.clone.to_str().unwrap(), "--force"])
+        .assert()
         .failure();
+    assert!(repo.clone.join("README.md").is_file());
     assert!(external.is_dir());
+}
+
+#[test]
+fn clean_includes_external_worktrees_and_skips_dirty_ones() {
+    let repo = TestRepo::new();
+    let external = repo.add_external("feat-external-clean");
+    let dirty = repo.add_external("feat-external-dirty");
+    std::fs::write(dirty.join("local.txt"), "keep me").unwrap();
+    let output = repo
+        .bonsai(&repo.clone)
+        .args(["clean", "--dry-run", "--no-fetch", "--json"])
+        .output()
+        .unwrap();
+    assert!(
+        output.status.success(),
+        "{}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let report: serde_json::Value = serde_json::from_slice(&output.stdout).unwrap();
+    assert_eq!(report["planned"][0]["path"], external.to_str().unwrap());
+    assert_eq!(report["skipped_dirty"][0]["path"], dirty.to_str().unwrap());
+    repo.bonsai(&repo.clone)
+        .args(["clean", "--yes", "--no-fetch"])
+        .assert()
+        .success();
+    assert!(!external.exists());
+    assert!(dirty.join("local.txt").is_file());
+    assert!(repo.clone.is_dir());
+}
+
+#[test]
+fn removal_preserves_nested_registered_external_worktrees() {
+    let repo = TestRepo::new();
+    let parent = repo.add_external("feat-external-parent");
+    let child = parent.join(".claude/worktrees/child");
+    std::fs::create_dir_all(child.parent().unwrap()).unwrap();
+    repo.git(
+        &repo.clone,
+        &[
+            "worktree",
+            "add",
+            "-b",
+            "feat-external-child",
+            child.to_str().unwrap(),
+        ],
+    );
+    std::fs::write(parent.join(".gitignore"), ".claude/\n").unwrap();
+    repo.git(&parent, &["add", ".gitignore"]);
+    repo.git(&parent, &["commit", "-m", "ignore nested worktrees"]);
+    repo.bonsai(&repo.clone)
+        .args(["remove", "feat-external-parent", "--force"])
+        .assert()
+        .failure()
+        .stderr(predicate::str::contains(
+            "contains another registered worktree",
+        ));
+    assert!(child.join("README.md").is_file());
+    assert!(parent.is_dir());
+}
+
+#[test]
+fn trim_includes_external_worktrees_by_branch_and_path() {
+    let repo = TestRepo::new();
+    let external = repo.add_external("feat-external-trim");
+    std::fs::write(external.join(".gitignore"), "node_modules/\n").unwrap();
+    std::fs::create_dir(external.join("node_modules")).unwrap();
+    std::fs::write(external.join("node_modules/package.js"), "discard").unwrap();
+    let output = repo
+        .bonsai(&repo.clone)
+        .args(["trim", "--dry-run", "--json", "feat-external-trim"])
+        .output()
+        .unwrap();
+    assert!(
+        output.status.success(),
+        "{}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let report: serde_json::Value = serde_json::from_slice(&output.stdout).unwrap();
+    assert_eq!(report["planned"][0]["path"], external.to_str().unwrap());
+    assert!(external.join("node_modules/package.js").exists());
+    repo.bonsai(&repo.clone)
+        .args(["trim", "--yes", external.to_str().unwrap()])
+        .assert()
+        .success();
+    assert!(!external.join("node_modules").exists());
+    assert!(external.join("README.md").exists());
+    assert!(external.join(".gitignore").exists());
+}
+
+#[test]
+fn missing_external_worktrees_can_be_explicitly_removed() {
+    let repo = TestRepo::new();
+    let external = repo.add_external("feat-external-missing");
+    std::fs::remove_dir_all(&external).unwrap();
+    repo.bonsai(&repo.clone)
+        .args(["remove", "feat-external-missing"])
+        .assert()
+        .success();
+    assert!(!repo.worktree_list().contains("feat-external-missing"));
+}
+
+#[test]
+fn external_worktree_replaced_with_an_unregistered_checkout_is_never_trimmed() {
+    let repo = TestRepo::new();
+    let external = repo.add_external("feat-external-replaced");
+    std::fs::rename(&external, external.with_extension("saved")).unwrap();
+    std::fs::create_dir(&external).unwrap();
+    std::fs::write(external.join(".gitignore"), "node_modules/\n").unwrap();
+    std::fs::create_dir(external.join("node_modules")).unwrap();
+    std::fs::write(external.join("node_modules/keep.js"), "preserve").unwrap();
+    repo.bonsai(&repo.clone)
+        .args(["trim", "--yes", external.to_str().unwrap()])
+        .assert()
+        .success()
+        .stderr(predicate::str::contains("skipped"));
+    assert!(external.join("node_modules/keep.js").is_file());
 }
 
 #[test]
@@ -2582,6 +2737,56 @@ fn global_workspace_file_spans_repos_and_updates() {
 }
 
 #[test]
+fn global_workspace_includes_external_worktrees_of_current_and_known_projects() {
+    let repo = TestRepo::new();
+    let external = repo.add_external("ab/global-external");
+    let output = repo
+        .bonsai(&external)
+        .args(["workspace", "--all"])
+        .output()
+        .unwrap();
+    assert!(output.status.success());
+    let file = PathBuf::from(String::from_utf8_lossy(&output.stdout).trim());
+    let read_folders = || {
+        let workspace: serde_json::Value =
+            serde_json::from_str(&std::fs::read_to_string(&file).unwrap()).unwrap();
+        workspace["folders"].as_array().unwrap().clone()
+    };
+    let folders = read_folders();
+    assert_eq!(folders.len(), 1);
+    assert_eq!(folders[0]["path"], external.to_str().unwrap());
+
+    // The workspace reference keeps the project discoverable outside any repo.
+    repo.bonsai(&repo.dir)
+        .args(["workspace", "--all"])
+        .assert()
+        .success();
+    assert_eq!(read_folders(), folders);
+
+    let managed = repo.add("ab/global-managed");
+    let folders = read_folders();
+    assert_eq!(folders.len(), 2);
+    let resolved = folders
+        .iter()
+        .map(|folder| repo.root.join(folder["path"].as_str().unwrap()))
+        .collect::<std::collections::HashSet<_>>();
+    assert_eq!(
+        resolved,
+        std::collections::HashSet::from([external.clone(), managed])
+    );
+    repo.bonsai(&repo.clone)
+        .args(["remove", "ab/global-managed"])
+        .assert()
+        .success();
+    assert_eq!(read_folders().len(), 1);
+    repo.bonsai(&repo.clone)
+        .args(["remove", "ab/global-external"])
+        .assert()
+        .success();
+    assert!(!file.exists());
+}
+
+#[test]
 fn workspace_file_can_be_disabled() {
     let repo = TestRepo::new();
     let path = repo
@@ -2723,8 +2928,8 @@ fn start_works_in_external_worktrees_without_adopting_them() {
     repo.bonsai(&repo.clone)
         .args(["remove", "ab/fresh-external"])
         .assert()
-        .failure();
-    assert!(external.is_dir());
+        .success();
+    assert!(!external.exists());
 }
 
 #[cfg(unix)]
@@ -2831,12 +3036,18 @@ fn remove_deduplicates_a_branch_and_its_exact_checkout_path() {
 }
 
 #[test]
-fn remove_by_path_keeps_external_and_dirty_worktree_protections() {
+fn remove_by_path_includes_external_worktrees_and_keeps_safety_protections() {
     let repo = TestRepo::new();
     let worktree = repo.add("ab/dirty-path");
     let external = repo.add_external("ab/external-path");
     std::fs::write(worktree.join("pending"), "keep me").unwrap();
-    for path in [&worktree, &external, &repo.clone] {
+    repo.bonsai(&repo.clone)
+        .arg("remove")
+        .arg(&external)
+        .assert()
+        .success();
+    assert!(!external.exists());
+    for path in [&worktree, &repo.clone] {
         repo.bonsai(&repo.clone)
             .arg("remove")
             .arg(path)
@@ -2848,6 +3059,18 @@ fn remove_by_path_keeps_external_and_dirty_worktree_protections() {
         std::fs::read_to_string(worktree.join("pending")).unwrap(),
         "keep me"
     );
+    repo.bonsai(&repo.clone)
+        .args(["remove", "--force"])
+        .arg(&worktree)
+        .assert()
+        .success();
+    assert!(!worktree.exists());
+    repo.bonsai(&repo.clone)
+        .args(["remove", "--force"])
+        .arg(&repo.clone)
+        .assert()
+        .failure();
+    assert!(repo.clone.join("README.md").is_file());
 }
 
 fn hq_json(repo: &TestRepo, cwd: &Path) -> serde_json::Value {
@@ -3279,7 +3502,7 @@ fn add_with_ignored_files(repo: &TestRepo, branch: &str) -> PathBuf {
     std::fs::write(path.join("node_modules/pkg/index.js"), "x".repeat(4096)).unwrap();
     std::fs::create_dir_all(path.join("target/debug")).unwrap();
     std::fs::write(path.join("target/debug/app"), "y".repeat(4096)).unwrap();
-    std::fs::create_dir_all(path.join("target/vendored/.git")).unwrap();
+    std::fs::create_dir_all(path.join("vendor/local/.git")).unwrap();
     std::fs::write(path.join(".env"), "SECRET=1\n").unwrap();
     std::fs::write(path.join("notes.txt"), "untracked work\n").unwrap();
     path
@@ -3297,7 +3520,7 @@ fn json_of(output: &std::process::Output) -> serde_json::Value {
 #[test]
 fn trim_deletes_ignored_files_but_keeps_work_config_and_nested_repos() {
     let repo = TestRepo::new();
-    repo.commit_files(&[(".gitignore", "node_modules/\ntarget/\n.env\n")]);
+    repo.commit_files(&[(".gitignore", "node_modules/\ntarget/\nvendor/\n.env\n")]);
     let path = add_with_ignored_files(&repo, "feat-trim");
     // The main checkout is never trimmed.
     std::fs::create_dir_all(repo.clone.join("node_modules/dep")).unwrap();
@@ -3320,7 +3543,7 @@ fn trim_deletes_ignored_files_but_keeps_work_config_and_nested_repos() {
         .map(|entry| entry["path"].as_str().unwrap())
         .collect();
     entries.sort();
-    assert_eq!(entries, ["node_modules", "target/debug"]);
+    assert_eq!(entries, ["node_modules", "target"]);
     let kept: Vec<(&str, &str)> = planned[0]["kept"]
         .as_array()
         .unwrap()
@@ -3334,7 +3557,7 @@ fn trim_deletes_ignored_files_but_keeps_work_config_and_nested_repos() {
         .collect();
     assert_eq!(
         kept,
-        [(".env", "protected"), ("target/vendored", "repository")]
+        [(".env", "protected"), ("vendor/local", "repository")]
     );
     assert!(planned[0]["bytes"].as_u64().unwrap() >= 8192);
     assert!(
@@ -3345,11 +3568,10 @@ fn trim_deletes_ignored_files_but_keeps_work_config_and_nested_repos() {
     repo.bonsai(&repo.clone)
         .args(["trim", "--yes"])
         .assert()
-        .success()
-        .stderr(predicate::str::contains("[feat-trim] trimmed"));
+        .success();
     assert!(!path.join("node_modules").exists());
     assert!(!path.join("target/debug").exists());
-    for survivor in [".env", "notes.txt", "README.md", "target/vendored/.git"] {
+    for survivor in [".env", "notes.txt", "README.md", "vendor/local/.git"] {
         assert!(path.join(survivor).exists(), "{survivor} must survive");
     }
     assert!(repo.clone.join("node_modules/dep").exists());
@@ -3412,7 +3634,7 @@ fn trim_confirms_unless_yes_and_selects_targets() {
         .assert()
         .failure()
         .stderr(predicate::str::contains(
-            "no bonsai worktree for branch 'nope'",
+            "no linked worktree for branch 'nope'",
         ));
     repo.bonsai(&repo.clone)
         .args(["trim", "feat-a", "-f"])
@@ -3436,15 +3658,72 @@ fn trim_all_spans_projects_from_anywhere() {
     repo.bonsai(&repo.dir)
         .args(["trim", "--all", "--yes"])
         .assert()
-        .success()
-        .stderr(predicate::str::contains(": feat-all] trimmed"));
+        .success();
     assert!(!path.join("target").exists());
+}
+
+#[test]
+fn trim_streams_progress_to_hq_and_keeps_json_unanimated() {
+    let repo = TestRepo::new();
+    repo.commit_files(&[(".gitignore", "target/\n")]);
+    let path = repo.add("feat-progress");
+    std::fs::create_dir(path.join("target")).unwrap();
+    std::fs::write(path.join("target/out"), "generated").unwrap();
+    let preview = repo
+        .bonsai(&repo.clone)
+        .env("_BONSAI_PROGRESS", "1")
+        .args(["trim", "--dry-run", "--json"])
+        .output()
+        .unwrap();
+    let report = json_of(&preview);
+    assert_eq!(report["planned"][0]["entries"][0]["items"], 2);
+    assert!(!preview.stderr.contains(&b'\r'));
+
+    let output = repo
+        .bonsai(&repo.clone)
+        .env("_BONSAI_PROGRESS", "1")
+        .args(["trim", "--yes"])
+        .output()
+        .unwrap();
+    assert!(
+        output.status.success(),
+        "{}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    assert!(output.stdout.is_empty());
+    assert!(output.stderr.contains(&b'\r'));
+    assert!(String::from_utf8_lossy(&output.stderr).contains("entries"));
+    assert!(!path.join("target").exists());
+}
+
+#[cfg(unix)]
+#[test]
+fn trim_unlinks_dangling_and_external_links_without_following_them() {
+    let repo = TestRepo::new();
+    repo.commit_files(&[(".gitignore", "cache-link\noutside-link\n")]);
+    let path = repo.add("feat-links");
+    let outside = repo.dir.join("outside");
+    std::fs::create_dir(&outside).unwrap();
+    std::fs::write(outside.join("work"), "keep me").unwrap();
+    std::os::unix::fs::symlink("missing-package", path.join("cache-link")).unwrap();
+    std::os::unix::fs::symlink(&outside, path.join("outside-link")).unwrap();
+
+    repo.bonsai(&repo.clone)
+        .args(["trim", "--yes"])
+        .assert()
+        .success();
+    assert!(std::fs::symlink_metadata(path.join("cache-link")).is_err());
+    assert!(std::fs::symlink_metadata(path.join("outside-link")).is_err());
+    assert_eq!(
+        std::fs::read_to_string(outside.join("work")).unwrap(),
+        "keep me"
+    );
 }
 
 #[test]
 fn remove_deletes_ignored_content_with_the_worktree() {
     let repo = TestRepo::new();
-    repo.commit_files(&[(".gitignore", "node_modules/\ntarget/\n.env\n")]);
+    repo.commit_files(&[(".gitignore", "node_modules/\ntarget/\nvendor/\n.env\n")]);
     let path = add_with_ignored_files(&repo, "feat-heavy");
     std::fs::remove_file(path.join("notes.txt")).unwrap();
     // Ignored files never make a worktree dirty.

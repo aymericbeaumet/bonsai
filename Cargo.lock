@@ -248,6 +248,7 @@ dependencies = [
  "ratatui",
  "rayon",
  "rusqlite",
+ "rustix",
  "serde",
  "serde-saphyr",
  "serde_json",

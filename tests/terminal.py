@@ -1,6 +1,7 @@
 """Real PTY regression checks: python3 tests/terminal.py target/debug/bonsai."""
 
 import fcntl
+import json
 import os
 import pathlib
 import pty
@@ -100,6 +101,40 @@ class TerminalTests(unittest.TestCase):
 
     def test_inquire_prompt_restores_on_sigterm(self):
         self.check_restoration(signal.SIGTERM, args=["add"])
+
+    def test_trim_progress_stays_on_stderr_and_preserves_terminal(self):
+        inventory = subprocess.run([BINARY, "list", "--json"], cwd=self.repo,
+                                   env=self.env, capture_output=True, check=True)
+        checkout = pathlib.Path(next(row["path"] for row in json.loads(inventory.stdout)
+                                     if not row["main"]))
+        (checkout / ".gitignore").write_text("node_modules/\n")
+        package = checkout / "node_modules" / "package"
+        package.mkdir(parents=True)
+        for index in range(500):
+            (package / f"{index}.js").write_text("generated")
+
+        master, slave = pty.openpty()
+        self.addCleanup(os.close, master)
+        self.addCleanup(os.close, slave)
+        before = termios.tcgetattr(slave)
+        with subprocess.Popen([BINARY, "trim", "--yes"], cwd=self.repo, env=self.env,
+                              stdin=subprocess.DEVNULL, stdout=subprocess.PIPE,
+                              stderr=slave) as process:
+            captured = b""
+            deadline = time.monotonic() + 15
+            while time.monotonic() < deadline:
+                if select.select([master], [], [], 0.05)[0]:
+                    captured += os.read(master, 65536)
+                elif process.poll() is not None:
+                    break
+            stdout, _ = process.communicate(timeout=1)
+            self.assertEqual(process.returncode, 0, captured)
+        self.assertEqual(stdout, b"")
+        self.assertIn(b"entries", captured)
+        self.assertIn(b"/s", captured)
+        self.assertIn(b"reclaimed", captured)
+        self.assertFalse((checkout / "node_modules").exists())
+        self.assertEqual(termios.tcgetattr(slave), before)
 
 
 if __name__ == "__main__":

@@ -115,6 +115,14 @@
   worktrees another coding agent works in (`remove` refuses, `clean` and
   `trim` skip; the agent running bonsai is exempt), and `ignored::Keep` for
   ignored paths `trim` and removal never delete. Reuse them in new paths.
+- Treat every Git-registered linked checkout as a first-class worktree,
+  regardless of creator or location. `Repo::linked_worktrees` supplies
+  lifecycle targets; validate registrations before destructive work. The
+  `external` flag describes location only. Protect registered descendants
+  when trimming or removing a parent checkout.
+- Trim validates parents without resolving the final symlink: dangling
+  package links must be unlinked safely. Keep progress counts separate from
+  disk usage so deletion does not need a metadata lookup for every file.
 - Give every subcommand exactly one `GROUPS` entry in `bonsai-lib/cli.rs`;
   the top-level help is generated from it. Bulk commands (`trim`, `clean`,
   `prune`) share `-n/--dry-run`, `-y/--yes` (alias `-f`), and `--json`.

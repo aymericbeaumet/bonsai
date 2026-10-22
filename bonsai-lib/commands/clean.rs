@@ -353,7 +353,7 @@ fn plan(
         })
         .collect::<Result<Vec<_>>>()?;
 
-    let worktrees = repo.bonsai_worktrees(config)?;
+    let worktrees = repo.linked_worktrees()?;
     let workers = parallel::worker_count(worktrees.len());
     if workers > 1 {
         eprintln!(

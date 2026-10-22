@@ -35,14 +35,14 @@ pub fn run(
         .collect::<Result<Vec<_>>>()?;
     let mut candidates = Vec::new();
     for (index, project) in projects.iter().enumerate() {
-        for worktree in project.repo.bonsai_worktrees(&project.config)? {
+        for worktree in project.repo.linked_worktrees()? {
             candidates.push((index, worktree));
         }
     }
     if candidates.is_empty() {
         match scope {
-            Scope::Current(_) => bail!("no bonsai worktrees for this repo"),
-            Scope::All(_) => bail!("no bonsai worktrees found"),
+            Scope::Current(_) => bail!("no linked worktrees for this repo"),
+            Scope::All(_) => bail!("no linked worktrees found"),
         }
     }
 
@@ -90,7 +90,7 @@ pub fn run(
                 .map(|(index, _)| index)
                 .collect::<Vec<_>>();
             if matches.is_empty() {
-                bail!("no bonsai worktree for branch '{branch}'");
+                bail!("no linked worktree for branch '{branch}'");
             }
             picked.extend(matches);
         }
@@ -177,18 +177,8 @@ pub fn run(
     Ok(recovery)
 }
 
-pub fn preflight(repo: &Repo, config: &Config, wt: &Worktree, force: bool) -> Result<()> {
-    crate::paths::ensure_contained(&wt.path, &config.root_dir())?;
-    let current = repo
-        .worktrees()?
-        .into_iter()
-        .find(|current| current.path == wt.path)
-        .ok_or_else(|| {
-            anyhow::anyhow!(
-                "worktree registration changed: {}; retry",
-                wt.path.display()
-            )
-        })?;
+pub fn preflight(repo: &Repo, _config: &Config, wt: &Worktree, force: bool) -> Result<()> {
+    let current = validate_removal(repo, wt)?;
     if current.head != wt.head || current.branch != wt.branch || current.is_locked != wt.is_locked {
         bail!(
             "worktree changed since selection: {}; retry",
@@ -234,6 +224,22 @@ pub fn preflight(repo: &Repo, config: &Config, wt: &Worktree, force: bool) -> Re
     Ok(())
 }
 
+fn validate_removal(repo: &Repo, wt: &Worktree) -> Result<Worktree> {
+    let current = repo.validate_linked_worktree(&wt.path)?;
+    let canonical = crate::paths::canonicalize_or_self(&wt.path);
+    if let Some(nested) = repo.worktrees()?.into_iter().find(|registered| {
+        let path = crate::paths::canonicalize_or_self(&registered.path);
+        path != canonical && path.starts_with(&canonical)
+    }) {
+        bail!(
+            "worktree {} contains another registered worktree: {}; remove it first",
+            wt.path.display(),
+            nested.path.display()
+        );
+    }
+    Ok(current)
+}
+
 pub fn delete_branch_checked(repo: &Repo, wt: &Worktree) -> Result<()> {
     let branch = wt
         .branch
@@ -264,7 +270,7 @@ pub fn delete_branch_checked(repo: &Repo, wt: &Worktree) -> Result<()> {
 }
 
 pub fn remove_worktree(repo: &Repo, config: &Config, wt: &Worktree, force: bool) -> Result<()> {
-    crate::paths::ensure_contained(&wt.path, &config.root_dir())?;
+    validate_removal(repo, wt)?;
     if wt.is_locked && !force {
         bail!(
             "worktree {} is locked; run 'git worktree unlock {}' first",

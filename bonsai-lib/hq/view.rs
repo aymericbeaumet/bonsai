@@ -429,14 +429,14 @@ fn trim_hint(bytes: u64) -> String {
     )
 }
 
-/// Dependency directories of the project's bonsai worktrees that live in the
+/// Dependency directories of the project's linked worktrees that live in the
 /// checkout itself: roughly what `x` frees. Shared stores free nothing, and
-/// the main checkout and external worktrees are never trimmed.
+/// the main checkout is never trimmed.
 pub(super) fn trimmable_bytes(model: &Model, project: &super::Project) -> u64 {
     project
         .worktrees
         .iter()
-        .filter(|worktree| !worktree.main && !worktree.external && !worktree.missing)
+        .filter(|worktree| !worktree.main && !worktree.missing)
         .filter_map(|worktree| model.footprints.get(&worktree.path))
         .flat_map(|item| &item.dependencies)
         .filter(|dependency| dependency.sharing == footprint::Sharing::Local)

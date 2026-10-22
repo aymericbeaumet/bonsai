@@ -60,17 +60,20 @@ pub fn run(
         .iter()
         .map(|entry| entry.worktree.clone())
         .collect::<Vec<_>>();
-    let bonsai_dir = crate::paths::ensure_contained(&repo.bonsai_dir(config), &config.root_dir())?;
-
-    // Idempotent: adding a branch that already has a Bonsai worktree just cds
-    // there. A checkout anywhere else is read-only to Bonsai: `add` never
-    // adopts, moves, or creates worktrees outside the configured root.
+    // Reuse every existing linked checkout without moving it or rerunning setup.
     if let Some(entry) = project_worktrees
         .iter()
         .find(|entry| entry.worktree.branch.as_deref() == Some(branch.as_str()))
     {
         let wt = &entry.worktree;
-        if entry.kind == WorktreeKind::Managed {
+        if entry.kind != WorktreeKind::Main {
+            if wt.is_missing() {
+                bail!(
+                    "'{branch}' worktree {} was deleted; run 'bonsai remove {branch}' before recreating it",
+                    wt.path.display()
+                );
+            }
+            repo.validate_linked_worktree(&wt.path)?;
             eprintln!(
                 "bonsai: '{branch}' already has a worktree at {}",
                 wt.path.display()
@@ -82,6 +85,8 @@ pub fn run(
             wt.path.display()
         );
     }
+
+    let bonsai_dir = crate::paths::ensure_contained(&repo.bonsai_dir(config), &config.root_dir())?;
 
     if fetch_enabled && !fetched {
         fetch_remote(repo, config)?;

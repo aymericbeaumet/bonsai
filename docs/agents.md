@@ -46,12 +46,23 @@ created the worktree, the others find their setup in place.
 
 `bonsai ps` lists the coding agents running on this machine with the
 checkout each one works in, its pid, and its uptime: Claude Code, Codex,
-OpenCode, Cursor Agent, Gemini CLI, Copilot, Amp, Aider, Goose, Crush, Qwen
+Grok CLI, OpenCode, Cursor Agent, Gemini CLI, Copilot, Amp, Aider, Goose, Crush, Qwen
 Code, and Pi, whether installed natively or launched through npm or bun
 (counted once, as the outermost process). Inside a repository it lists the
 agents working in that project; `-a` lists every agent, labelled by
 checkout when it works in a known one and by directory otherwise. hq shows
 the same agents next to each checkout.
+
+These are recognized process names, not a popularity ranking. Grok CLI means
+the community [grok-cli](https://github.com/superagent-ai/grok-cli), whose
+[`grok-dev` package](https://github.com/superagent-ai/grok-cli/blob/main/package.json)
+provides the `grok` executable.
+
+Worktree management does not depend on recognizing its creator. Git's linked
+worktree registrations include checkouts created by these agents, other tools,
+or Git itself. Bonsai lists, opens, trims, cleans, and removes them in place,
+including outside `~/.bonsai`; it preserves their paths and marks them
+`external` in listings. New `bonsai add` worktrees still use the Bonsai root.
 
 Agents never pull the rug from under each other: `remove` refuses, and
 `clean` and `trim` skip, a worktree another agent is working in. An agent

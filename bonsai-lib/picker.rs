@@ -243,6 +243,7 @@ pub fn multi_select_all_checked(prompt: &str, options: Vec<String>) -> Result<Ve
     let all: Vec<usize> = (0..options.len()).collect();
     MultiSelect::new(prompt, options)
         .with_default(&all)
+        .with_formatter(&|selected| format!("{} selected", selected.len()))
         .prompt()
         .context("selection cancelled")
 }

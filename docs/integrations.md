@@ -7,6 +7,25 @@ configurable through `git config bonsai.*` (see
 [Configuration](configuration.md)), and shells out to your system `git` for
 every operation.
 
+### Worktrees created by other tools
+
+Git's worktree registrations are the shared inventory. Bonsai manages any
+registered linked checkout in place, whether created by Claude Code, Codex,
+Grok CLI, OpenCode, another harness, or `git worktree add`. No path conventions,
+import step, or creator allowlist are required. Run from any checkout, or use
+`bonsai -C <checkout>`; `list`, `cd`, `workspace`, `hq`, `trim`, `clean`, and
+`remove` see the same project registrations. Global discovery still starts
+from the Bonsai root, its workspace references, and the current project.
+`bonsai add <branch>` also returns an existing linked checkout's path, including
+external checkouts, without moving it or rerunning provisioning.
+
+An `external` label means the checkout lives outside the configured Bonsai
+root. It has the same lifecycle safeguards: the main checkout is protected,
+locked checkouts stay locked, local changes prevent ordinary removal, and
+active coding agents block or skip destructive operations. Removal also refuses
+a checkout containing another registered worktree. Bonsai does not move these
+checkouts or apply new-worktree provisioning to them.
+
 ## Shells
 
 `bonsai init zsh|bash|fish` prints a wrapper that adds auto-cd and

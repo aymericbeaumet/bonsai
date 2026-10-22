@@ -1,4 +1,6 @@
-use std::path::PathBuf;
+use std::io::{self, IsTerminal};
+use std::path::{Component, Path, PathBuf};
+use std::sync::atomic::Ordering;
 
 use anyhow::{Result, bail};
 use rayon::prelude::*;
@@ -9,6 +11,8 @@ use crate::config::Config;
 use crate::ignored::{self, Entry, Keep, KeepReason, Kept, Plan, format_bytes};
 use crate::picker;
 use crate::scope::Scope;
+
+mod progress;
 
 pub struct Options {
     pub dry_run: bool,
@@ -61,7 +65,7 @@ pub fn run(config: &Config, scope: &Scope, selection: Vec<String>, options: Opti
         ..Default::default()
     };
     let outcome = run_inner(config, scope, &selection, &options, &mut report);
-    if options.json && outcome.is_ok() {
+    if options.json {
         crate::output::line(format_args!("{}", serde_json::to_string_pretty(&report)?))?;
     }
     outcome
@@ -116,7 +120,9 @@ fn run_inner(
     let plans: Vec<Result<Plan>> = targets
         .par_iter()
         .map(|target| {
-            crate::paths::ensure_contained(&target.path, &root)?;
+            projects[target.project]
+                .repo
+                .validate_linked_worktree(&target.path)?;
             ignored::plan(&target.path, &keeps[target.project])
         })
         .collect();
@@ -145,7 +151,7 @@ fn run_inner(
         return Ok(());
     }
 
-    print_plan(&planned, options.dry_run);
+    print_plan(&planned, options.dry_run, options.json);
     if options.dry_run {
         eprintln!("bonsai: dry run, nothing deleted");
         return Ok(());
@@ -171,43 +177,89 @@ fn run_inner(
     }
 
     // Every ignored path is independent: delete them all concurrently.
-    let work: Vec<(usize, PathBuf)> = planned
+    // Recheck after the interactive wait: another agent may have started.
+    let running = agents::running();
+    for (target, _) in &planned {
+        let current = projects[target.project]
+            .repo
+            .validate_linked_worktree(&target.path)?;
+        anyhow::ensure!(
+            !current.is_locked,
+            "[{}] worktree was locked during confirmation",
+            target.label
+        );
+        let busy = agents::busy(&running, &target.path);
+        if !busy.is_empty() {
+            bail!(
+                "[{}] agent started during confirmation: {}",
+                target.label,
+                agents::describe(&busy)
+            );
+        }
+    }
+    let work: Vec<(usize, &Entry)> = planned
         .iter()
         .enumerate()
-        .flat_map(|(index, (target, plan))| {
-            plan.entries
-                .iter()
-                .map(move |entry| (index, target.path.join(&entry.path)))
-        })
+        .flat_map(|(index, (_, plan))| plan.entries.iter().map(move |entry| (index, entry)))
         .collect();
-    let results: Vec<Result<()>> = work
-        .par_iter()
-        .map(|(_, path)| {
-            crate::paths::ensure_contained(path, &root)?;
-            Ok(ignored::remove_tree(path)?)
-        })
-        .collect();
+    let progress = progress::Progress::new(
+        !options.json
+            && (io::stderr().is_terminal()
+                || std::env::var_os("_BONSAI_PROGRESS").is_some_and(|value| value == "1")),
+        work.iter().map(|(_, entry)| entry.items).sum(),
+        work.len(),
+    );
+    let delete = || {
+        work.par_iter()
+            .map(|(index, entry)| {
+                let target = &planned[*index].0;
+                let outcome = (|| {
+                    validate_entry(&target.path, &entry.path)?;
+                    Ok(ignored::remove_tree_with_progress(
+                        &target.path.join(&entry.path),
+                        &progress.removed,
+                    )?)
+                })();
+                progress.finished.fetch_add(1, Ordering::Relaxed);
+                outcome
+            })
+            .collect::<Vec<Result<()>>>()
+    };
+    let results = ignored::with_deletion_pool(delete);
+    drop(progress);
     let mut failed = vec![false; planned.len()];
-    for ((index, path), result) in work.iter().zip(results) {
+    for ((index, entry), result) in work.iter().zip(results) {
         if let Err(error) = result {
             failed[*index] = true;
             let label = &planned[*index].0.label;
             eprintln!(
                 "bonsai: [{label}] failed to delete {}: {error:#}",
-                path.display()
+                entry.path.display()
             );
+        } else {
+            report.freed += entry.bytes;
         }
     }
+    let width = crossterm::terminal::size().map_or(88, |(width, _)| usize::from(width));
+    let mut project = None;
+    eprintln!("bonsai: trim results:");
     for ((target, plan), failed) in planned.iter().zip(&failed) {
         if !failed {
-            eprintln!(
-                "bonsai: [{}] trimmed {} ({})",
-                target.label,
+            if project != Some(target.project) {
+                project = Some(target.project);
+                if let Some(repo) = &target.repo {
+                    eprintln!("{}", fit(repo, width));
+                }
+            }
+            let name = target.branch.as_deref().unwrap_or("detached");
+            let row = format!(
+                "  {:>7}  {} ({})",
                 format_bytes(plan.bytes()),
+                name.escape_debug(),
                 count(plan.entries.len(), "path", "paths")
             );
+            eprintln!("{}", fit(&row, width));
             report.trimmed.push(target.path.clone());
-            report.freed += plan.bytes();
         }
     }
     eprintln!("bonsai: reclaimed {}", format_bytes(report.freed));
@@ -218,15 +270,15 @@ fn run_inner(
     Ok(())
 }
 
-/// Bonsai-managed worktrees in scope: every one, or those whose branch or
+/// Registered linked worktrees in scope: every one, or those whose branch or
 /// exact path was named (in every project that has one).
 fn targets(scope: &Scope, selection: &[String]) -> Result<Vec<Target>> {
     let projects = scope.projects();
     let mut targets = Vec::new();
     for (index, project) in projects.iter().enumerate() {
         let id = scope.is_all().then(|| project.id());
-        for worktree in project.repo.bonsai_worktrees(&project.config)? {
-            if worktree.is_missing() {
+        for worktree in project.repo.linked_worktrees()? {
+            if worktree.is_missing() || worktree.is_locked {
                 continue;
             }
             let name = worktree
@@ -262,7 +314,7 @@ fn targets(scope: &Scope, selection: &[String]) -> Result<Vec<Target>> {
             }
         }
         if selected.len() == before {
-            bail!("no bonsai worktree for branch '{wanted}'");
+            bail!("no linked worktree for branch '{wanted}'");
         }
     }
     let keep: Vec<PathBuf> = selected.iter().map(|target| target.path.clone()).collect();
@@ -272,40 +324,12 @@ fn targets(scope: &Scope, selection: &[String]) -> Result<Vec<Target>> {
 
 /// The plan names the largest paths of each worktree, or every path for a
 /// dry run (`--json` always has them all).
-fn print_plan(planned: &[(Target, Plan)], every_path: bool) {
-    let shown = if every_path { usize::MAX } else { 4 };
-    eprintln!("bonsai: ignored files to delete (worktrees, branches, and kept paths stay):");
-    let label_width = planned
-        .iter()
-        .map(|(target, _)| target.label.chars().count())
-        .max()
-        .unwrap_or(0);
-    let sizes: Vec<String> = planned
-        .iter()
-        .map(|(_, plan)| format_bytes(plan.bytes()))
-        .collect();
-    let size_width = sizes.iter().map(String::len).max().unwrap_or(0);
-    for ((target, plan), size) in planned.iter().zip(&sizes) {
-        let mut names: Vec<String> = match plan.entries.as_slice() {
-            [only] => vec![only.path.display().to_string()],
-            entries => entries
-                .iter()
-                .take(shown)
-                .map(|entry| format!("{} {}", entry.path.display(), format_bytes(entry.bytes)))
-                .collect(),
-        };
-        if plan.entries.len() > shown {
-            names.push(format!(
-                "+{} more (-n lists all)",
-                plan.entries.len() - shown
-            ));
-        }
-        let padding = " ".repeat(label_width.saturating_sub(target.label.chars().count()));
-        eprintln!(
-            "  [{}]{padding} {size:>size_width$}  {}",
-            target.label,
-            names.join(", ")
-        );
+fn print_plan(planned: &[(Target, Plan)], every_path: bool, json: bool) {
+    let width = crossterm::terminal::size().map_or(88, |(width, _)| usize::from(width));
+    let color = !json && io::stderr().is_terminal() && std::env::var_os("NO_COLOR").is_none();
+    eprintln!("bonsai: ignored files to delete:");
+    for line in plan_lines(planned, every_path, width, color) {
+        eprintln!("{line}");
     }
     let total: u64 = planned.iter().map(|(_, plan)| plan.bytes()).sum();
     let kept = |reason| {
@@ -339,6 +363,172 @@ fn print_plan(planned: &[(Target, Plan)], every_path: bool) {
     eprintln!("{summary}");
 }
 
+fn plan_lines(
+    planned: &[(Target, Plan)],
+    every_path: bool,
+    width: usize,
+    color: bool,
+) -> Vec<String> {
+    let mut lines = Vec::new();
+    let mut project = None;
+    for (target, plan) in planned {
+        if project != Some(target.project) {
+            project = Some(target.project);
+            if let Some(repo) = &target.repo {
+                let heading = fit(repo, width);
+                lines.push(if color {
+                    format!("\x1b[1;36m{heading}\x1b[0m")
+                } else {
+                    heading
+                });
+            }
+        }
+        let name = target
+            .branch
+            .as_deref()
+            .unwrap_or_else(|| target.path.to_str().unwrap_or("detached"));
+        let row = fit(
+            &format!(
+                "  {:>7}  {}",
+                format_bytes(plan.bytes()),
+                name.escape_debug()
+            ),
+            width,
+        );
+        lines.push(if color {
+            format!("\x1b[1;32m{row}\x1b[0m")
+        } else {
+            row
+        });
+        let shown = if every_path { plan.entries.len() } else { 3 };
+        for entry in plan.entries.iter().take(shown) {
+            let row = format!(
+                "           {}  {}",
+                entry.path.display().to_string().escape_debug(),
+                format_bytes(entry.bytes)
+            );
+            // Explicit dry runs retain complete paths for review and copying.
+            lines.push(if every_path { row } else { fit(&row, width) });
+        }
+        if plan.entries.len() > shown {
+            lines.push(fit(
+                &format!(
+                    "           +{} paths (--dry-run lists all)",
+                    plan.entries.len() - shown
+                ),
+                width,
+            ));
+        }
+    }
+    lines
+}
+
+fn fit(text: &str, width: usize) -> String {
+    use ratatui::text::Line;
+    if Line::from(text).width() <= width {
+        return text.to_string();
+    }
+    let mut result = String::new();
+    for ch in text.chars() {
+        if Line::from(format!("{result}{ch}…")).width() > width {
+            break;
+        }
+        result.push(ch);
+    }
+    if width > 0 {
+        result.push('…');
+    }
+    result
+}
+
+/// Check parents while leaving the final symlink unresolved: deletion
+/// unlinks that entry, including dangling links and links to shared stores.
+fn validate_entry(worktree: &Path, rel: &Path) -> Result<()> {
+    anyhow::ensure!(
+        !rel.as_os_str().is_empty()
+            && rel
+                .components()
+                .all(|part| matches!(part, Component::Normal(_))),
+        "invalid ignored path: {}",
+        rel.display()
+    );
+    let parent = rel.parent().unwrap_or_else(|| Path::new(""));
+    if !parent.as_os_str().is_empty() {
+        crate::paths::ensure_contained(&worktree.join(parent), worktree)?;
+    }
+    Ok(())
+}
+
 fn count(n: usize, one: &str, many: &str) -> String {
     format!("{n} {}", if n == 1 { one } else { many })
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn plan_groups_projects_and_fits_narrow_terminals() {
+        let planned: Vec<_> = ["ab/first", "ab/second"]
+            .into_iter()
+            .map(|branch| {
+                (
+                    Target {
+                        label: branch.into(),
+                        branch: Some(branch.into()),
+                        repo: Some("github.com/owner/project".into()),
+                        path: PathBuf::from("/checkout"),
+                        project: 0,
+                    },
+                    Plan {
+                        entries: vec![Entry {
+                            path: PathBuf::from("web/node_modules/a-very-long-package-name"),
+                            bytes: 4096,
+                            items: 2,
+                        }],
+                        kept: vec![],
+                    },
+                )
+            })
+            .collect();
+        let lines = plan_lines(&planned, false, 32, false);
+        assert_eq!(
+            lines
+                .iter()
+                .filter(|line| line.contains("github.com"))
+                .count(),
+            1
+        );
+        assert!(
+            lines
+                .iter()
+                .all(|line| ratatui::text::Line::from(line.as_str()).width() <= 32)
+        );
+        assert!(lines.iter().any(|line| line.ends_with('…')));
+        assert!(
+            plan_lines(&planned, true, 32, false)
+                .iter()
+                .any(|line| line.contains("a-very-long-package-name"))
+        );
+        assert_eq!(fit("界界界", 5), "界界…");
+    }
+
+    #[test]
+    fn ignored_paths_cannot_escape_the_checkout() {
+        let dir = tempfile::tempdir().unwrap();
+        for path in ["", ".", "..", "a/../../b", "/outside"] {
+            assert!(
+                validate_entry(dir.path(), Path::new(path)).is_err(),
+                "{path}"
+            );
+        }
+        assert!(validate_entry(dir.path(), Path::new("node_modules")).is_ok());
+        #[cfg(unix)]
+        {
+            let outside = tempfile::tempdir().unwrap();
+            std::os::unix::fs::symlink(outside.path(), dir.path().join("escape")).unwrap();
+            assert!(validate_entry(dir.path(), Path::new("escape/file")).is_err());
+            assert!(validate_entry(dir.path(), Path::new("escape")).is_ok());
+        }
+    }
 }
