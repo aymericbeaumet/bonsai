@@ -3577,3 +3577,44 @@ fn bare_bonsai_without_a_terminal_prints_grouped_help() {
             .and(predicate::str::contains("open hq")),
     );
 }
+
+#[cfg(unix)]
+#[test]
+fn hq_json_lists_the_agents_running_in_each_worktree() {
+    let repo = TestRepo::new();
+    let busy = repo.add("feat-agent");
+    std::fs::create_dir_all(busy.join("src")).unwrap();
+    let _agent = fake_agent(&repo, &busy.join("src"));
+    let worktree = |state: &serde_json::Value, path: &Path| {
+        state["projects"][0]["worktrees"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|worktree| canon(Path::new(worktree["path"].as_str().unwrap())) == canon(path))
+            .cloned()
+            .unwrap_or_else(|| panic!("no worktree {} in {state}", path.display()))
+    };
+    let mut state = serde_json::Value::Null;
+    for _ in 0..50 {
+        state = hq_json(&repo, &repo.clone);
+        if !worktree(&state, &busy)["agents"]
+            .as_array()
+            .unwrap()
+            .is_empty()
+        {
+            break;
+        }
+        std::thread::sleep(std::time::Duration::from_millis(50));
+    }
+    let agents = worktree(&state, &busy)["agents"].clone();
+    assert_eq!(agents.as_array().unwrap().len(), 1, "{state}");
+    assert_eq!(agents[0]["kind"], "claude");
+    assert!(agents[0]["pid"].as_u64().unwrap() > 0);
+    assert_eq!(agents[0]["caller"], false);
+    assert_eq!(
+        canon(Path::new(agents[0]["cwd"].as_str().unwrap())),
+        canon(&busy.join("src"))
+    );
+    let main = worktree(&state, &repo.clone);
+    assert_eq!(main["agents"], serde_json::json!([]), "{state}");
+}

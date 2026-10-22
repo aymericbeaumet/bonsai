@@ -24,7 +24,10 @@ pub(super) enum Col {
     Size,
     Deps,
     Stack,
+    /// Coding agents with sessions there.
     Agents,
+    /// Coding agents running there now.
+    Running,
     Notes,
 }
 
@@ -51,6 +54,8 @@ fn spec(col: Col) -> Spec {
         Col::Deps => ("deps", false, 45, 30),
         Col::Stack => ("stack", false, 40, 18),
         Col::Agents => ("agents", false, 55, 30),
+        // Rarely shown, and then it matters: a removal or trim skips it.
+        Col::Running => ("running", false, 88, 24),
         Col::Notes => ("notes", false, 70, 24),
     };
     Spec {
@@ -85,6 +90,7 @@ fn candidates(kind: Kind) -> &'static [Col] {
             Col::Size,
             Col::Stack,
             Col::Agents,
+            Col::Running,
             Col::Notes,
         ],
         Kind::Checkouts => &[
@@ -95,6 +101,7 @@ fn candidates(kind: Kind) -> &'static [Col] {
             Col::Size,
             Col::Deps,
             Col::Agents,
+            Col::Running,
             Col::Notes,
         ],
         Kind::Search => &[
@@ -107,6 +114,7 @@ fn candidates(kind: Kind) -> &'static [Col] {
             Col::Upstream,
             Col::Size,
             Col::Agents,
+            Col::Running,
             Col::Notes,
         ],
         Kind::Tree => &[
@@ -118,6 +126,7 @@ fn candidates(kind: Kind) -> &'static [Col] {
             Col::Size,
             Col::Deps,
             Col::Agents,
+            Col::Running,
             Col::Notes,
         ],
     }
@@ -314,6 +323,12 @@ fn group_cell(totals: &Totals, col: Col) -> Option<(String, Style)> {
         Col::Size => size_cell((totals.sized > 0).then_some(totals.bytes), totals.measuring),
         Col::Stack => Some((totals.stack.join(", "), Style::new().fg(Color::Cyan))),
         Col::Agents => Some((totals.agents.join(", "), agent_style())),
+        Col::Running => (totals.running > 0).then(|| {
+            (
+                super::view::plural(totals.running, "agent"),
+                running_style(),
+            )
+        }),
         Col::Notes => {
             let mut notes = Vec::new();
             if totals.unavailable {
@@ -343,6 +358,7 @@ fn checkout_cell(checkout: &Checkout, col: Col) -> Option<(String, Style)> {
         }
         Col::Stack => Some((checkout.stack.join(", "), Style::new().fg(Color::Cyan))),
         Col::Agents => Some((checkout.agents.join(", "), agent_style())),
+        Col::Running => Some((super::running::spell(&checkout.running), running_style())),
         Col::Notes => {
             let words: Vec<&str> = checkout.notes.iter().map(|note| note_word(*note)).collect();
             let style = match checkout.notes.first() {
@@ -529,6 +545,10 @@ pub(super) fn project_style() -> Style {
 
 fn agent_style() -> Style {
     Style::new().fg(Color::Magenta)
+}
+
+pub(super) fn running_style() -> Style {
+    Style::new().fg(Color::Magenta).add_modifier(Modifier::BOLD)
 }
 
 fn changed_style() -> Style {

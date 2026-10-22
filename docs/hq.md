@@ -9,8 +9,9 @@ bonsai hq --json   # print the same inventory and exit
 `hq` lists every project under the bonsai root, plus editor workspace folders
 and the project you start it from. A checkout with no bonsai worktrees yet
 still appears. Each project's main checkout, bonsai worktrees, and external
-worktrees are shown together, and you can create, remove, clean, and open
-them without leaving the list. Press `?` inside hq for every key.
+worktrees are shown together with the coding agents running in them, and
+you can create, remove, clean, trim, and open them without leaving the list.
+Press `?` inside hq for every key.
 
 ## Views
 
@@ -26,6 +27,7 @@ owner, and repository:
 | size | Disk used by all checkouts together |
 | stack | Languages detected from project files |
 | agents | Coding agents with sessions in any checkout |
+| running | Coding agents running in its checkouts now, such as `2 agents` |
 | notes | Checkouts whose directory was deleted by hand, or `unavailable` |
 
 **Open a project** (Enter) to list each checkout:
@@ -39,10 +41,13 @@ owner, and repository:
 | size | Disk used by the checkout, including its dependencies |
 | deps | Dependency and build directories, such as `target 31 GB` or `node_modules 1 GB shared` |
 | agents | Coding agents with sessions in this checkout |
+| running | Coding agents running in it now, such as `claude, 2 codex` |
 | notes | `main checkout`, `external`, `locked`, `prunable` |
 
 The header above the list names the remote, the main checkout, and the
-project's totals, and suggests `P` when checkouts were deleted by hand.
+project's totals, suggests `P` when checkouts were deleted by hand, and
+suggests `x` when its worktrees hold dependency directories that trimming
+would free.
 `upstream gone` usually means the pull request was merged and its branch
 deleted; `C` cleans those.
 
@@ -64,7 +69,20 @@ checkouts from every project. Columns that have nothing to show are hidden,
 and on a narrow terminal the least useful ones go first.
 
 The status line describes the selection in full: its path, how it relates to
-its upstream, and what its size is made of.
+its upstream, what its size is made of, and which agents run there, with
+their process IDs.
+
+## Running agents
+
+hq looks for running coding agents (Claude Code, Codex, OpenCode, Cursor,
+Gemini, and others) every two seconds, in the background, and lists each
+under the checkout its directory is in. The `running` column, the titles,
+and every group total count them. `p` (`:running`) shows only the checkouts
+where an agent is running, across every listed project or inside the open
+one; `:running codex` keeps one kind. It is the search `running:` and stays
+live as agents start and exit; Esc clears it. Outside hq, `bonsai ps`
+lists the same agents, and `bonsai ps -a` also those working outside any
+checkout.
 
 ## Sizes
 
@@ -100,6 +118,7 @@ the full-screen output (`O`), which they scroll like a pager.
 | `l`, →, Tab | Open a project |
 | `h`, ←, Esc, Ctrl-O | Back: close the output, clear a search, leave the project |
 | `/` | Fuzzy-find by host, owner, project, branch, path, stack, or agent |
+| `p` | Only checkouts where a coding agent is running (`:running [agent]`) |
 | `t` `T` | Next / previous view: table, projects, owners, hosts |
 | `s` | Sort by name, recent activity, or size |
 | `r` | Refresh |
@@ -117,7 +136,8 @@ readline keys: Ctrl-B/F move, Ctrl-A/E jump, Ctrl-W deletes a word, Ctrl-U
 deletes back to the start, and Ctrl-K deletes to the end. `user:<name>` and `organisation:<name>` (also `org:` and
 `organization:`) match the owner. A GitHub owner is classified in the
 background; until that is known, or on any other host, either prefix matches
-the owner text.
+the owner text. `running:` matches checkouts where a coding agent is running,
+and `running:<agent>` those where that agent is.
 
 ## Commands
 
@@ -132,6 +152,7 @@ checkout on the home list.
 | `D` | `:delete` | Remove the worktree and delete its branch, if its commits are on its upstream or merged |
 | `C` | `:clean` | Remove the project's merged and squash-merged worktrees |
 | `P` | `:prune [all]` | Drop deleted and stale worktrees of the project, or of every project |
+| `x` | `:trim [project]` | Free disk: delete the ignored files (`node_modules`, `target`, …) of the worktree, or of every worktree of the project |
 | `f` | `:fetch` | Fetch the project's remote, then refresh ahead and behind counts |
 | `e` | `:edit` | Open the checkout in `$VISUAL` or `$EDITOR` |
 | `A` | `:start [agent]` | Start Claude Code, Codex, or OpenCode in the checkout |
@@ -139,14 +160,25 @@ checkout on the home list.
 | `yy` | `:copy` | Copy the checkout's path to the clipboard |
 
 `:` opens a command line listing these commands, plus `refresh`, `sort`,
-`view`, `help`, and `quit`. Type to filter, Tab completes the name, and
+`view`, `running`, `output`, `help`, and `quit`. Type to filter, Tab completes the name, and
 Enter runs it with the rest of the line as arguments.
 
-Removing a worktree, deleting a branch, and cleaning ask first, explaining
-what will happen. A worktree with uncommitted changes is refused. A branch is
+Removing a worktree, deleting a branch, cleaning, and trimming ask first,
+explaining what will happen. A worktree with uncommitted changes is refused. A branch is
 deleted only when its commits are on its upstream, or merged into the main
 checkout when it has none; squash-merged branches are what `C` is for. Clean
-shows the exact worktrees its plan would remove. Nothing passes `--force`.
+shows the exact worktrees its plan would remove. A worktree where another
+coding agent is running is never removed, cleaned, or trimmed under it: the
+question names the agent, and bonsai refuses or skips that worktree. Nothing
+passes `--force`.
+
+Trim shows the plan of `bonsai trim --dry-run --json` first: each worktree,
+the space it frees, its largest ignored paths, and the local configuration
+and nested repositories it keeps. Confirming runs `bonsai trim --yes` on
+exactly the worktrees you reviewed, then measures the project again. On a
+worktree, `x` trims that worktree; on a project row or the main checkout,
+and with `:trim project`, it trims every worktree of the project. The main
+checkout and external worktrees are never trimmed.
 
 Bonsai commands run in the background and stream their output into a pane
 below the list, which stays usable; Esc closes the pane. Coding agents,
@@ -154,4 +186,6 @@ editors, and prune (which may ask about orphaned directories) take over the
 terminal until they exit, then hq refreshes.
 
 Warnings are appended to `~/.local/state/bonsai/hq.log`. `--json` waits for
-status and sizes and includes `footprint` on each worktree.
+status and sizes and includes `footprint` on each worktree, and `agents`:
+the coding agents running in it (`kind`, `pid`, `cwd`, `started`, `caller`),
+newest first.

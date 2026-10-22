@@ -31,6 +31,9 @@ pub struct Query {
     pub free: Vec<String>,
     pub user: Vec<String>,
     pub organisation: Vec<String>,
+    /// `running:` keeps checkouts where a coding agent runs now; each
+    /// pattern, as in `running:claude`, must match one of their kinds.
+    pub running: Option<Vec<String>>,
 }
 
 pub struct OwnerResolved {
@@ -114,10 +117,18 @@ pub fn save(path: &Path, kinds: &BTreeMap<String, OwnerKind>) -> std::io::Result
 
 /// `user:` and `organisation:` (`org:`, `organization:`) are owner filters.
 /// A prefix with no pattern is ignored so the list stays put while it is typed.
+/// `running:` alone keeps checkouts with a running coding agent.
 pub fn parse_query(raw: &str) -> Query {
     let mut query = Query::default();
     for token in raw.split_whitespace() {
         let lower = token.to_lowercase();
+        if let Some(pattern) = qualifier(&lower, "running:") {
+            let patterns = query.running.get_or_insert_with(Vec::new);
+            if !pattern.is_empty() {
+                patterns.push(pattern.to_string());
+            }
+            continue;
+        }
         if let Some(pattern) = qualifier(&lower, "user:") {
             if !pattern.is_empty() {
                 query.user.push(pattern.to_string());
@@ -303,6 +314,12 @@ mod tests {
         assert_eq!(query.organisation, vec!["inter".to_string()]);
         assert_eq!(query.free, vec!["feature".to_string()]);
         assert_eq!(parse_query("organisation:"), Query::default());
+        assert_eq!(parse_query("Running:").running, Some(Vec::new()));
+        assert_eq!(
+            parse_query("running:Claude dev").running,
+            Some(vec!["claude".to_string()])
+        );
+        assert_eq!(parse_query("dev").running, None);
         assert_eq!(
             parse_query("organization:Inter"),
             Query {

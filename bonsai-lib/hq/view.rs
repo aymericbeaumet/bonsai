@@ -204,6 +204,9 @@ fn title(model: &Model) -> Line<'static> {
                 if totals.sized > 0 {
                     parts.push(footprint::format_bytes(totals.bytes));
                 }
+                if totals.running > 0 {
+                    parts.push(agents_running(totals.running));
+                }
             }
             parts
         }
@@ -214,6 +217,10 @@ fn title(model: &Model) -> Line<'static> {
             parts.push(plural(checkouts, "checkout"));
             if sized > 0 {
                 parts.push(footprint::format_bytes(bytes));
+            }
+            let running = model.running_total();
+            if running > 0 {
+                parts.push(agents_running(running));
             }
             parts
         }
@@ -246,6 +253,11 @@ fn tabs(model: &Model) -> Option<Line<'static>> {
     }
     spans.push(Span::raw(" "));
     Some(Line::from(spans))
+}
+
+/// `1 agent running`, `3 agents running`.
+pub(super) fn agents_running(count: usize) -> String {
+    format!("{} running", plural(count, "agent"))
 }
 
 pub(super) fn plural(count: usize, word: &str) -> String {
@@ -381,6 +393,21 @@ fn detail_header(model: &Model, width: usize) -> Vec<Line<'static>> {
         }
         summary.push(Span::raw(size));
     }
+    let trimmable = trimmable_bytes(model, project);
+    if trimmable > 0 {
+        summary.push(Span::raw(" · "));
+        summary.push(Span::styled(
+            trim_hint(trimmable),
+            Style::new().fg(Color::Cyan),
+        ));
+    }
+    if totals.running > 0 {
+        summary.push(Span::raw(" · "));
+        summary.push(Span::styled(
+            agents_running(totals.running),
+            table::running_style(),
+        ));
+    }
     let text = width.saturating_sub(1);
     summary.insert(0, Span::raw(" "));
     vec![
@@ -392,6 +419,29 @@ fn detail_header(model: &Model, width: usize) -> Vec<Line<'static>> {
         Line::from(table::fit(summary, width)),
         Line::styled("─".repeat(width), table::rule_style()),
     ]
+}
+
+/// `3 GB of dependencies in worktrees (press x to trim)`.
+fn trim_hint(bytes: u64) -> String {
+    format!(
+        "{} of dependencies in worktrees (press x to trim)",
+        footprint::format_bytes(bytes)
+    )
+}
+
+/// Dependency directories of the project's bonsai worktrees that live in the
+/// checkout itself: roughly what `x` frees. Shared stores free nothing, and
+/// the main checkout and external worktrees are never trimmed.
+pub(super) fn trimmable_bytes(model: &Model, project: &super::Project) -> u64 {
+    project
+        .worktrees
+        .iter()
+        .filter(|worktree| !worktree.main && !worktree.external && !worktree.missing)
+        .filter_map(|worktree| model.footprints.get(&worktree.path))
+        .flat_map(|item| &item.dependencies)
+        .filter(|dependency| dependency.sharing == footprint::Sharing::Local)
+        .filter_map(|dependency| dependency.bytes)
+        .sum()
 }
 
 fn palette_items(model: &Model, width: usize) -> Vec<ListItem<'static>> {
@@ -561,6 +611,7 @@ pub(super) const HELP: &[(&str, &[(&str, &str)])] = &[
             ("c", "cd into the selected checkout and quit"),
             ("h  ←  esc", "back"),
             ("/", "search; enter keeps the results, esc clears them"),
+            ("p", "only checkouts where a coding agent is running"),
             (
                 "t  T",
                 "next / previous view: table, projects, owners, hosts; each adds a level",
@@ -575,6 +626,10 @@ pub(super) const HELP: &[(&str, &[(&str, &str)])] = &[
             ("dd", "remove the worktree and keep its branch"),
             ("D", "remove the worktree and delete its branch"),
             ("C  P", "clean merged worktrees / prune deleted ones"),
+            (
+                "x",
+                "trim: delete ignored files such as node_modules and target",
+            ),
             ("f", "fetch the project's remote"),
             ("e", "open the checkout in $VISUAL or $EDITOR"),
             ("A  R", "start / resume a coding agent there"),
@@ -700,16 +755,20 @@ pub(super) fn describe(model: &Model) -> Option<String> {
                 }
                 parts.push(size);
             }
+            if let Some(running) = model.working.get(path).filter(|agents| !agents.is_empty()) {
+                let running: Vec<&crate::agents::Agent> = running.iter().collect();
+                parts.push(format!("{} running", crate::agents::describe(&running)));
+            }
             Some(parts.join("  ·  "))
         }
         Info::Group(totals) => {
             let mut parts = Vec::new();
-            if let Some(project) = model
+            let project = model
                 .snapshot
                 .projects
                 .iter()
-                .find(|project| project.id == row.project_id)
-            {
+                .find(|project| project.id == row.project_id);
+            if let Some(project) = project {
                 parts.push(path_label(&project.path));
             } else {
                 parts.push(
@@ -730,6 +789,19 @@ pub(super) fn describe(model: &Model) -> Option<String> {
             parts.push(counts);
             if totals.sized > 0 {
                 parts.push(footprint::format_bytes(totals.bytes));
+            }
+            // What the project's keys can act on, as the header says for P.
+            if let Some(project) = project {
+                let trimmable = trimmable_bytes(model, project);
+                if trimmable > 0 {
+                    parts.push(trim_hint(trimmable));
+                }
+            }
+            if totals.running > 0 {
+                parts.push(format!(
+                    "{} (press p to show where)",
+                    agents_running(totals.running)
+                ));
             }
             Some(parts.join("  ·  "))
         }

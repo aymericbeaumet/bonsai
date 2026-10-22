@@ -4,6 +4,7 @@ mod jobs;
 mod keys;
 mod owner;
 mod rows;
+mod running;
 mod table;
 mod view;
 
@@ -23,6 +24,7 @@ use ratatui::text::{Line, Span};
 use inventory::{Project, Snapshot, WorktreeEntry};
 use rows::{Info, Row};
 
+use crate::agents::{self, Agent};
 use crate::config::Config;
 use crate::edit::LineInput;
 use crate::picker;
@@ -401,7 +403,9 @@ fn finish(job: &jobs::Background, status: ExitStatus, model: &mut Model) -> Fini
     }
     let planning = matches!(
         job.spec.after,
-        jobs::After::CleanPlan { .. } | jobs::After::CleanVerify { .. }
+        jobs::After::CleanPlan { .. }
+            | jobs::After::CleanVerify { .. }
+            | jobs::After::TrimPlan { .. }
     );
     if !ok {
         model.notice = Some(format!(
@@ -433,6 +437,10 @@ fn finish(job: &jobs::Background, status: ExitStatus, model: &mut Model) -> Fini
             model.pane = None;
             next = model.verified_clean(project, expected, &job.stdout.join("\n"));
         }
+        jobs::After::TrimPlan { project, targets } => {
+            model.pane = None;
+            model.offer_trim_plan(project, targets, &job.stdout.join("\n"));
+        }
     }
     Finished {
         reload: !planning,
@@ -451,6 +459,7 @@ struct Probes {
     measure: footprint::MeasureJob,
     status: inventory::StatusJob,
     owners: owner::OwnerJob,
+    agents: running::Watch,
 }
 
 /// Which sizes to measure again after a reload. Others keep this session's
@@ -504,6 +513,7 @@ fn begin_probes(model: &mut Model, remeasure: Remeasure) -> Probes {
         measure: footprint::start(measure, model.generation),
         status: inventory::start_status(paths, model.generation),
         owners: owner::start(pending_owners),
+        agents: running::Watch::start(model.checkout_paths()),
     }
 }
 
@@ -517,6 +527,9 @@ fn drain(probes: &Probes, model: &mut Model) -> bool {
     }
     while let Some(update) = probes.owners.try_recv() {
         changed |= model.apply_owner(update);
+    }
+    if let Some(working) = probes.agents.latest() {
+        changed |= model.apply_agents(working);
     }
     changed
 }
@@ -557,6 +570,13 @@ fn print_inventory(snapshot: &Snapshot) -> Result<()> {
         })
         .collect::<Vec<_>>();
     let footprints = footprint::measure_all(&paths);
+    let checkouts: Vec<PathBuf> = snapshot
+        .projects
+        .iter()
+        .flat_map(|project| &project.worktrees)
+        .map(|worktree| worktree.path.clone())
+        .collect();
+    let working = running::by_checkout(&agents::running(), &checkouts);
     let mut value = serde_json::to_value(snapshot).context("cannot format the inventory")?;
     if let Some(projects) = value
         .get_mut("projects")
@@ -570,19 +590,28 @@ fn print_inventory(snapshot: &Snapshot) -> Result<()> {
                 continue;
             };
             for worktree in worktrees {
-                let Some(path) = worktree.get("path").and_then(|value| value.as_str()) else {
-                    continue;
-                };
-                let Some(item) = footprints.get(Path::new(path)) else {
+                let Some(path) = worktree
+                    .get("path")
+                    .and_then(|value| value.as_str())
+                    .map(PathBuf::from)
+                else {
                     continue;
                 };
                 let Some(object) = worktree.as_object_mut() else {
                     continue;
                 };
+                // Coding agents running in it now, newest first.
+                let running = working.get(&path).map_or(&[][..], Vec::as_slice);
                 object.insert(
-                    "footprint".to_string(),
-                    serde_json::to_value(item).context("cannot format a footprint")?,
+                    "agents".to_string(),
+                    serde_json::to_value(running).context("cannot format an agent")?,
                 );
+                if let Some(item) = footprints.get(&path) {
+                    object.insert(
+                        "footprint".to_string(),
+                        serde_json::to_value(item).context("cannot format a footprint")?,
+                    );
+                }
             }
         }
     }
@@ -644,8 +673,9 @@ struct Model {
     pane: Option<jobs::Pane>,
     /// Checkout to select once the next reload finishes.
     select_after: Option<PathBuf>,
-    /// A clean plan that arrived while you were typing, opened by `C`.
-    ready_plan: Option<(PathBuf, String)>,
+    /// A clean or trim plan that arrived while you were typing, opened by
+    /// `C` or `x`.
+    ready_plan: Option<ReadyPlan>,
     /// Global options passed on to the commands hq starts.
     flags: Vec<OsString>,
     rows: Vec<Row>,
@@ -665,6 +695,8 @@ struct Model {
     pending: HashSet<PathBuf>,
     owners: BTreeMap<String, owner::OwnerKind>,
     owner_cache: Option<PathBuf>,
+    /// Coding agents running in each checkout, from the latest scan.
+    working: running::Working,
     generation: u64,
     logged: HashSet<String>,
     /// Visible list rows from the last draw. Page motions use this.
@@ -767,6 +799,38 @@ struct Palette {
     scroll: usize,
 }
 
+/// A plan that finished while you were typing, waiting for its key.
+struct ReadyPlan {
+    kind: PlanKind,
+    project: PathBuf,
+    report: String,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+enum PlanKind {
+    Clean,
+    /// The checkouts it plans; empty for every worktree of the project.
+    Trim {
+        targets: Vec<PathBuf>,
+    },
+}
+
+impl PlanKind {
+    fn key(&self) -> &'static str {
+        match self {
+            Self::Clean => "C",
+            Self::Trim { .. } => "x",
+        }
+    }
+
+    fn name(&self) -> &'static str {
+        match self {
+            Self::Clean => "clean",
+            Self::Trim { .. } => "trim",
+        }
+    }
+}
+
 /// A question shown before a command that changes or deletes things.
 struct Confirm {
     title: String,
@@ -789,9 +853,11 @@ enum Cmd {
     Delete,
     Clean,
     Prune,
+    Trim,
     Fetch,
     Start,
     Resume,
+    Running,
     Edit,
     Copy,
     Output,
@@ -861,6 +927,14 @@ const COMMANDS: &[CommandSpec] = &[
         cmd: Cmd::Prune,
     },
     CommandSpec {
+        name: "trim",
+        aliases: &["free"],
+        args: "[project]",
+        hint: "free disk: delete ignored files such as node_modules and target",
+        key: "x",
+        cmd: Cmd::Trim,
+    },
+    CommandSpec {
         name: "fetch",
         aliases: &[],
         args: "",
@@ -883,6 +957,14 @@ const COMMANDS: &[CommandSpec] = &[
         hint: "resume a coding-agent session from here",
         key: "R",
         cmd: Cmd::Resume,
+    },
+    CommandSpec {
+        name: "running",
+        aliases: &["agents", "ps"],
+        args: "[agent]",
+        hint: "show only checkouts where a coding agent is running",
+        key: "p",
+        cmd: Cmd::Running,
     },
     CommandSpec {
         name: "edit",
@@ -1028,6 +1110,7 @@ impl Model {
             pending: HashSet::new(),
             owners: BTreeMap::new(),
             owner_cache: None,
+            working: running::Working::new(),
             generation: 0,
             logged: HashSet::new(),
             viewport: 0,
@@ -1214,6 +1297,8 @@ impl Model {
             KeyCode::Char('D') => return self.command(Cmd::Delete, ""),
             KeyCode::Char('C') => return self.command(Cmd::Clean, ""),
             KeyCode::Char('P') => return self.command(Cmd::Prune, ""),
+            KeyCode::Char('x') => return self.command(Cmd::Trim, ""),
+            KeyCode::Char('p') => return self.command(Cmd::Running, ""),
             KeyCode::Char('f') => return self.command(Cmd::Fetch, ""),
             KeyCode::Char('e') => return self.command(Cmd::Edit, ""),
             KeyCode::Char('A') => return self.command(Cmd::Start, ""),
@@ -1327,11 +1412,7 @@ impl Model {
             Cmd::Remove => self.confirm_remove(false),
             Cmd::Delete => self.confirm_remove(true),
             Cmd::Clean => {
-                let ready = self.selected_project().map(|project| project.path.clone());
-                // A plan for another project is stale; it is dropped.
-                if let Some((project, report)) = self.ready_plan.take()
-                    && ready.as_ref() == Some(&project)
-                {
+                if let Some((project, report)) = self.take_ready(&PlanKind::Clean) {
                     self.open_clean_plan(&project, &report, None);
                     return Effect::None;
                 }
@@ -1346,6 +1427,8 @@ impl Model {
                 let args: &[&str] = if all { &["prune", "-a"] } else { &["prune"] };
                 self.foreground_bonsai(args, true, !all)
             }
+            Cmd::Trim => self.trim(args.trim() == "project"),
+            Cmd::Running => self.show_running(args.split_whitespace().next().unwrap_or("")),
             Cmd::Fetch => {
                 let Some(project) = self.selected_project() else {
                     return self.say("select a project first");
@@ -1451,6 +1534,86 @@ impl Model {
         self.background(&["add", branch], |_| jobs::After::SelectPrinted)
     }
 
+    /// Plan a trim of the selected worktree, or of every worktree of the
+    /// project on a project row, the main checkout, or with `project`. The
+    /// plan is shown before anything is deleted.
+    fn trim(&mut self, whole: bool) -> Effect {
+        let mut targets = Vec::new();
+        let mut label = "bonsai trim --dry-run".to_string();
+        if !whole && let Some((_, worktree)) = self.selected_worktree() {
+            if worktree.missing {
+                return self.say("its directory was deleted; press P to prune it");
+            }
+            if worktree.external {
+                return self.say("external worktrees are read-only to bonsai");
+            }
+            // The main checkout itself is never trimmed: it stands for the
+            // project, as on the home list.
+            if !worktree.main {
+                label = format!("bonsai trim --dry-run {}", rows::branch_label(worktree));
+                targets.push(worktree.path.clone());
+            }
+        }
+        let kind = PlanKind::Trim {
+            targets: targets.clone(),
+        };
+        if let Some((project, report)) = self.take_ready(&kind) {
+            self.open_trim_plan(&project, &targets, &report, None);
+            return Effect::None;
+        }
+        let mut args = vec!["trim".to_string(), "--dry-run".into(), "--json".into()];
+        args.extend(
+            targets
+                .iter()
+                .map(|path| path.to_string_lossy().into_owned()),
+        );
+        let args: Vec<&str> = args.iter().map(String::as_str).collect();
+        let mut effect = self.background(&args, |project| jobs::After::TrimPlan {
+            project: project.to_path_buf(),
+            targets: targets.clone(),
+        });
+        if let Effect::Run(Action::Background { spec, .. }) = &mut effect {
+            spec.label = label;
+        }
+        effect
+    }
+
+    /// Search for checkouts where a coding agent runs (`running:`), and
+    /// keep the results for the motion keys.
+    fn show_running(&mut self, agent: &str) -> Effect {
+        let previous = self.filter.text().to_string();
+        let agent = agent.to_lowercase();
+        self.filter.set(format!("running:{agent}"));
+        self.rebuild();
+        if self.rows.is_empty() {
+            self.filter.set(previous);
+            self.rebuild();
+            let who = if agent.is_empty() {
+                "coding agent"
+            } else {
+                agent.as_str()
+            };
+            return self.say(&format!("no {who} is running in these checkouts"));
+        }
+        self.filtering = false;
+        Effect::None
+    }
+
+    /// The plan of this kind that arrived while you were typing, if it is
+    /// for the selection. A plan for another selection is stale; it is
+    /// dropped.
+    fn take_ready(&mut self, kind: &PlanKind) -> Option<(PathBuf, String)> {
+        let same =
+            |ready: &ReadyPlan| std::mem::discriminant(&ready.kind) == std::mem::discriminant(kind);
+        if !self.ready_plan.as_ref().is_some_and(same) {
+            return None;
+        }
+        let ready = self.ready_plan.take()?;
+        let project = self.selected_project().map(|project| project.path.clone());
+        (&ready.kind == kind && project.as_ref() == Some(&ready.project))
+            .then_some((ready.project, ready.report))
+    }
+
     /// A bonsai subcommand for the selected project, streamed into the pane.
     fn background(&mut self, args: &[&str], after: impl Fn(&Path) -> jobs::After) -> Effect {
         let Some(project) = self.selected_project() else {
@@ -1537,6 +1700,17 @@ impl Model {
                 Style::new().fg(Color::Red),
             ));
         }
+        let busy = self.busy(&worktree.path);
+        if !worktree.missing && !busy.is_empty() {
+            let verb = if busy.len() == 1 { "is" } else { "are" };
+            lines.push(Line::styled(
+                format!(
+                    "{} {verb} working in it, so bonsai will refuse to remove it.",
+                    agents::describe(&busy)
+                ),
+                Style::new().fg(Color::Red),
+            ));
+        }
         // `remove -d` deletes the branch only when its tip is on its upstream,
         // or on the main checkout's HEAD without one; otherwise it refuses.
         if delete_branch {
@@ -1610,9 +1784,22 @@ impl Model {
         Effect::None
     }
 
-    /// A clean plan finished. Show it unless you are typing something else,
-    /// so a stray key cannot answer a question you have not read.
+    /// A clean plan finished.
     fn offer_clean_plan(&mut self, project: &Path, report: &str) {
+        self.offer_plan(PlanKind::Clean, project, report);
+    }
+
+    /// A trim plan finished.
+    fn offer_trim_plan(&mut self, project: &Path, targets: &[PathBuf], report: &str) {
+        let kind = PlanKind::Trim {
+            targets: targets.to_vec(),
+        };
+        self.offer_plan(kind, project, report);
+    }
+
+    /// Show a plan unless you are typing something else, so a stray key
+    /// cannot answer a question you have not read.
+    fn offer_plan(&mut self, kind: PlanKind, project: &Path, report: &str) {
         let busy = self.palette.is_some()
             || self.filtering
             || self.confirm.is_some()
@@ -1620,11 +1807,23 @@ impl Model {
             || self.output.is_some()
             || self.keys.waiting();
         if busy {
-            self.ready_plan = Some((project.to_path_buf(), report.to_string()));
-            self.notice = Some("the clean plan is ready; press C to review it".to_string());
+            self.notice = Some(format!(
+                "the {} plan is ready; press {} to review it",
+                kind.name(),
+                kind.key()
+            ));
+            self.ready_plan = Some(ReadyPlan {
+                kind,
+                project: project.to_path_buf(),
+                report: report.to_string(),
+            });
             return;
         }
-        self.open_clean_plan(project, report, Some(Instant::now() + ANSWER_DELAY));
+        let ready_at = Some(Instant::now() + ANSWER_DELAY);
+        match kind {
+            PlanKind::Clean => self.open_clean_plan(project, report, ready_at),
+            PlanKind::Trim { targets } => self.open_trim_plan(project, &targets, report, ready_at),
+        }
     }
 
     /// Show what `bonsai clean` would remove and ask before running it.
@@ -1650,6 +1849,12 @@ impl Model {
             skipped.push(format!(
                 "{} whose directory was deleted (press P)",
                 plan.missing
+            ));
+        }
+        if !plan.agents.is_empty() {
+            skipped.push(format!(
+                "{} where a coding agent is running",
+                plan.agents.len()
             ));
         }
         if plan.planned.is_empty() {
@@ -1684,6 +1889,10 @@ impl Model {
             lines.push(Line::raw(""));
             lines.push(Line::raw(format!("Kept: {}.", skipped.join(", "))));
         }
+        let entry = |entry: &PlannedRemoval| (entry.branch.clone(), entry.path.clone());
+        let skipped: Vec<(String, PathBuf)> = plan.agents.iter().map(entry).collect();
+        let planned: Vec<(String, PathBuf)> = plan.planned.iter().map(entry).collect();
+        lines.extend(self.agent_lines(&skipped, &planned, "clean"));
         let id = self
             .snapshot
             .projects
@@ -1719,6 +1928,213 @@ impl Model {
             ready_at,
             pager: keys::Pager::default(),
         });
+    }
+
+    /// Show what `bonsai trim` would delete and ask before running it. The
+    /// run names the planned worktrees, so it never trims one you did not
+    /// review; a worktree an agent entered since is skipped by bonsai.
+    fn open_trim_plan(
+        &mut self,
+        project: &Path,
+        targets: &[PathBuf],
+        report: &str,
+        ready_at: Option<Instant>,
+    ) {
+        let plan = match TrimPlan::parse(report) {
+            Ok(plan) => plan,
+            Err(error) => {
+                self.notice = Some(format!("cannot read the trim plan: {error}"));
+                return;
+            }
+        };
+        let found = self
+            .snapshot
+            .projects
+            .iter()
+            .find(|item| item.path == project);
+        let name = found.map_or_else(|| path_label(project), |item| item.name.clone());
+        let id = found.map(|item| item.id.clone());
+        let label = |branch: &Option<String>, path: &Path| {
+            branch.clone().unwrap_or_else(|| path_label(path))
+        };
+        let subject = match (targets, plan.planned.as_slice()) {
+            ([target], [only]) if &only.path == target => label(&only.branch, &only.path),
+            ([target], _) => self
+                .snapshot
+                .projects
+                .iter()
+                .flat_map(|project| &project.worktrees)
+                .find(|worktree| &worktree.path == target)
+                .map_or_else(|| path_label(target), rows::branch_label),
+            _ => name.clone(),
+        };
+        let skipped: Vec<(String, PathBuf)> = plan
+            .skipped
+            .iter()
+            .map(|entry| (label(&entry.branch, &entry.path), entry.path.clone()))
+            .collect();
+        if plan.planned.is_empty() {
+            let mut notice = format!("nothing to trim in {subject}");
+            if !skipped.is_empty() {
+                notice.push_str(&format!(
+                    "; skipped {} where a coding agent is running",
+                    view::plural(skipped.len(), "worktree")
+                ));
+            }
+            self.notice = Some(notice);
+            return;
+        }
+        let branches: Vec<String> = plan
+            .planned
+            .iter()
+            .map(|entry| label(&entry.branch, &entry.path))
+            .collect();
+        let sizes: Vec<String> = plan
+            .planned
+            .iter()
+            .map(|entry| footprint::format_bytes(entry.bytes))
+            .collect();
+        let branch_width = branches
+            .iter()
+            .map(|branch| branch.chars().count())
+            .max()
+            .unwrap_or(0);
+        let size_width = sizes
+            .iter()
+            .map(|size| size.chars().count())
+            .max()
+            .unwrap_or(0);
+        let mut lines = vec![Line::raw(
+            "These ignored files will be deleted; the worktrees and their branches stay:",
+        )];
+        for ((entry, branch), size) in plan.planned.iter().zip(&branches).zip(&sizes) {
+            lines.push(Line::from(vec![
+                Span::raw("  "),
+                Span::styled(
+                    pad(branch.clone(), branch_width),
+                    Style::new().add_modifier(ratatui::style::Modifier::BOLD),
+                ),
+                Span::raw("  "),
+                Span::raw(format!("{size:>size_width$}")),
+                Span::raw("  "),
+                Span::styled(
+                    trimmed_entries(&entry.entries),
+                    Style::new().add_modifier(ratatui::style::Modifier::DIM),
+                ),
+            ]));
+        }
+        lines.push(Line::raw(""));
+        lines.push(Line::raw(format!(
+            "That frees {} in {}.",
+            footprint::format_bytes(plan.bytes),
+            view::plural(plan.planned.len(), "worktree")
+        )));
+        let kept = plan.kept();
+        if !kept.is_empty() {
+            lines.push(Line::raw(format!("Kept inside them: {}.", kept.join(", "))));
+        }
+        let planned: Vec<(String, PathBuf)> = branches
+            .iter()
+            .cloned()
+            .zip(plan.planned.iter().map(|entry| entry.path.clone()))
+            .collect();
+        lines.extend(self.agent_lines(&skipped, &planned, "trim"));
+        let paths: Vec<String> = plan
+            .planned
+            .iter()
+            .map(|entry| entry.path.to_string_lossy().into_owned())
+            .collect();
+        let mut args = vec!["trim", "--yes"];
+        args.extend(paths.iter().map(String::as_str));
+        let mut spec = match jobs::Spec::bonsai(project, &self.flags, &args, jobs::After::Refresh) {
+            Ok(spec) => spec,
+            Err(error) => {
+                self.notice = Some(format!("{error:#}"));
+                return;
+            }
+        };
+        // The paths are the precise arguments; the branches read better.
+        spec.label = match branches.as_slice() {
+            [branch] => format!("bonsai trim --yes {branch}"),
+            many => format!(
+                "bonsai trim --yes ({} of {name})",
+                view::plural(many.len(), "worktree")
+            ),
+        };
+        self.confirm = Some(Confirm {
+            title: format!("Trim {subject}?"),
+            lines,
+            yes: "trim",
+            tone: Color::Yellow,
+            action: Action::Background { spec, project: id },
+            ready_at,
+            pager: keys::Pager::default(),
+        });
+    }
+
+    /// Checkouts of a plan where another coding agent works: those bonsai
+    /// skipped, and planned ones an agent entered since the plan was made.
+    fn agent_lines(
+        &self,
+        skipped: &[(String, PathBuf)],
+        planned: &[(String, PathBuf)],
+        command: &str,
+    ) -> Vec<Line<'static>> {
+        let mut found: Vec<(&str, String)> = Vec::new();
+        for (branch, path) in skipped {
+            let busy = self.busy(path);
+            let who = if busy.is_empty() {
+                "a coding agent".to_string()
+            } else {
+                agents::describe(&busy)
+            };
+            found.push((branch, who));
+        }
+        for (branch, path) in planned {
+            let busy = self.busy(path);
+            if !busy.is_empty() {
+                found.push((branch, agents::describe(&busy)));
+            }
+        }
+        if found.is_empty() {
+            return Vec::new();
+        }
+        let width = found
+            .iter()
+            .map(|(branch, _)| branch.chars().count())
+            .max()
+            .unwrap_or(0);
+        let warn = Style::new().fg(Color::Yellow);
+        let mut lines = vec![
+            Line::raw(""),
+            Line::styled(
+                format!("Coding agents work in these, so bonsai {command} skips them:"),
+                warn,
+            ),
+        ];
+        for (branch, who) in found {
+            lines.push(Line::from(vec![
+                Span::raw("  "),
+                Span::styled(
+                    pad(branch.to_string(), width),
+                    Style::new().add_modifier(ratatui::style::Modifier::BOLD),
+                ),
+                Span::raw("  "),
+                Span::styled(who, table::running_style()),
+            ]));
+        }
+        lines
+    }
+
+    /// Other coding agents working inside `path`, as the bonsai commands
+    /// that delete files there see them.
+    fn busy(&self, path: &Path) -> Vec<&Agent> {
+        let path = crate::paths::canonicalize_or_self(path);
+        self.working
+            .values()
+            .flatten()
+            .filter(|agent| !agent.caller && agent.cwd.starts_with(&path))
+            .collect()
     }
 
     /// The fresh plan matches what you confirmed: run the clean. Otherwise
@@ -1898,6 +2314,41 @@ impl Model {
             self.rebuild();
         }
         found
+    }
+
+    /// A scan of running coding agents changed.
+    fn apply_agents(&mut self, working: running::Working) -> bool {
+        self.working = working;
+        self.rebuild();
+        true
+    }
+
+    /// Every listed checkout, once: where agents are looked for.
+    fn checkout_paths(&self) -> Vec<PathBuf> {
+        let mut seen = HashSet::new();
+        self.snapshot
+            .projects
+            .iter()
+            .flat_map(|project| &project.worktrees)
+            .filter(|worktree| seen.insert(worktree.path.clone()))
+            .map(|worktree| worktree.path.clone())
+            .collect()
+    }
+
+    /// Coding agents running in the listed checkouts.
+    fn running_total(&self) -> usize {
+        if self.working.is_empty() {
+            return 0;
+        }
+        let mut seen = HashSet::new();
+        self.snapshot
+            .projects
+            .iter()
+            .flat_map(|project| &project.worktrees)
+            .filter(|worktree| seen.insert(worktree.path.as_path()))
+            .filter_map(|worktree| self.working.get(&worktree.path))
+            .map(Vec::len)
+            .sum()
     }
 
     fn apply_owner(&mut self, update: owner::OwnerResolved) -> bool {
@@ -2337,6 +2788,8 @@ struct CleanPlan {
     planned: Vec<PlannedRemoval>,
     dirty: usize,
     missing: usize,
+    /// Worktrees skipped because another coding agent works in them.
+    agents: Vec<PlannedRemoval>,
 }
 
 #[derive(serde::Deserialize)]
@@ -2356,12 +2809,15 @@ impl CleanPlan {
             skipped_dirty: Vec<serde_json::Value>,
             #[serde(default)]
             skipped_missing: Vec<serde_json::Value>,
+            #[serde(default)]
+            skipped_agents: Vec<PlannedRemoval>,
         }
         let report: Report = serde_json::from_str(report)?;
         Ok(Self {
             planned: report.planned,
             dirty: report.skipped_dirty.len(),
             missing: report.skipped_missing.len(),
+            agents: report.skipped_agents,
         })
     }
 
@@ -2374,6 +2830,109 @@ impl CleanPlan {
         paths.sort();
         paths
     }
+}
+
+/// The parts of a `bonsai trim --dry-run --json` report hq shows.
+struct TrimPlan {
+    bytes: u64,
+    planned: Vec<TrimTarget>,
+    /// Worktrees skipped because another coding agent works in them.
+    skipped: Vec<TrimSkipped>,
+}
+
+#[derive(serde::Deserialize)]
+struct TrimTarget {
+    branch: Option<String>,
+    path: PathBuf,
+    bytes: u64,
+    #[serde(default)]
+    entries: Vec<TrimEntry>,
+    #[serde(default)]
+    kept: Vec<TrimKept>,
+}
+
+#[derive(serde::Deserialize)]
+struct TrimEntry {
+    path: PathBuf,
+    bytes: u64,
+}
+
+#[derive(serde::Deserialize)]
+struct TrimKept {
+    reason: String,
+}
+
+#[derive(serde::Deserialize)]
+struct TrimSkipped {
+    branch: Option<String>,
+    path: PathBuf,
+}
+
+impl TrimPlan {
+    fn parse(report: &str) -> Result<Self, serde_json::Error> {
+        #[derive(serde::Deserialize)]
+        struct Report {
+            #[serde(default)]
+            bytes: u64,
+            #[serde(default)]
+            planned: Vec<TrimTarget>,
+            #[serde(default)]
+            skipped_agents: Vec<TrimSkipped>,
+        }
+        let report: Report = serde_json::from_str(report)?;
+        Ok(Self {
+            bytes: report.bytes,
+            planned: report.planned,
+            skipped: report.skipped_agents,
+        })
+    }
+
+    /// `2 protected paths, 1 nested repository`: ignored paths left alone.
+    fn kept(&self) -> Vec<String> {
+        let count = |reason: &str| {
+            self.planned
+                .iter()
+                .flat_map(|target| &target.kept)
+                .filter(|kept| kept.reason == reason)
+                .count()
+        };
+        [
+            ("protected", "protected path", "protected paths"),
+            ("repository", "nested repository", "nested repositories"),
+        ]
+        .into_iter()
+        .map(|(reason, one, many)| (count(reason), one, many))
+        .filter(|(count, _, _)| *count > 0)
+        .map(|(count, one, many)| format!("{count} {}", if count == 1 { one } else { many }))
+        .collect()
+    }
+}
+
+/// `target 3 GB, node_modules 1 GB, and 4 more`: the largest paths first.
+fn trimmed_entries(entries: &[TrimEntry]) -> String {
+    const SHOWN: usize = 3;
+    let mut largest: Vec<&TrimEntry> = entries.iter().collect();
+    largest.sort_by(|left, right| {
+        right
+            .bytes
+            .cmp(&left.bytes)
+            .then(left.path.cmp(&right.path))
+    });
+    let mut parts: Vec<String> = largest
+        .iter()
+        .take(SHOWN)
+        .map(|entry| {
+            format!(
+                "{} {}",
+                entry.path.display(),
+                footprint::format_bytes(entry.bytes)
+            )
+        })
+        .collect();
+    if entries.len() > SHOWN {
+        parts.push(format!("and {} more", entries.len() - SHOWN));
+    }
+    parts.join(", ")
 }
 
 fn commits(count: usize) -> String {
@@ -2606,6 +3165,7 @@ mod tests {
             Col::Deps,
             Col::Stack,
             Col::Agents,
+            Col::Running,
             Col::Notes,
         ]
         .into_iter()
@@ -4729,5 +5289,467 @@ mod tests {
         model.reveal(Path::new("/trees/bonsai/feat-x"));
         assert!(matches!(&model.view, View::Detail { project } if project == "bonsai"));
         assert!(model.selected_path().unwrap().ends_with("feat-x"));
+    }
+
+    /// Agents in `ab/dev` (claude in a subdirectory, then codex) and in
+    /// `other/feature` (claude), as a scan would assign them.
+    fn with_agents(model: &mut Model) {
+        use crate::agents::Kind;
+        let found = [
+            running::agent(Kind::Claude, 7, "/trees/bonsai/ab/dev/src"),
+            running::agent(Kind::Codex, 8, "/trees/bonsai/ab/dev"),
+            running::agent(Kind::Claude, 9, "/trees/other/feature"),
+            running::agent(Kind::Gemini, 10, "/elsewhere"),
+        ];
+        let working = running::by_checkout(&found, &model.checkout_paths());
+        assert!(model.apply_agents(working));
+    }
+
+    #[test]
+    fn running_agents_are_spelled_out_on_checkouts_and_summed_by_groups() {
+        let mut model = Model::from_snapshot(sample());
+        with_agents(&mut model);
+        let bonsai = model
+            .rows
+            .iter()
+            .find(|row| row.project == "bonsai")
+            .unwrap();
+        assert_eq!(words(bonsai), "2 | 1 changed | 2 agents");
+        let (screen, _) = painted(&mut model);
+        assert!(
+            screen.contains(
+                " bonsai · 2 projects · 3 checkouts · 3 agents running · sorted by name "
+            ),
+            "{screen}"
+        );
+        assert!(screen.contains("running"), "{screen}");
+        assert!(model.status_line().contains("2 agents running"));
+
+        model.on_key(press(KeyCode::Enter));
+        assert_eq!(
+            words(row_for(&model, "ab/dev")),
+            "1 untracked | no upstream | claude, codex"
+        );
+        assert_eq!(
+            words(row_for(&model, "bonsai/main")),
+            "clean | no upstream | main checkout"
+        );
+        assert!(
+            model
+                .status_line()
+                .contains("claude (pid 7), codex (pid 8) running"),
+            "{}",
+            model.status_line()
+        );
+        let (screen, _) = paint(&mut model, 120, 24);
+        assert!(
+            screen.contains("bonsai · 2 checkouts · 2 agents running"),
+            "{screen}"
+        );
+        assert!(screen.contains("2 checkouts · 1 with uncommitted changes · 2 agents running"));
+
+        model.on_key(press(KeyCode::Esc));
+        model.on_key(press(KeyCode::Char('T')));
+        let host = model
+            .rows
+            .iter()
+            .find(|row| row.depth == Depth::Host)
+            .unwrap();
+        assert!(words(host).contains("3 agents"), "{}", words(host));
+        let owner = model
+            .rows
+            .iter()
+            .find(|row| row.depth == Depth::Owner && row.owner == "interfaceinc")
+            .unwrap();
+        assert!(words(owner).ends_with("1 agent"), "{}", words(owner));
+
+        // Agents leave: the column and the totals disappear.
+        assert!(model.apply_agents(running::Working::new()));
+        let (screen, _) = painted(&mut model);
+        assert!(!screen.contains("running"), "{screen}");
+    }
+
+    #[test]
+    fn the_running_column_outlives_less_useful_ones_on_a_narrow_terminal() {
+        let mut model = Model::from_snapshot(sample());
+        model
+            .footprints
+            .insert("/trees/bonsai/ab/dev".into(), sized(3_000));
+        with_agents(&mut model);
+        model.on_key(press(KeyCode::Enter));
+        let wide = table::layout(Kind::Checkouts, &model.rows, 160);
+        assert!(wide.has(Col::Agents) && wide.has(Col::Running), "{wide:?}");
+        let narrow = table::layout(Kind::Checkouts, &model.rows, 60);
+        assert!(narrow.has(Col::Running), "{narrow:?}");
+        assert!(!narrow.has(Col::Agents), "{narrow:?}");
+        assert!(!narrow.has(Col::Deps), "{narrow:?}");
+    }
+
+    #[test]
+    fn p_shows_the_checkouts_where_agents_run_and_esc_clears_it() {
+        let mut model = Model::from_snapshot(sample());
+        model.on_key(press(KeyCode::Char('p')));
+        assert_eq!(
+            model.status_line(),
+            "no coding agent is running in these checkouts"
+        );
+        assert!(model.filter.is_empty());
+
+        with_agents(&mut model);
+        model.notice = None;
+        assert!(
+            model
+                .status_line()
+                .contains("2 agents running (press p to show where)"),
+            "{}",
+            model.status_line()
+        );
+        model.on_key(press(KeyCode::Char('p')));
+        assert_eq!(model.filter.text(), "running:");
+        assert!(!model.filtering, "the results take motion keys");
+        let paths: Vec<_> = model
+            .rows
+            .iter()
+            .filter_map(|row| row.path.clone())
+            .collect();
+        assert_eq!(
+            paths,
+            [
+                PathBuf::from("/trees/bonsai/ab/dev"),
+                PathBuf::from("/trees/other/feature")
+            ]
+        );
+        model.on_key(press(KeyCode::Char('j')));
+        assert!(model.selected_path().unwrap().ends_with("other/feature"));
+        model.on_key(press(KeyCode::Esc));
+        assert!(model.filter.is_empty());
+
+        model.open_palette("running codex");
+        model.on_key(press(KeyCode::Enter));
+        let paths: Vec<_> = model
+            .rows
+            .iter()
+            .filter_map(|row| row.path.clone())
+            .collect();
+        assert_eq!(paths, [PathBuf::from("/trees/bonsai/ab/dev")]);
+        model.on_key(press(KeyCode::Esc));
+        model.open_palette("ps aider");
+        model.on_key(press(KeyCode::Enter));
+        assert_eq!(
+            model.status_line(),
+            "no aider is running in these checkouts"
+        );
+        assert!(model.filter.is_empty());
+
+        // Inside a project, only its checkouts.
+        model.on_key(press(KeyCode::Char('j')));
+        model.on_key(press(KeyCode::Enter));
+        assert!(matches!(&model.view, View::Detail { project } if project == "other"));
+        model.on_key(press(KeyCode::Char('p')));
+        let paths: Vec<_> = model
+            .rows
+            .iter()
+            .filter_map(|row| row.path.clone())
+            .collect();
+        assert_eq!(paths, [PathBuf::from("/trees/other/feature")]);
+    }
+
+    #[test]
+    fn search_matches_running_agents_by_prefix_and_by_name() {
+        let mut model = Model::from_snapshot(sample());
+        with_agents(&mut model);
+        let found = |model: &mut Model, text: &str| {
+            model.filter.set(text);
+            model.rebuild();
+            model
+                .rows
+                .iter()
+                .filter_map(|row| row.path.clone())
+                .collect::<Vec<_>>()
+        };
+        assert_eq!(
+            found(&mut model, "running:cla"),
+            [
+                PathBuf::from("/trees/bonsai/ab/dev"),
+                PathBuf::from("/trees/other/feature")
+            ]
+        );
+        assert_eq!(
+            found(&mut model, "running: feature"),
+            [PathBuf::from("/trees/other/feature")]
+        );
+        assert_eq!(
+            found(&mut model, "codex"),
+            [PathBuf::from("/trees/bonsai/ab/dev")]
+        );
+        assert!(found(&mut model, "running:gemini").is_empty());
+    }
+
+    const TRIM_PLAN: &str = r#"{"dry_run":true,"bytes":3600000000,"planned":[
+        {"branch":"ab/dev","path":"/trees/bonsai/ab/dev","bytes":3600000000,
+         "entries":[{"path":"a.log","bytes":1000},{"path":"target","bytes":3000000000},
+                    {"path":"node_modules","bytes":599000000},{"path":"dist","bytes":999000}],
+         "kept":[{"path":".env.local","reason":"protected"}]}],
+        "skipped_agents":[],"trimmed":[],"freed":0}"#;
+
+    #[test]
+    fn x_shows_the_trim_plan_then_trims_the_reviewed_worktrees() {
+        let mut model = Model::from_snapshot(sample());
+        // A project row plans every worktree of the project.
+        let spec = background(model.on_key(press(KeyCode::Char('x'))));
+        assert_eq!(arguments(&spec)[2..], ["trim", "--dry-run", "--json"]);
+        assert_eq!(spec.label, "bonsai trim --dry-run");
+        assert_eq!(
+            spec.after,
+            jobs::After::TrimPlan {
+                project: PathBuf::from("/trees/bonsai"),
+                targets: Vec::new()
+            }
+        );
+
+        model.on_key(press(KeyCode::Enter));
+        let spec = background(model.on_key(press(KeyCode::Char('x'))));
+        assert_eq!(
+            arguments(&spec)[2..],
+            ["trim", "--dry-run", "--json", "/trees/bonsai/ab/dev"]
+        );
+        assert_eq!(spec.label, "bonsai trim --dry-run ab/dev");
+        let targets = vec![PathBuf::from("/trees/bonsai/ab/dev")];
+        let project = Path::new("/trees/bonsai");
+        model.offer_trim_plan(project, &targets, TRIM_PLAN);
+        let confirm = model.confirm.as_ref().expect("a plan");
+        assert_eq!(confirm.title, "Trim ab/dev?");
+        assert_eq!(confirm.yes, "trim");
+        let text: Vec<String> = confirm.lines.iter().map(ToString::to_string).collect();
+        assert!(
+            text.iter().any(|line| line.contains("ab/dev")
+                && line.contains("3.6 GB")
+                && line.contains("target 3 GB, node_modules 599 MB, dist 999 kB, and 1 more")),
+            "{text:?}"
+        );
+        assert!(
+            text.iter()
+                .any(|line| line == "That frees 3.6 GB in 1 worktree.")
+        );
+        assert!(
+            text.iter()
+                .any(|line| line == "Kept inside them: 1 protected path.")
+        );
+        assert!(!text.iter().any(|line| line.contains("Coding agents")));
+        // Keys typed before the plan appeared do not answer it.
+        assert!(matches!(
+            model.on_key(press(KeyCode::Char('y'))),
+            Effect::None
+        ));
+        model.confirm.as_mut().unwrap().ready_at = None;
+        let Effect::Run(Action::Background { spec, project: id }) =
+            model.on_key(press(KeyCode::Char('y')))
+        else {
+            panic!("expected the trim to run");
+        };
+        assert_eq!(
+            arguments(&spec)[2..],
+            ["trim", "--yes", "/trees/bonsai/ab/dev"]
+        );
+        assert!(!arguments(&spec).iter().any(|arg| arg == "--force"));
+        assert_eq!(spec.after, jobs::After::Refresh);
+        assert_eq!(spec.label, "bonsai trim --yes ab/dev");
+        assert_eq!(
+            id.as_deref(),
+            Some("bonsai"),
+            "the project is measured again"
+        );
+
+        // The main checkout stands for the project; it is never a target.
+        model.on_key(press(KeyCode::Char('j')));
+        assert!(model.selected_path().unwrap().ends_with("bonsai/main"));
+        let spec = background(model.on_key(press(KeyCode::Char('x'))));
+        assert_eq!(arguments(&spec)[2..], ["trim", "--dry-run", "--json"]);
+        model.on_key(press(KeyCode::Char('k')));
+        model.open_palette("trim project");
+        let spec = background(model.on_key(press(KeyCode::Enter)));
+        assert_eq!(arguments(&spec)[2..], ["trim", "--dry-run", "--json"]);
+
+        model.open_trim_plan(
+            project,
+            &targets,
+            r#"{"dry_run":true,"bytes":0,"planned":[],"skipped_agents":[{"branch":"ab/dev","path":"/trees/bonsai/ab/dev"}]}"#,
+            None,
+        );
+        assert_eq!(
+            model.status_line(),
+            "nothing to trim in ab/dev; skipped 1 worktree where a coding agent is running"
+        );
+    }
+
+    #[test]
+    fn x_refuses_external_and_deleted_worktrees() {
+        let mut snapshot = sample();
+        snapshot.projects[0].worktrees[0].external = true;
+        let mut model = Model::from_snapshot(snapshot);
+        model.on_key(press(KeyCode::Enter));
+        assert!(matches!(
+            model.on_key(press(KeyCode::Char('x'))),
+            Effect::None
+        ));
+        assert!(model.status_line().contains("read-only"));
+        model.snapshot.projects[0].worktrees[0].missing = true;
+        model.rebuild();
+        model.reveal(Path::new("/trees/bonsai/ab/dev"));
+        assert!(matches!(
+            model.on_key(press(KeyCode::Char('x'))),
+            Effect::None
+        ));
+        assert!(model.status_line().contains("press P"));
+    }
+
+    #[test]
+    fn a_trim_plan_that_arrives_while_typing_waits_for_x() {
+        let mut model = Model::from_snapshot(sample());
+        model.on_key(press(KeyCode::Enter));
+        let targets = vec![PathBuf::from("/trees/bonsai/ab/dev")];
+        model.on_key(press(KeyCode::Char('/')));
+        model.offer_trim_plan(Path::new("/trees/bonsai"), &targets, TRIM_PLAN);
+        assert!(model.confirm.is_none());
+        assert!(model.status_line().contains("press x to review it"));
+        model.on_key(press(KeyCode::Esc));
+        // Clean does not take a trim plan.
+        model.ready_plan.as_ref().expect("still waiting");
+        model.on_key(press(KeyCode::Char('C')));
+        assert!(model.confirm.is_none());
+        assert!(model.ready_plan.is_some());
+        model.on_key(press(KeyCode::Char('x')));
+        let confirm = model.confirm.as_ref().expect("the ready plan");
+        assert_eq!(confirm.title, "Trim ab/dev?");
+        assert!(confirm.ready_at.is_none());
+        assert!(model.ready_plan.is_none());
+    }
+
+    #[test]
+    fn questions_name_the_agents_working_in_their_targets() {
+        let mut model = Model::from_snapshot(sample());
+        with_agents(&mut model);
+        model.on_key(press(KeyCode::Enter));
+        typed(&mut model, "dd");
+        let confirm = model.confirm.take().expect("a confirmation");
+        let text: Vec<String> = confirm.lines.iter().map(ToString::to_string).collect();
+        assert!(
+            text.iter().any(|line| line
+                == "claude (pid 7), codex (pid 8) are working in it, so bonsai will refuse to remove it."),
+            "{text:?}"
+        );
+
+        // The agent that started hq is not in the way of what it asked for.
+        for agents in model.working.values_mut() {
+            for agent in agents.iter_mut().filter(|agent| agent.pid == 7) {
+                agent.caller = true;
+            }
+        }
+        typed(&mut model, "dd");
+        let confirm = model.confirm.take().expect("a confirmation");
+        let text: Vec<String> = confirm.lines.iter().map(ToString::to_string).collect();
+        assert!(
+            text.iter()
+                .any(|line| line.starts_with("codex (pid 8) is working in it")),
+            "{text:?}"
+        );
+
+        let project = Path::new("/trees/bonsai");
+        let clean = r#"{"dry_run":true,"planned":[{"branch":"main-merged","reason":"merged","path":"/trees/bonsai/main-merged"}],
+            "skipped_dirty":[],"skipped_missing":[],
+            "skipped_agents":[{"branch":"ab/dev","reason":"merged","path":"/trees/bonsai/ab/dev"}]}"#;
+        model.open_clean_plan(project, clean, None);
+        let confirm = model.confirm.take().expect("a plan");
+        let text: Vec<String> = confirm.lines.iter().map(ToString::to_string).collect();
+        assert!(
+            text.iter()
+                .any(|line| line == "Kept: 1 where a coding agent is running."),
+            "{text:?}"
+        );
+        assert!(
+            text.iter()
+                .any(|line| line.contains("ab/dev") && line.contains("codex (pid 8)")),
+            "{text:?}"
+        );
+        model.open_clean_plan(
+            project,
+            r#"{"dry_run":true,"planned":[],"skipped_agents":[{"branch":"ab/dev","reason":"merged","path":"/trees/bonsai/ab/dev"}]}"#,
+            None,
+        );
+        assert_eq!(
+            model.status_line(),
+            "nothing to clean in bonsai; kept 1 where a coding agent is running"
+        );
+
+        // A planned worktree an agent entered since the plan is named too.
+        let trim = TRIM_PLAN.replace(
+            r#""skipped_agents":[]"#,
+            r#""skipped_agents":[{"branch":"feature","path":"/trees/other/feature"}]"#,
+        );
+        model.open_trim_plan(project, &[], &trim, None);
+        let confirm = model.confirm.take().expect("a plan");
+        assert_eq!(confirm.title, "Trim bonsai?");
+        let text: Vec<String> = confirm.lines.iter().map(ToString::to_string).collect();
+        assert!(
+            text.iter()
+                .any(|line| line == "Coding agents work in these, so bonsai trim skips them:"),
+            "{text:?}"
+        );
+        assert!(
+            text.iter()
+                .any(|line| line.contains("ab/dev") && line.contains("codex (pid 8)")),
+            "{text:?}"
+        );
+        assert!(
+            text.iter()
+                .any(|line| line.contains("feature") && line.contains("claude (pid 9)")),
+            "{text:?}"
+        );
+    }
+
+    #[test]
+    fn the_project_header_points_at_space_trimming_frees() {
+        let mut model = Model::from_snapshot(sample());
+        // The main checkout's dependencies are never trimmed.
+        model
+            .footprints
+            .insert("/trees/bonsai/main".into(), sized(8_000));
+        model.on_key(press(KeyCode::Enter));
+        let (screen, _) = paint(&mut model, 140, 24);
+        assert!(!screen.contains("press x"), "{screen}");
+        model
+            .footprints
+            .insert("/trees/bonsai/ab/dev".into(), sized(6_000));
+        model.rebuild();
+        let (screen, _) = paint(&mut model, 140, 24);
+        assert!(
+            screen.contains("3 kB of dependencies in worktrees (press x to trim)"),
+            "{screen}"
+        );
+        model.on_key(press(KeyCode::Esc));
+        assert!(
+            model
+                .status_line()
+                .contains("3 kB of dependencies in worktrees (press x to trim)"),
+            "{}",
+            model.status_line()
+        );
+    }
+
+    #[test]
+    fn the_command_line_finds_trim_and_running() {
+        let mut model = Model::from_snapshot(sample());
+        for (text, cmd) in [
+            ("trim", Cmd::Trim),
+            ("free", Cmd::Trim),
+            ("running", Cmd::Running),
+            ("ps", Cmd::Running),
+            ("agents", Cmd::Running),
+            ("pr", Cmd::Prune),
+            ("rm", Cmd::Remove),
+        ] {
+            model.open_palette(text);
+            assert_eq!(palette_matches(&model)[0].cmd, cmd, "{text}");
+        }
     }
 }

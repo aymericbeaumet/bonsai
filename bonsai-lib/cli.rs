@@ -361,9 +361,9 @@ under the Bonsai root. Editor workspace files contribute checkouts that live
 outside the root.
 
 The home list is one row per project with its checkouts, uncommitted
-changes, total size, age, stack, coding agents, and deleted checkouts. Open a
-project to list each checkout with its changes, upstream, size, and
-dependency directories. The home list has four views, from the shortest
+changes, total size, age, stack, coding agents, running agents, and deleted
+checkouts. Open a project to list each checkout with its changes, upstream,
+size, dependency directories, and the coding agents running in it. The home list has four views, from the shortest
 list to the longest: table, projects (each with its checkouts), owners, and
 hosts, each group with its totals. t moves to the next view and T back;
 tabs on the top border show the current one. s sorts by name, recent activity, or size. Sizes from
@@ -371,13 +371,16 @@ the previous session show at once and update as they are measured again.
 
 Keys follow vim: j/k with counts (5j), gg/G, ctrl-d/u, ctrl-f/b, ctrl-e/y,
 H/M/L, zz/zt/zb, { and } between projects, h/l to go back and in, and /
-to search (user: and org: match owners). Enter opens a project; on a
+to search (user: and org: match owners, running: keeps checkouts where
+coding agents run). Enter opens a project; on a
 checkout it quits and, with the shell wrapper, changes into it.
 
 Commands act on the selection: a adds a worktree, dd removes one, D also
-deletes its branch, C cleans merged worktrees, P prunes deleted ones, f
-fetches, e opens $VISUAL or $EDITOR, A and R start or resume a coding agent,
-and yy copies the path. Removals ask first. : opens a command line with the
+deletes its branch, C cleans merged worktrees, x trims ignored files
+(node_modules, target, ...), P prunes deleted ones, f fetches, e opens
+$VISUAL or $EDITOR, A and R start or resume a coding agent, p shows where
+agents are running, and yy copies the path. Removals, clean, and trim ask
+first. : opens a command line with the
 same commands (:add <branch>). Bonsai commands stream into an output pane;
 agents and editors take over the terminal until they exit. ? lists every
 key.
@@ -385,7 +388,8 @@ key.
 Git status and checkout sizes fill in after the list appears. Warnings are
 appended to ~/.local/state/bonsai/hq.log; sizes are remembered in
 ~/.local/state/bonsai/footprints.json. --json prints the inventory,
-including status and each footprint, and exits without a terminal.
+including status, each footprint, and running agents, and exits without a
+terminal.
 
 Examples:
   bonsai hq

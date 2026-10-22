@@ -54,9 +54,10 @@
   UI, and do not run a shell or tmux inside hq. Bonsai commands run as child
   processes (`bonsai -C <project> …`) streaming into the output pane; coding
   agents and editors run in the foreground on `/dev/tty` while the interface
-  is suspended. Removal, branch deletion, and clean ask inside hq first
-  (clean shows its `--dry-run --json` plan, then runs `--yes --no-fetch`);
-  never pass `--force`.
+  is suspended. Removal, branch deletion, clean, and trim ask inside hq first
+  (clean shows its `--dry-run --json` plan, then runs `--yes --no-fetch`;
+  trim shows its `--dry-run --json` plan, then runs `--yes` on the reviewed
+  paths); never pass `--force`.
 - hq draws on stderr so the shell wrapper can capture stdout for the cd
   target (Enter on a checkout, or `c`). Never call `Terminal::clear`: it
   queries the cursor position on stdout. Clear with an escape sequence and
@@ -83,9 +84,10 @@
   their strings directly. `/` accepts `user:` and `organisation:` (`org:`,
   `organization:`); GitHub owner kind is resolved off the input thread and
   cached at `$XDG_CONFIG_HOME/bonsai/owners.json`, and until it is known
-  either prefix matches the owner text.
-- Paint the list before git status; status, sizes, and owner kinds stream in
-  off the input thread. `--json` waits for status and sizes and keeps
+  either prefix matches the owner text. `running:` (or `running:<agent>`)
+  keeps checkouts where coding agents run.
+- Paint the list before git status; status, sizes, owner kinds, and running
+  agents (rescanned every two seconds) stream in off the input thread. `--json` waits for status and sizes and keeps
   project-name order. The last size of each checkout is kept in
   `~/.local/state/bonsai/footprints.json` (`_BONSAI_HQ_FOOTPRINTS` overrides
   the file, `0` disables it) so totals show at once; a partial walk never

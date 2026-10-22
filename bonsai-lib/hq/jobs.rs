@@ -36,6 +36,12 @@ pub enum After {
         project: PathBuf,
         expected: Vec<PathBuf>,
     },
+    /// Show the `bonsai trim --dry-run --json` plan for these checkouts
+    /// (every worktree of the project when empty) for confirmation.
+    TrimPlan {
+        project: PathBuf,
+        targets: Vec<PathBuf>,
+    },
 }
 
 #[derive(Clone, Debug)]

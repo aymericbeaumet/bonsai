@@ -13,6 +13,7 @@ use std::time::Duration;
 use super::footprint::{Dependency, Footprint};
 use super::inventory::{Project, WorktreeEntry};
 use super::owner;
+use super::running;
 use super::{Grouping, Model, Sort, View};
 
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
@@ -67,6 +68,8 @@ pub(super) struct Totals {
     pub(super) measuring: bool,
     pub(super) stack: Vec<String>,
     pub(super) agents: Vec<String>,
+    /// Coding agents running in its checkouts now.
+    pub(super) running: usize,
     pub(super) unavailable: bool,
 }
 
@@ -85,6 +88,7 @@ impl Totals {
         self.measuring |= checkout.measuring;
         merge_names(&mut self.stack, &checkout.stack);
         merge_names(&mut self.agents, &checkout.agents);
+        self.running += checkout.running.len();
     }
 
     fn merge(&mut self, other: &Totals) {
@@ -97,6 +101,7 @@ impl Totals {
         self.unavailable |= other.unavailable;
         merge_names(&mut self.stack, &other.stack);
         merge_names(&mut self.agents, &other.agents);
+        self.running += other.running;
     }
 }
 
@@ -115,7 +120,10 @@ pub(super) struct Checkout {
     pub(super) measuring: bool,
     pub(super) dependencies: Vec<Dependency>,
     pub(super) stack: Vec<String>,
+    /// Coding agents with sessions here.
     pub(super) agents: Vec<String>,
+    /// The kind of each coding agent running here now, sorted.
+    pub(super) running: Vec<&'static str>,
     pub(super) notes: Vec<Note>,
 }
 
@@ -217,6 +225,11 @@ pub(super) fn checkout(model: &Model, worktree: &WorktreeEntry) -> Checkout {
         agents: footprint
             .map(|item| item.harnesses.clone())
             .unwrap_or_default(),
+        running: model
+            .working
+            .get(&worktree.path)
+            .map(|agents| running::kinds(agents))
+            .unwrap_or_default(),
         notes,
     }
 }
@@ -265,6 +278,11 @@ pub(super) fn visible_rows(model: &Model, now: u64) -> Vec<Row> {
                     id.as_ref(),
                     owner_kind(&model.owners, id.as_ref()),
                     model.footprints.get(&worktree.path),
+                    model
+                        .working
+                        .get(&worktree.path)
+                        .map(|agents| running::kinds(agents))
+                        .unwrap_or_default(),
                     &query,
                 )
             })
@@ -583,7 +601,10 @@ pub(super) fn empty_row() -> Row {
 }
 
 fn query_is_empty(query: &owner::Query) -> bool {
-    query.free.is_empty() && query.user.is_empty() && query.organisation.is_empty()
+    query.free.is_empty()
+        && query.user.is_empty()
+        && query.organisation.is_empty()
+        && query.running.is_none()
 }
 
 fn owner_kind(
@@ -710,8 +731,23 @@ fn matches_query(
     id: Option<&owner::OwnerId>,
     kind: Option<owner::OwnerKind>,
     footprint: Option<&Footprint>,
+    running: Vec<&str>,
     query: &owner::Query,
 ) -> bool {
+    if let Some(patterns) = &query.running {
+        let found = if patterns.is_empty() {
+            !running.is_empty()
+        } else {
+            patterns.iter().all(|pattern| {
+                running
+                    .iter()
+                    .any(|kind| crate::picker::fuzzy_match(kind, pattern))
+            })
+        };
+        if !found {
+            return false;
+        }
+    }
     let host = project
         .remote
         .as_deref()
@@ -729,6 +765,10 @@ fn matches_query(
     if let Some(item) = footprint {
         haystack.push(' ');
         haystack.push_str(&item.summary().to_lowercase());
+    }
+    for name in running {
+        haystack.push(' ');
+        haystack.push_str(name);
     }
     owner::matches(query, id, kind, &haystack)
 }
