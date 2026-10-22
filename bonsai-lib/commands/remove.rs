@@ -206,6 +206,19 @@ pub fn preflight(repo: &Repo, config: &Config, wt: &Worktree, force: bool) -> Re
             bail!("branch '{branch}' changed since selection; retry");
         }
     }
+    // Never pull the rug from under another coding agent; the one running
+    // bonsai can still remove its own worktree.
+    if !force && !current.is_missing() {
+        let running = crate::agents::running();
+        let busy = crate::agents::busy(&running, &wt.path);
+        if !busy.is_empty() {
+            bail!(
+                "worktree {} has a running agent: {}; stop it first, or use --force",
+                wt.path.display(),
+                crate::agents::describe(&busy)
+            );
+        }
+    }
     // A directory deleted by hand has no changes left to protect.
     if !force
         && !current.is_missing()
@@ -270,6 +283,14 @@ pub fn remove_worktree(repo: &Repo, config: &Config, wt: &Worktree, force: bool)
     {
         std::env::set_current_dir(&repo.main_root)
             .context("could not leave the worktree before removal")?;
+    }
+    // Ignored files (node_modules, target, ...) are usually the bulk of a
+    // checkout and git deletes them on one thread: delete them across cores
+    // first. Kept paths and nested repositories stay for git, so a worktree
+    // git then refuses to remove keeps its local state.
+    if wt.path.is_dir() {
+        let keep = crate::ignored::Keep::from_config(config);
+        crate::ignored::purge(&[(wt.path.clone(), &keep)]);
     }
 
     let path = wt.path.to_string_lossy().into_owned();

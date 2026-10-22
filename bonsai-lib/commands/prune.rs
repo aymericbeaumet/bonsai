@@ -10,7 +10,36 @@ use crate::repo::Repo;
 use crate::scope::Scope;
 use crate::worktree::{cleanup_empty_dirs, find_worktree_dirs_checked};
 
-pub fn run(config: &Config, scope: &Scope, yes: bool) -> Result<()> {
+pub struct Options {
+    pub dry_run: bool,
+    pub yes: bool,
+    pub json: bool,
+}
+
+#[derive(Default, serde::Serialize)]
+struct Report {
+    dry_run: bool,
+    /// Registrations whose directory is gone.
+    stale: Vec<PathBuf>,
+    /// Directories under the root that no repository registers.
+    orphans: Vec<PathBuf>,
+    deleted: Vec<PathBuf>,
+}
+
+pub fn run(config: &Config, scope: &Scope, options: Options) -> Result<()> {
+    let mut report = Report {
+        dry_run: options.dry_run,
+        ..Default::default()
+    };
+    let outcome = run_inner(config, scope, &options, &mut report);
+    if options.json && outcome.is_ok() {
+        crate::output::line(format_args!("{}", serde_json::to_string_pretty(&report)?))?;
+    }
+    outcome
+}
+
+fn run_inner(config: &Config, scope: &Scope, options: &Options, report: &mut Report) -> Result<()> {
+    let Options { dry_run, yes, .. } = *options;
     let root = config.root_dir();
     let all = scope.is_all();
     let _root_lock = crate::paths::lock_root(&root, all)?;
@@ -25,9 +54,12 @@ pub fn run(config: &Config, scope: &Scope, yes: bool) -> Result<()> {
             let pruned = project
                 .repo
                 .lock_mutations()
-                .and_then(|_lock| prune_registrations(&project.repo));
+                .and_then(|_lock| prune_registrations(&project.repo, dry_run));
             match pruned {
-                Ok(count) => report_pruned(&format!("[{}] ", project.id()), count),
+                Ok(stale) => {
+                    report_pruned(&format!("[{}] ", project.id()), &stale, dry_run);
+                    report.stale.extend(stale);
+                }
                 Err(error) => eprintln!("bonsai: [{}] skipped: {error:#}", project.id()),
             }
         }
@@ -48,7 +80,9 @@ pub fn run(config: &Config, scope: &Scope, yes: bool) -> Result<()> {
         };
         let repo = &project.repo;
         let config = &project.config;
-        report_pruned("", prune_registrations(repo)?);
+        let stale = prune_registrations(repo, dry_run)?;
+        report_pruned("", &stale, dry_run);
+        report.stale.extend(stale);
         // Directories on disk that git does not know about (crash leftovers).
         let registered: HashSet<PathBuf> = repo
             .worktrees()?
@@ -67,6 +101,17 @@ pub fn run(config: &Config, scope: &Scope, yes: bool) -> Result<()> {
         orphans
     };
 
+    report.orphans = orphans.clone();
+    if dry_run {
+        if !orphans.is_empty() {
+            eprintln!("bonsai: orphaned directories (not registered as worktrees):");
+            for (index, path) in orphans.iter().enumerate() {
+                eprintln!("  [{}/{}] {}", index + 1, orphans.len(), path.display());
+            }
+        }
+        eprintln!("bonsai: dry run, nothing pruned or deleted");
+        return Ok(());
+    }
     if !orphans.is_empty() {
         let snapshots = orphans
             .iter()
@@ -102,7 +147,7 @@ pub fn run(config: &Config, scope: &Scope, yes: bool) -> Result<()> {
                     "orphan metadata changed since selection: {}",
                     path.display()
                 );
-                std::fs::remove_dir_all(path)?;
+                crate::ignored::remove_tree(path)?;
                 Ok(())
             });
             let mut failures = 0;
@@ -115,6 +160,7 @@ pub fn run(config: &Config, scope: &Scope, yes: bool) -> Result<()> {
                             orphans.len(),
                             path.display()
                         );
+                        report.deleted.push(path.clone());
                         if let Some(parent) = path.parent() {
                             cleanup_empty_dirs(parent, &root);
                         }
@@ -155,17 +201,35 @@ pub fn run(config: &Config, scope: &Scope, yes: bool) -> Result<()> {
     Ok(())
 }
 
-/// Prune stale registrations, returning how many Git dropped.
-fn prune_registrations(repo: &Repo) -> Result<usize> {
-    let before = repo.worktrees()?.len();
+/// Stale registrations (their directory is gone), dropped from Git unless
+/// this is a dry run.
+fn prune_registrations(repo: &Repo, dry_run: bool) -> Result<Vec<PathBuf>> {
+    let before = repo.worktrees()?;
+    if dry_run {
+        return Ok(before
+            .into_iter()
+            .filter(|wt| wt.is_prunable)
+            .map(|wt| wt.path)
+            .collect());
+    }
     repo.git.run(&["worktree", "prune"])?;
-    Ok(before.saturating_sub(repo.worktrees()?.len()))
+    let after: HashSet<PathBuf> = repo.worktrees()?.into_iter().map(|wt| wt.path).collect();
+    Ok(before
+        .into_iter()
+        .map(|wt| wt.path)
+        .filter(|path| !after.contains(path))
+        .collect())
 }
 
-fn report_pruned(tag: &str, count: usize) {
+fn report_pruned(tag: &str, stale: &[PathBuf], dry_run: bool) {
+    let count = stale.len();
     if count > 0 {
         let plural = if count == 1 { "" } else { "s" };
-        eprintln!("bonsai: {tag}pruned {count} stale worktree registration{plural}");
+        let verb = if dry_run { "would prune" } else { "pruned" };
+        eprintln!("bonsai: {tag}{verb} {count} stale worktree registration{plural}:");
+        for path in stale {
+            eprintln!("  {}", path.display());
+        }
     }
 }
 

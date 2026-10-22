@@ -28,6 +28,7 @@ pub struct Config {
     pub workspace: bool,
     pub add: AddConfig,
     pub clean: CleanConfig,
+    pub trim: TrimConfig,
     pub hq: HqConfig,
 }
 
@@ -86,6 +87,14 @@ pub struct CleanConfig {
     pub protected: Vec<String>,
 }
 
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+#[serde(default, deny_unknown_fields)]
+pub struct TrimConfig {
+    /// Globs of ignored paths `trim` never deletes, on top of `[add] copy`
+    /// and the built-in local-state globs (`ignored::LOCAL_STATE`).
+    pub keep: Vec<String>,
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(default, deny_unknown_fields)]
 pub struct HqConfig {
@@ -102,6 +111,7 @@ impl Default for Config {
             workspace: true,
             add: AddConfig::default(),
             clean: CleanConfig::default(),
+            trim: TrimConfig::default(),
             hq: HqConfig::default(),
         }
     }
@@ -152,6 +162,10 @@ impl Config {
             glob::Pattern::new(pattern)
                 .with_context(|| format!("invalid clean.protected glob '{pattern}'"))?;
         }
+        for pattern in &config.trim.keep {
+            glob::Pattern::new(pattern.trim_start_matches('/').trim_end_matches('/'))
+                .with_context(|| format!("invalid trim.keep glob '{pattern}'"))?;
+        }
         for pattern in &config.add.copy {
             glob::Pattern::new(pattern)
                 .with_context(|| format!("invalid add.copy glob '{pattern}'"))?;
@@ -188,6 +202,7 @@ struct GitConfigPatch {
     workspace: Option<bool>,
     add: GitConfigAddPatch,
     clean: GitConfigCleanPatch,
+    trim: GitConfigTrimPatch,
     hq: GitConfigHqPatch,
 }
 
@@ -211,6 +226,12 @@ struct GitConfigCleanPatch {
     fetch: Option<bool>,
     #[serde(skip_serializing_if = "Option::is_none")]
     protected: Option<Vec<String>>,
+}
+
+#[derive(Debug, Default, Serialize)]
+struct GitConfigTrimPatch {
+    #[serde(skip_serializing_if = "Option::is_none")]
+    keep: Option<Vec<String>>,
 }
 
 #[derive(Debug, Default, Serialize)]
@@ -253,6 +274,7 @@ fn git_config_patch(git: &Git) -> Result<GitConfigPatch> {
             "bonsai.add.copy" => patch.add.copy.get_or_insert_default().push(value),
             "bonsai.clean.fetch" => patch.clean.fetch = Some(boolean()?),
             "bonsai.clean.protected" => patch.clean.protected.get_or_insert_default().push(value),
+            "bonsai.trim.keep" => patch.trim.keep.get_or_insert_default().push(value),
             "bonsai.hq.scrolloff" => {
                 patch.hq.scrolloff =
                     Some(value.parse().with_context(|| {

@@ -31,16 +31,32 @@ fresh `bonsai agents` output.
 ## Scripting
 
 `path=$(bonsai add feat-x)` prints the worktree path and is idempotent;
-`bonsai list --json` and `bonsai clean --dry-run --json` give structured
-output for a reliable inspect-then-execute loop; `clean --yes` /
-`prune --yes` (alias `-f`/`--force`) never prompt; fuzzy pickers only ever
-appear on a real terminal.
+`bonsai list --json`, `bonsai ps --json`, and the bulk commands'
+`--dry-run --json` (`clean`, `trim`, `prune`) give structured output for a
+reliable inspect-then-execute loop; their `--yes` (alias `-f`/`--force`)
+never prompts; fuzzy pickers only ever appear on a real terminal.
 
 New worktrees come pre-provisioned: untracked local config — `.env*`,
 `.envrc`, `.mcp.json`, `CLAUDE.local.md`, `.claude/settings.local.json`,
 `.cursor/mcp.json` — is copied over by default, and dependencies are
 installed automatically from the lockfile, so whichever harness (or human)
 created the worktree, the others find their setup in place.
+
+## Running agents
+
+`bonsai ps` lists the coding agents running on this machine with the
+checkout each one works in, its pid, and its uptime: Claude Code, Codex,
+OpenCode, Cursor Agent, Gemini CLI, Copilot, Amp, Aider, Goose, Crush, Qwen
+Code, and Pi, whether installed natively or launched through npm or bun
+(counted once, as the outermost process). Inside a repository it lists the
+agents working in that project; `-a` lists every agent, labelled by
+checkout when it works in a known one and by directory otherwise. hq shows
+the same agents next to each checkout.
+
+Agents never pull the rug from under each other: `remove` refuses, and
+`clean` and `trim` skip, a worktree another agent is working in. An agent
+running bonsai itself never blocks its own request, so it can remove its
+worktree once its task is merged. `remove --force` overrides the guard.
 
 ## Start sessions
 

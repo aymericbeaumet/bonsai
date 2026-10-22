@@ -3270,3 +3270,310 @@ fn which(bin: &str) -> Result<PathBuf, ()> {
         Err(())
     }
 }
+
+/// A worktree carrying typical ignored content: dependency and build output,
+/// a local secret, and a nested repository, next to untracked work.
+fn add_with_ignored_files(repo: &TestRepo, branch: &str) -> PathBuf {
+    let path = repo.add(branch);
+    std::fs::create_dir_all(path.join("node_modules/pkg")).unwrap();
+    std::fs::write(path.join("node_modules/pkg/index.js"), "x".repeat(4096)).unwrap();
+    std::fs::create_dir_all(path.join("target/debug")).unwrap();
+    std::fs::write(path.join("target/debug/app"), "y".repeat(4096)).unwrap();
+    std::fs::create_dir_all(path.join("target/vendored/.git")).unwrap();
+    std::fs::write(path.join(".env"), "SECRET=1\n").unwrap();
+    std::fs::write(path.join("notes.txt"), "untracked work\n").unwrap();
+    path
+}
+
+fn json_of(output: &std::process::Output) -> serde_json::Value {
+    assert!(
+        output.status.success(),
+        "{}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    serde_json::from_slice(&output.stdout).unwrap()
+}
+
+#[test]
+fn trim_deletes_ignored_files_but_keeps_work_config_and_nested_repos() {
+    let repo = TestRepo::new();
+    repo.commit_files(&[(".gitignore", "node_modules/\ntarget/\n.env\n")]);
+    let path = add_with_ignored_files(&repo, "feat-trim");
+    // The main checkout is never trimmed.
+    std::fs::create_dir_all(repo.clone.join("node_modules/dep")).unwrap();
+
+    let report = json_of(
+        &repo
+            .bonsai(&repo.clone)
+            .args(["trim", "--dry-run", "--json"])
+            .output()
+            .unwrap(),
+    );
+    assert_eq!(report["dry_run"], true);
+    let planned = report["planned"].as_array().unwrap();
+    assert_eq!(planned.len(), 1);
+    assert_eq!(planned[0]["branch"], "feat-trim");
+    let mut entries: Vec<&str> = planned[0]["entries"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|entry| entry["path"].as_str().unwrap())
+        .collect();
+    entries.sort();
+    assert_eq!(entries, ["node_modules", "target/debug"]);
+    let kept: Vec<(&str, &str)> = planned[0]["kept"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|kept| {
+            (
+                kept["path"].as_str().unwrap(),
+                kept["reason"].as_str().unwrap(),
+            )
+        })
+        .collect();
+    assert_eq!(
+        kept,
+        [(".env", "protected"), ("target/vendored", "repository")]
+    );
+    assert!(planned[0]["bytes"].as_u64().unwrap() >= 8192);
+    assert!(
+        path.join("node_modules").exists(),
+        "dry run deletes nothing"
+    );
+
+    repo.bonsai(&repo.clone)
+        .args(["trim", "--yes"])
+        .assert()
+        .success()
+        .stderr(predicate::str::contains("[feat-trim] trimmed"));
+    assert!(!path.join("node_modules").exists());
+    assert!(!path.join("target/debug").exists());
+    for survivor in [".env", "notes.txt", "README.md", "target/vendored/.git"] {
+        assert!(path.join(survivor).exists(), "{survivor} must survive");
+    }
+    assert!(repo.clone.join("node_modules/dep").exists());
+}
+
+#[test]
+fn trim_keeps_local_state_at_any_depth_and_below_kept_directories() {
+    let repo = TestRepo::new();
+    for dir in ["data", "apps/web"] {
+        std::fs::create_dir_all(repo.clone.join(dir)).unwrap();
+    }
+    // A tracked file makes git list data/'s ignored files one by one.
+    repo.commit_files(&[
+        (".gitignore", "build/\ndata/*.bin\n*.sqlite3\n.env.local\n"),
+        ("data/README", "tracked\n"),
+        ("apps/web/index.js", "tracked\n"),
+    ]);
+    std::fs::write(
+        repo.clone.join(".bonsai.toml"),
+        "[trim]\nkeep = [\"data/\"]\n",
+    )
+    .unwrap();
+    let path = repo.add("feat-state");
+    for (file, content) in [
+        ("build/out.js", "artifact"),
+        ("data/cache.bin", "kept: below a kept directory"),
+        ("db.sqlite3", "kept: built-in local state"),
+        ("apps/web/.env.local", "kept: any depth"),
+    ] {
+        std::fs::create_dir_all(path.join(file).parent().unwrap()).unwrap();
+        std::fs::write(path.join(file), content).unwrap();
+    }
+
+    repo.bonsai(&repo.clone)
+        .args(["trim", "--yes"])
+        .assert()
+        .success();
+    assert!(!path.join("build").exists());
+    for kept in ["data/cache.bin", "db.sqlite3", "apps/web/.env.local"] {
+        assert!(path.join(kept).exists(), "{kept} must be kept");
+    }
+}
+
+#[test]
+fn trim_confirms_unless_yes_and_selects_targets() {
+    let repo = TestRepo::new();
+    repo.commit_files(&[(".gitignore", "node_modules/\n")]);
+    let path = repo.add("feat-a");
+    std::fs::create_dir_all(path.join("node_modules")).unwrap();
+    std::fs::write(path.join("node_modules/x"), "x").unwrap();
+
+    repo.bonsai(&repo.clone)
+        .arg("trim")
+        .assert()
+        .failure()
+        .stderr(predicate::str::contains("pass --yes"));
+    assert!(path.join("node_modules/x").exists());
+    repo.bonsai(&repo.clone)
+        .args(["trim", "nope", "-y"])
+        .assert()
+        .failure()
+        .stderr(predicate::str::contains(
+            "no bonsai worktree for branch 'nope'",
+        ));
+    repo.bonsai(&repo.clone)
+        .args(["trim", "feat-a", "-f"])
+        .assert()
+        .success();
+    assert!(!path.join("node_modules").exists());
+    repo.bonsai(&repo.clone)
+        .args(["trim", "-y"])
+        .assert()
+        .success()
+        .stderr(predicate::str::contains("nothing to trim"));
+}
+
+#[test]
+fn trim_all_spans_projects_from_anywhere() {
+    let repo = TestRepo::new();
+    repo.commit_files(&[(".gitignore", "target/\n")]);
+    let path = repo.add("feat-all");
+    std::fs::create_dir_all(path.join("target")).unwrap();
+    std::fs::write(path.join("target/out"), "x").unwrap();
+    repo.bonsai(&repo.dir)
+        .args(["trim", "--all", "--yes"])
+        .assert()
+        .success()
+        .stderr(predicate::str::contains(": feat-all] trimmed"));
+    assert!(!path.join("target").exists());
+}
+
+#[test]
+fn remove_deletes_ignored_content_with_the_worktree() {
+    let repo = TestRepo::new();
+    repo.commit_files(&[(".gitignore", "node_modules/\ntarget/\n.env\n")]);
+    let path = add_with_ignored_files(&repo, "feat-heavy");
+    std::fs::remove_file(path.join("notes.txt")).unwrap();
+    // Ignored files never make a worktree dirty.
+    repo.bonsai(&repo.clone)
+        .args(["remove", "feat-heavy"])
+        .assert()
+        .success();
+    assert!(!path.exists());
+    assert!(!repo.worktree_list().contains("feat-heavy"));
+}
+
+#[test]
+fn prune_dry_run_reports_without_pruning() {
+    let repo = TestRepo::new();
+    let path = repo.add("feat-gone");
+    std::fs::remove_dir_all(&path).unwrap();
+    let report = json_of(
+        &repo
+            .bonsai(&repo.clone)
+            .args(["prune", "--dry-run", "--json"])
+            .output()
+            .unwrap(),
+    );
+    assert_eq!(report["dry_run"], true);
+    assert_eq!(PathBuf::from(report["stale"][0].as_str().unwrap()), path);
+    assert!(repo.worktree_list().contains("feat-gone"));
+    let report = json_of(
+        &repo
+            .bonsai(&repo.clone)
+            .args(["prune", "-y", "--json"])
+            .output()
+            .unwrap(),
+    );
+    assert_eq!(PathBuf::from(report["stale"][0].as_str().unwrap()), path);
+    assert!(!repo.worktree_list().contains("feat-gone"));
+}
+
+/// A child process killed when the test ends, even on failure.
+struct KillOnDrop(std::process::Child);
+
+impl Drop for KillOnDrop {
+    fn drop(&mut self) {
+        let _ = self.0.kill();
+        let _ = self.0.wait();
+    }
+}
+
+/// A process named like a coding agent (`sleep` under the name `claude`),
+/// working in `dir`.
+#[cfg(unix)]
+fn fake_agent(repo: &TestRepo, dir: &Path) -> KillOnDrop {
+    let agent = repo.fake_bin_dir().join("claude");
+    if !agent.exists() {
+        std::os::unix::fs::symlink(which("sleep").unwrap(), &agent).unwrap();
+    }
+    let child = StdCommand::new(agent)
+        .arg("60")
+        .current_dir(dir)
+        .spawn()
+        .unwrap();
+    KillOnDrop(child)
+}
+
+#[cfg(unix)]
+#[test]
+fn running_agents_are_listed_and_protect_their_worktrees() {
+    let repo = TestRepo::new();
+    repo.commit_files(&[(".gitignore", "node_modules/\n")]);
+    let busy = repo.add("feat-busy");
+    std::fs::create_dir_all(busy.join("node_modules")).unwrap();
+    std::fs::write(busy.join("node_modules/dep.js"), "x").unwrap();
+    let _agent = fake_agent(&repo, &busy.join("node_modules"));
+
+    let mut listed = serde_json::Value::Null;
+    for _ in 0..50 {
+        listed = json_of(
+            &repo
+                .bonsai(&repo.clone)
+                .args(["ps", "--json"])
+                .output()
+                .unwrap(),
+        );
+        if !listed.as_array().unwrap().is_empty() {
+            break;
+        }
+        std::thread::sleep(std::time::Duration::from_millis(50));
+    }
+    let agent = &listed[0];
+    assert_eq!(agent["kind"], "claude", "{listed}");
+    assert_eq!(agent["branch"], "feat-busy");
+    assert_eq!(PathBuf::from(agent["worktree"].as_str().unwrap()), busy);
+    repo.bonsai(&repo.clone)
+        .arg("ps")
+        .assert()
+        .success()
+        .stdout(predicate::str::contains("claude").and(predicate::str::contains("feat-busy")));
+
+    repo.bonsai(&repo.clone)
+        .args(["remove", "feat-busy"])
+        .assert()
+        .failure()
+        .stderr(predicate::str::contains("running agent: claude"));
+    repo.bonsai(&repo.clone)
+        .args(["trim", "--yes"])
+        .assert()
+        .success()
+        .stderr(predicate::str::contains(
+            "[feat-busy] skipped: agent running: claude",
+        ));
+    repo.bonsai(&repo.clone)
+        .args(["clean", "--yes", "--no-fetch"])
+        .assert()
+        .success()
+        .stderr(predicate::str::contains("agent running: claude"));
+    assert!(busy.join("node_modules/dep.js").exists());
+
+    repo.bonsai(&repo.clone)
+        .args(["remove", "feat-busy", "--force"])
+        .assert()
+        .success();
+    assert!(!busy.exists());
+}
+
+#[test]
+fn bare_bonsai_without_a_terminal_prints_grouped_help() {
+    let repo = TestRepo::new();
+    repo.bonsai(&repo.clone).assert().code(2).stderr(
+        predicate::str::contains("Free disk and tidy up:")
+            .and(predicate::str::contains("trim [TARGETS]..."))
+            .and(predicate::str::contains("open hq")),
+    );
+}

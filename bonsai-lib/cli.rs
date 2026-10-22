@@ -30,6 +30,101 @@ Configuration precedence, low to high: built-in defaults,
 ~/.config/bonsai/config.toml, <repo>/.bonsai.toml, `git config bonsai.*`,
 BONSAI_* environment variables, command-line flags.";
 
+/// Task-oriented command groups for the top-level help; every subcommand
+/// belongs to exactly one (enforced by a test).
+const GROUPS: &[(&str, &[&str])] = &[
+    (
+        "Work with worktrees and agents",
+        &["hq", "add", "cd", "list", "ps", "start", "resume"],
+    ),
+    (
+        "Free disk and tidy up",
+        &["trim", "remove", "clean", "prune"],
+    ),
+    (
+        "Setup",
+        &["init", "workspace", "skill", "agents", "completions"],
+    ),
+];
+
+const HQ_NOTE: &str = "\
+Run `bonsai` alone in a terminal to open hq: every project and worktree with
+its running agents, status, and sizes, and one key per command.";
+
+const BULK_NOTE: &str = "\
+Bulk commands (trim, clean, prune) print a plan and confirm before deleting:
+-n/--dry-run previews, -y/--yes skips the prompt, and --json reports. Like
+every command, -a/--all spans every project.";
+
+/// The clap command with the grouped overview as its help template.
+pub fn command() -> clap::Command {
+    let command = <Cli as clap::CommandFactory>::command();
+    let template = format!(
+        "{{before-help}}{{about-with-newline}}\n{{usage-heading}} {{usage}}\n\n{HQ_NOTE}\n\n{}{BULK_NOTE}\n\nOptions:\n{{options}}{{after-help}}",
+        overview(&command)
+    );
+    command.help_template(template)
+}
+
+fn overview(command: &clap::Command) -> String {
+    let rows: Vec<Vec<(String, String)>> = GROUPS
+        .iter()
+        .map(|(_, names)| {
+            names
+                .iter()
+                .filter_map(|name| command.find_subcommand(name))
+                .map(|sub| {
+                    let about = sub.get_about().map(|a| a.to_string()).unwrap_or_default();
+                    (signature(sub), about)
+                })
+                .collect()
+        })
+        .collect();
+    let width = rows
+        .iter()
+        .flatten()
+        .map(|(signature, _)| signature.len())
+        .max()
+        .unwrap_or(0);
+    let mut out = String::new();
+    for ((title, _), rows) in GROUPS.iter().zip(rows) {
+        out.push_str(&format!("{title}:\n"));
+        for (signature, about) in rows {
+            out.push_str(&format!("  {signature:width$}  {about}\n"));
+        }
+        out.push('\n');
+    }
+    out
+}
+
+/// `trim [TARGETS]...`, `init <SHELL>`, `skill [COMMAND]`.
+fn signature(command: &clap::Command) -> String {
+    let mut parts = vec![command.get_name().to_string()];
+    for arg in command.get_positionals() {
+        let name = arg
+            .get_value_names()
+            .and_then(|names| names.first())
+            .map(|name| name.to_string())
+            .unwrap_or_else(|| arg.get_id().as_str().to_uppercase());
+        let mut part = if arg.is_required_set() {
+            format!("<{name}>")
+        } else {
+            format!("[{name}]")
+        };
+        if arg
+            .get_num_args()
+            .is_some_and(|range| range.max_values() > 1)
+        {
+            part.push_str("...");
+        }
+        parts.push(part);
+    }
+    if command.has_subcommands() {
+        parts.push("[COMMAND]".to_string());
+    }
+    parts.join(" ")
+}
+
 const ADD_LONG: &str = "\
 Create a worktree and cd into it (prints the path without the shell wrapper).
 Existing branch names are preserved exactly. New branch inputs are slugified
@@ -137,6 +232,46 @@ Examples:
   bonsai clean --yes            # no confirmation (scripts, agents)
   bonsai clean -f               # same: --force is an alias of --yes
   bonsai clean -a --dry-run     # every project";
+
+const TRIM_LONG: &str = "\
+Free disk space by deleting what git ignores (node_modules, target, .venv,
+build output, caches) from Bonsai-managed worktrees. Worktrees, branches,
+tracked files, and untracked files stay.
+
+Without arguments, every Bonsai-managed worktree of the current project is
+planned (-a/--all, the default outside a repo: of every project); branches
+or exact checkout paths narrow it. The main checkout, external worktrees,
+and worktrees another coding agent is working in (see `bonsai ps`) are
+never touched.
+
+Kept even when ignored, with everything inside them: nested repositories,
+local state no rebuild restores (.env*, .envrc, *.local, *.local.*,
+*.sqlite, *.sqlite3, *.db, *.tfstate*, *.tfvars, *.key, *.pem, *.p12,
+.idea, .vscode), and [add] copy and [trim] keep globs. Like gitignore
+patterns, a glob without `/` matches a name at any depth. Other ignored
+files are deleted, so review the plan: it shows the largest paths with
+their disk usage, --dry-run lists every path, and --json details them all.
+Measuring and deleting fan out across cores.
+
+Examples:
+  bonsai trim --dry-run         # how much would be reclaimed, and where
+  bonsai trim                   # confirm per worktree, then delete
+  bonsai trim fix-parser -y     # one worktree, no prompt
+  bonsai trim -a --yes          # every project";
+
+const PS_LONG: &str = "\
+List the coding agents running on this machine (Claude Code, Codex,
+OpenCode, Cursor Agent, Gemini CLI, Copilot, Amp, Aider, Goose, Crush, Qwen
+Code, Pi) with the checkout each one works in, its pid, and its uptime.
+Inside a repository, only agents working in its checkouts are listed; with
+-a/--all (the default outside a repo), every agent is, labelled
+`<repo-id>: <branch>` when it works in a known checkout and by directory
+otherwise. --json outputs an array of {kind, pid, cwd, started, caller,
+worktree, branch, repo?}.
+
+Agents launched through npm or bun count once, as their outermost process.
+remove refuses, and clean and trim skip, worktrees another agent is working
+in; an agent running bonsai itself never blocks its own request.";
 
 const CD_LONG: &str = "\
 Jump to a worktree. With the shell wrapper this cds; without it the target
@@ -319,13 +454,14 @@ pub struct Cli {
     #[arg(long, global = true, value_name = "NAME")]
     pub remote: Option<String>,
 
+    /// Omitted on a terminal: open hq
     #[command(subcommand)]
-    pub command: Commands,
+    pub command: Option<Commands>,
 }
 
 #[derive(Debug, Subcommand)]
 pub enum Commands {
-    /// Browse worktrees in the terminal
+    /// Browse and manage worktrees and their agents in the terminal
     #[command(long_about = HQ_LONG)]
     Hq {
         /// Print the worktree inventory as JSON and exit
@@ -402,13 +538,38 @@ pub enum Commands {
     /// Clean up stale registrations, orphaned directories, and empty dirs
     #[command(long_about = PRUNE_LONG)]
     Prune {
+        /// Show what would be pruned without touching anything
+        #[arg(short = 'n', long)]
+        dry_run: bool,
+        /// Do not ask for confirmation
+        #[arg(short = 'y', long, visible_short_alias = 'f', visible_alias = "force")]
+        yes: bool,
+        /// Output the plan/result as JSON on stdout
+        #[arg(long)]
+        json: bool,
         /// Prune every project and sweep the whole bonsai root, including
         /// repos whose clone is gone
         #[arg(short, long)]
         all: bool,
+    },
+    /// Delete ignored files (node_modules, target, ...); worktrees stay
+    #[command(long_about = TRIM_LONG)]
+    Trim {
+        /// Branches or exact managed paths to trim (default: every
+        /// Bonsai-managed worktree in scope)
+        targets: Vec<String>,
+        /// Show what would be deleted without touching anything
+        #[arg(short = 'n', long)]
+        dry_run: bool,
         /// Do not ask for confirmation
         #[arg(short = 'y', long, visible_short_alias = 'f', visible_alias = "force")]
         yes: bool,
+        /// Output the plan/result as JSON on stdout
+        #[arg(long)]
+        json: bool,
+        /// Trim every project
+        #[arg(short, long)]
+        all: bool,
     },
     /// Remove worktrees merged into the default branch (incl. squash-merges)
     #[command(long_about = CLEAN_LONG)]
@@ -428,6 +589,16 @@ pub enum Commands {
         /// Clean every project
         #[arg(short, long)]
         all: bool,
+    },
+    /// List running coding agents and the worktrees they work in
+    #[command(long_about = PS_LONG)]
+    Ps {
+        /// Every agent on this machine, not only this project's
+        #[arg(short, long)]
+        all: bool,
+        /// Output JSON instead of aligned columns
+        #[arg(long)]
+        json: bool,
     },
     /// Jump to a worktree (fuzzy; every project with -a or outside a repo)
     #[command(long_about = CD_LONG)]
@@ -481,4 +652,45 @@ pub enum Commands {
         /// Shell flavor to emit
         shell: clap_complete::Shell,
     },
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn every_command_belongs_to_exactly_one_help_group() {
+        let command = <Cli as clap::CommandFactory>::command();
+        let grouped: Vec<&str> = GROUPS
+            .iter()
+            .flat_map(|(_, names)| names.iter().copied())
+            .collect();
+        for sub in command.get_subcommands() {
+            let name = sub.get_name();
+            assert_eq!(
+                grouped.iter().filter(|grouped| **grouped == name).count(),
+                1,
+                "{name} must appear in exactly one help group"
+            );
+        }
+        assert_eq!(grouped.len(), command.get_subcommands().count());
+    }
+
+    #[test]
+    fn overview_shows_each_signature_with_its_description() {
+        let help = command().render_help().to_string();
+        for sub in <Cli as clap::CommandFactory>::command().get_subcommands() {
+            let signature = signature(sub);
+            let about = sub.get_about().unwrap().to_string();
+            assert!(
+                help.lines().any(|line| {
+                    let line = line.trim();
+                    line.starts_with(&signature) && line.ends_with(&about)
+                }),
+                "missing overview line for {signature}:\n{help}"
+            );
+        }
+        assert!(help.contains("trim [TARGETS]..."));
+        assert!(help.contains("init <SHELL>"));
+    }
 }

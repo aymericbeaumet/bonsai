@@ -32,12 +32,17 @@ request was squash-merged. bonsai does the bookkeeping:
 - **Safe cleanup.** `bonsai clean` detects merged *and* squash-merged
   branches, shows the plan before acting, and never touches a worktree with
   uncommitted changes.
-- **A headquarters.** `bonsai hq` shows every project with its checkouts,
-  uncommitted changes, upstream state, and disk size, and runs all of the
-  above from one screen with vim keys.
+- **Free disk, keep your work.** `bonsai trim` deletes what git ignores
+  (`node_modules`, `target`, `.venv`, build caches) across worktrees on every
+  core, and keeps worktrees, branches, local config, and databases.
+- **A headquarters.** `bonsai` (or `bonsai hq`) shows every project with its
+  checkouts, running coding agents, uncommitted changes, upstream state, and
+  disk size, and runs all of the above from one screen with vim keys.
 - **Ready for coding agents.** Idempotent commands, `--json` output, and a
   bundled [Agent Skill](docs/agents.md) for Claude Code, Codex, OpenCode, and
-  Cursor. `bonsai resume` finds agent sessions across all your worktrees.
+  Cursor. `bonsai ps` shows which agent works in which worktree, removal and
+  cleanup never pull a worktree from under a running agent, and
+  `bonsai resume` finds agent sessions across all your worktrees.
 - **Editor-friendly.** Maintained `.code-workspace` files show every worktree
   in VS Code, Cursor, and other VS Code derivatives.
 
@@ -93,11 +98,13 @@ bonsai add fix-parser   # branch + worktree from the latest default branch, cd i
 bonsai cd               # fuzzy-jump between worktrees
 bonsai list             # show this repository's worktrees
 bonsai clean            # once merged: remove the worktree and delete the branch
+bonsai trim             # free node_modules, target, ... in the worktrees you keep
+bonsai                  # hq: every worktree with its agents, changes, and size
 ```
 
-Leave out an argument and commands open a fuzzy picker. Run `bonsai hq` to
-see every project and worktree with its changes and size, and act on them
-from one screen.
+Leave out an argument and commands open a fuzzy picker. Run `bonsai` alone
+to see every project and worktree with its agents, changes, and size, and
+act on them from one screen.
 
 ## Commands
 
@@ -108,14 +115,18 @@ from one screen.
 | `bonsai list` | List the repository's worktrees (`--status`, `--json`) |
 | `bonsai remove [branch…]` | Remove worktrees; `-d` also deletes their branches |
 | `bonsai clean` | Remove merged and squash-merged worktrees and their branches |
+| `bonsai trim [branch…]` | Delete ignored files (`node_modules`, `target`, ...); worktrees stay |
 | `bonsai prune` | Tidy stale registrations and orphaned directories |
-| `bonsai hq` | See and manage every project and worktree in a terminal UI |
+| `bonsai` / `bonsai hq` | See and manage every project, worktree, and agent in a terminal UI |
+| `bonsai ps` | List running coding agents and the worktree each works in |
 | `bonsai start` / `resume` | Start or resume Claude Code, Codex, or OpenCode sessions |
 | `bonsai workspace` | Print the `.code-workspace` file for VS Code-style editors |
 | `bonsai skill` / `agents` | Teach your coding agents to use bonsai |
 
 `-a` widens most commands to every project, and every command has a detailed
-`--help`. See the [command reference](docs/commands.md).
+`--help`; `bonsai --help` groups them by task. `trim`, `clean`, and `prune`
+share `-n`/`--dry-run`, `-y`/`--yes`, and `--json`. See the
+[command reference](docs/commands.md).
 
 ## Documentation
 

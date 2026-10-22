@@ -101,6 +101,8 @@ const POSIX_WRAPPER: &str = r#"bonsai() {
   local out code last arg skip capture
   skip=0
   capture=0
+  # Bare `bonsai` opens hq, which can cd like `bonsai hq`.
+  (( $# )) || capture=1
   for arg in "$@"; do
     if (( skip )); then
       skip=0
@@ -149,6 +151,10 @@ const BASH_COMPLETIONS: &str = r#"eval "$(command bonsai completions bash)"
 const FISH_WRAPPER: &str = r#"function bonsai
     set -l skip 0
     set -l capture 0
+    # Bare `bonsai` opens hq, which can cd like `bonsai hq`.
+    if test (count $argv) -eq 0
+        set capture 1
+    end
     for arg in $argv
         if test $skip -eq 1
             set skip 0

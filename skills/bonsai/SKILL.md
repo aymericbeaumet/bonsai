@@ -1,6 +1,6 @@
 ---
 name: bonsai
-description: Manage git worktrees with the bonsai CLI - create isolated per-branch worktrees outside the repo, jump between them, and clean up merged ones. Use when working on a branch in isolation, parallelizing tasks across worktrees, or tidying up worktrees and branches.
+description: Manage git worktrees with the bonsai CLI - create isolated per-branch worktrees outside the repo, jump between them, see which agents work where, and clean up merged ones or their disk usage. Use when working on a branch in isolation, parallelizing tasks across worktrees, or tidying up worktrees, branches, and disk space.
 ---
 
 ## Git worktrees (bonsai)
@@ -41,10 +41,16 @@ path=$(bonsai add <branch>)     # create or reuse; prints absolute path; idempot
 cd "$path"                      # then work inside the worktree
 bonsai add <branch> --base HEAD # stack on the checkout you run it from
 bonsai list --json              # this repo's worktrees, machine-readable
+bonsai ps --json                # coding agents running in this repo's worktrees
 bonsai remove <branch> [-d]     # drop the worktree (keep branch unless -d)
 bonsai clean --dry-run --json   # inspect merged/squash-merged branches
 bonsai clean --yes              # execute when cleanup is authorized
+bonsai trim --dry-run --json    # inspect reclaimable ignored files
+bonsai trim --yes               # execute when freeing disk is authorized
 ```
+
+The bulk commands `trim`, `clean`, and `prune` share flags: `--dry-run`
+plans, `--json` reports, and `--yes` skips the prompt.
 
 ### Invariants
 
@@ -76,15 +82,27 @@ bonsai clean --yes              # execute when cleanup is authorized
   in scope. A fresh worktree with no commits can qualify; exclude active work
   from the intended cleanup. For named targets or a subset of the plan, use
   `bonsai remove <branch>`; add `-d` only when branch deletion is intended.
-- `prune` has no dry-run mode. Inspect registrations and candidate directory
-  contents before deleting orphans, which may contain uncommitted work.
-  Keep `-a`/`--all`, and runs outside a repo, which span repositories,
-  within the user's scope.
-- On `clean` and `prune`, `--force` is an alias of `--yes`: it skips the
-  prompt. `clean` still skips dirty worktrees. On `remove`, `--force` can
-  discard uncommitted files and, with `-d`, delete an unmerged branch. Use
-  it only when that data loss is authorized; a refusal alone is not
-  authorization to force removal.
+- `trim` deletes git-ignored files (dependencies, build output, caches) from
+  Bonsai-managed worktrees. It keeps worktrees, branches, tracked and
+  untracked files, nested repositories, and common local state (`.env*`,
+  databases, keys, Terraform state; see `bonsai trim --help`), but other
+  ignored files are lost, so read the `--dry-run --json` plan. A request to
+  free disk space or trim authorizes `--yes` within the planned scope; name
+  branches to narrow it, and ask before deleting plan entries that look like
+  irreplaceable local data.
+- Inspect `prune --dry-run --json` before deleting orphaned directories,
+  which may contain uncommitted work. Keep `-a`/`--all`, and runs outside a
+  repo, which span repositories, within the user's scope.
+- Other agents' worktrees are protected: `remove` refuses, and `clean` and
+  `trim` skip, a worktree where `bonsai ps` shows another agent working.
+  Report the skip; do not stop that agent or force removal unless the user
+  asked for it. Your own worktree never blocks your request.
+- On `trim`, `clean`, and `prune`, `--force` is an alias of `--yes`: it
+  skips the prompt. `clean` still skips dirty worktrees. On `remove`,
+  `--force` can discard uncommitted files, remove a worktree another agent
+  is working in, and, with `-d`, delete an unmerged branch. Use it only when
+  that data loss is authorized; a refusal alone is not authorization to
+  force removal.
 - If authorization is missing, prepare the candidate list before asking
   about the specific removal or data loss. Do not expand a cleanup request
   to unrelated worktrees or repositories.
@@ -92,9 +110,9 @@ bonsai clean --yes              # execute when cleanup is authorized
 ### Verify the result
 
 After adding a worktree, use the returned path and confirm its branch before
-editing. After cleanup or removal, inspect `bonsai list --json` and the
-command's report; report removed targets, skipped worktrees, and failures
-accurately.
+editing. After cleanup, trimming, or removal, inspect `bonsai list --json`
+and the command's report; report removed targets, reclaimed space, skipped
+worktrees (dirty, missing, or in use by an agent), and failures accurately.
 If an operation partly succeeds, inspect the remaining state before retrying.
 Read dependency-install warnings on stderr even when `add` succeeds.
 

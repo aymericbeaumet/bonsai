@@ -7,15 +7,16 @@ use bonsai::config::Config;
 use bonsai::output;
 use bonsai::process;
 use bonsai::{git, hq, repo, scope, shell, workspace};
-use clap::{CommandFactory, Parser};
+use clap::{CommandFactory, FromArgMatches};
 
 /// The canonical skill, embedded so `cargo install` distributes it.
 const SKILL_MD: &str = include_str!("../skills/bonsai/SKILL.md");
 
 fn main() {
     shell::warn_if_stale_integration();
-    let cli = Cli::parse();
-    let json_report = matches!(&cli.command, Commands::Clean { json: true, .. });
+    let cli =
+        Cli::from_arg_matches(&bonsai::cli::command().get_matches()).unwrap_or_else(|e| e.exit());
+    let json_report = matches!(&cli.command, Some(Commands::Clean { json: true, .. }));
     let result = run(cli).and_then(|target| match target {
         Some(path) => emit_cd(&path),
         None => Ok(()),
@@ -46,21 +47,26 @@ fn run(cli: Cli) -> Result<Option<PathBuf>> {
     }
     // Shell plumbing needs no repo or config.
     match &cli.command {
-        Commands::Init { shell } => {
+        // Without a terminal there is no hq: explain the commands instead.
+        None if !bonsai::picker::is_interactive() => {
+            eprint!("{}", bonsai::cli::command().render_help());
+            std::process::exit(2);
+        }
+        Some(Commands::Init { shell }) => {
             output::write(format_args!("{}", shell::init_script(*shell)))?;
             return Ok(None);
         }
-        Commands::Completions { shell } => {
+        Some(Commands::Completions { shell }) => {
             let mut generated = Vec::new();
             clap_complete::generate(*shell, &mut Cli::command(), "bonsai", &mut generated);
             output::write(format_args!("{}", String::from_utf8(generated)?))?;
             return Ok(None);
         }
-        Commands::Agents => {
+        Some(Commands::Agents) => {
             commands::agents::run(SKILL_MD)?;
             return Ok(None);
         }
-        Commands::Skill { action } => {
+        Some(Commands::Skill { action }) => {
             match action {
                 None => commands::skill::show(SKILL_MD)?,
                 Some(SkillAction::Install { all }) => commands::skill::install(SKILL_MD, *all)?,
@@ -97,7 +103,10 @@ fn run(cli: Cli) -> Result<Option<PathBuf>> {
     });
     let scope = |all: bool| scope::Scope::resolve(&config, current, all, cli.remote.as_deref());
 
-    match cli.command {
+    let Some(command) = cli.command else {
+        return hq::run(&config, false, !in_repo);
+    };
+    match command {
         Commands::Hq { json, all } => hq::run(&config, json, all || !in_repo),
         Commands::Start {
             provider,
@@ -126,9 +135,31 @@ fn run(cli: Cli) -> Result<Option<PathBuf>> {
             force,
             all,
         } => commands::remove::run(&config, &scope(all), branches, delete_branch, force),
-        Commands::Prune { all, yes } => {
-            commands::prune::run(&config, &scope(all), yes).map(|_| None)
-        }
+        Commands::Prune {
+            dry_run,
+            yes,
+            json,
+            all,
+        } => commands::prune::run(
+            &config,
+            &scope(all),
+            commands::prune::Options { dry_run, yes, json },
+        )
+        .map(|_| None),
+        Commands::Trim {
+            targets,
+            dry_run,
+            yes,
+            json,
+            all,
+        } => commands::trim::run(
+            &config,
+            &scope(all),
+            targets,
+            commands::trim::Options { dry_run, yes, json },
+        )
+        .map(|_| None),
+        Commands::Ps { all, json } => commands::ps::run(&scope(all), json).map(|_| None),
         Commands::Clean {
             dry_run,
             yes,

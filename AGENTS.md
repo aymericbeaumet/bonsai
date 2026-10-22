@@ -109,6 +109,13 @@
 - Cwd recovery belongs to operation outcomes, including partial failures.
   Unwrapped `clean --json` carries recovery inside its single JSON document;
   shell-wrapped navigation uses the sentinel protocol.
+- Destructive commands share their safety decisions: `agents::busy` for
+  worktrees another coding agent works in (`remove` refuses, `clean` and
+  `trim` skip; the agent running bonsai is exempt), and `ignored::Keep` for
+  ignored paths `trim` and removal never delete. Reuse them in new paths.
+- Give every subcommand exactly one `GROUPS` entry in `bonsai-lib/cli.rs`;
+  the top-level help is generated from it. Bulk commands (`trim`, `clean`,
+  `prune`) share `-n/--dry-run`, `-y/--yes` (alias `-f`), and `--json`.
 - `REQUIRE_TEST_SHELLS=1` makes Bash/Zsh/Fish coverage mandatory.
 - Release PTY checks are in `tests/terminal.py`; scalable disposable benchmarks
   are in `scripts/benchmark.py`. The two real package-manager CLI tests are

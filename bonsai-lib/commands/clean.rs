@@ -27,10 +27,12 @@ impl Reason {
 }
 
 /// Why an integrated worktree is kept anyway.
-#[derive(Debug, Clone, Copy)]
+#[derive(Debug, Clone)]
 enum Hold {
     Dirty,
     Missing,
+    /// Another coding agent works in it (who, for the report).
+    Agent(String),
 }
 
 /// Facts about a branch, gathered up front so the decision itself is pure.
@@ -73,6 +75,8 @@ struct JsonReport {
     planned: Vec<JsonEntry>,
     skipped_dirty: Vec<JsonEntry>,
     skipped_missing: Vec<JsonEntry>,
+    /// Worktrees another coding agent is working in.
+    skipped_agents: Vec<JsonEntry>,
     removed: Vec<String>,
     deleted_branches: Vec<String>,
     failures: Vec<String>,
@@ -357,6 +361,7 @@ fn plan(
             worktrees.len(),
         );
     }
+    let running = crate::agents::running();
     let checks = parallel::map_ordered(&worktrees, |wt| {
         let branch = wt.branch.clone()?;
         if branch == default
@@ -378,8 +383,11 @@ fn plan(
         let reason = classify(facts)?;
         // A deleted directory cannot be inspected; keep it for an explicit
         // `bonsai remove` rather than deleting its branch unseen.
+        let busy = crate::agents::busy(&running, &wt.path);
         let hold = if wt.is_missing() {
             Some(Hold::Missing)
+        } else if !busy.is_empty() {
+            Some(Hold::Agent(crate::agents::describe(&busy)))
         } else {
             is_dirty(wt).then_some(Hold::Dirty)
         };
@@ -393,11 +401,12 @@ fn plan(
             continue;
         };
         let (why, skipped) = match hold {
-            Hold::Dirty => ("uncommitted changes", &mut report.skipped_dirty),
+            Hold::Dirty => ("uncommitted changes".to_string(), &mut report.skipped_dirty),
             Hold::Missing => (
-                "directory missing; use 'bonsai remove' to drop it",
+                "directory missing; use 'bonsai remove' to drop it".to_string(),
                 &mut report.skipped_missing,
             ),
+            Hold::Agent(who) => (format!("agent running: {who}"), &mut report.skipped_agents),
         };
         eprintln!(
             "bonsai: [{}] skipped ({}): {why}",

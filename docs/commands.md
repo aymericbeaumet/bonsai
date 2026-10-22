@@ -11,6 +11,25 @@ scope, and commands that need one project (`add`, `start`) prompt for it.
 `-C <dir>` (`--cwd`) runs bonsai as if it was started in `<dir>`, like
 `git -C`, and composes with `-a`.
 
+`bonsai --help` groups the commands by task: working with worktrees and
+agents, freeing disk and tidying up, and setup. Run `bonsai` alone on a
+terminal to open [hq](hq.md); without a terminal it prints that help.
+
+The bulk commands `trim`, `clean`, and `prune` share one contract: they print
+a plan and confirm before deleting; `-n`/`--dry-run` previews, `-y`/`--yes`
+(alias `-f`/`--force`) skips the prompt, and `--json` reports the plan and
+result. `remove` acts on named targets instead; its `--force` is the only
+flag that discards uncommitted work.
+
+| I want to… | Run |
+|---|---|
+| start on a branch | `bonsai add <branch>` |
+| see what exists, what changed, what weighs what | `bonsai` (hq), or `bonsai list --status` and `bonsai trim -n` |
+| see which coding agents run where | `bonsai ps` (`-a` for every project) |
+| reclaim disk but keep my worktrees | `bonsai trim` |
+| delete worktrees I am done with | `bonsai clean` (merged ones) or `bonsai remove <branch>` |
+| fix leftovers after deleting directories by hand | `bonsai prune` |
+
 ## Reference
 
 | Command | Description |
@@ -18,10 +37,12 @@ scope, and commands that need one project (`add`, `start`) prompt for it.
 | `bonsai add [branch]` | Preserve an existing branch name, or slugify a new name (preserving `/`), fetch the remote, then create a worktree under the bonsai root and cd into it. New branches start from the latest default branch; remote branches get a local tracking branch. No argument opens a fuzzy prompt (type a new name to create it). If the worktree's directory was deleted by hand, `add` recreates it. `-a` picks the project first. |
 | `bonsai cd [query]` | Fuzzy-jump between registered worktrees, including external ones, listed most recently worked-in first with a color-coded last-change age (green = today, yellow = this week, dim = older). `-a` jumps across every project. |
 | `bonsai list` (`ls`) | List every Git-registered worktree for the current repo, including external worktrees created by other tools. `-a` lists every project, prefixed by repo id; `--status` adds a dirty marker. |
-| `bonsai remove [branch-or-path…]` (`rm`) | Remove worktrees (fuzzy multi-pick without arguments). Exact managed paths also support detached worktrees. Keeps the branch unless `-d`; `--force` discards uncommitted changes. Safe to run from inside the worktree being removed. With `-a`, a branch selects its worktree in every project. |
-| `bonsai clean` | Remove worktrees whose branches are merged or squash-merged into the default branch, then delete those branches. A missing upstream alone never proves integration. Fetches `--prune` first (`--no-fetch` to skip), always shows the plan, `-n`/`--dry-run`, `-y`/`--yes` (alias `-f`/`--force`). Dirty worktrees are never touched, and worktrees whose directory was deleted are skipped (drop them with `remove`). `-a` confirms one combined plan for every project. |
-| `bonsai prune` | Clean up stale worktree registrations, orphaned directories, and empty dirs. `-a` prunes every project and sweeps the whole root, including worktrees of repos whose clone was deleted. |
-| `bonsai hq` | Browse the current project, or every project with `-a`, in the terminal: checkouts, uncommitted changes, upstream state, and disk size, with vim keys. Add, remove, clean, prune, fetch, open an editor or a coding agent, or cd into a checkout without leaving it. `--json` prints the inventory and exits. See [Headquarters](hq.md). |
+| `bonsai remove [branch-or-path…]` (`rm`) | Remove worktrees (fuzzy multi-pick without arguments). Exact managed paths also support detached worktrees. Keeps the branch unless `-d`; `--force` discards uncommitted changes and removes a worktree another coding agent is working in, which is otherwise refused. Ignored files are deleted across cores before Git removes the rest. Safe to run from inside the worktree being removed. With `-a`, a branch selects its worktree in every project. |
+| `bonsai clean` | Remove worktrees whose branches are merged or squash-merged into the default branch, then delete those branches. A missing upstream alone never proves integration. Fetches `--prune` first (`--no-fetch` to skip), always shows the plan, `-n`/`--dry-run`, `-y`/`--yes` (alias `-f`/`--force`), `--json`. Dirty worktrees and worktrees another coding agent is working in are never touched, and worktrees whose directory was deleted are skipped (drop them with `remove`). `-a` confirms one combined plan for every project. |
+| `bonsai trim [branch-or-path…]` | Delete what git ignores (`node_modules`, `target`, `.venv`, build output, caches) from Bonsai-managed worktrees to free disk; worktrees, branches, tracked and untracked files stay. Kept even when ignored: nested repositories, local state no rebuild restores (`.env*`, `.envrc`, `*.local*`, databases, Terraform state, keys, IDE settings), and `[add] copy` and [`[trim] keep`](configuration.md) globs, at any depth for globs without `/`. Never touches the main checkout, external worktrees, or worktrees another agent works in. The plan shows sizes; `-n` lists every path. `-a` trims every project. |
+| `bonsai prune` | Clean up stale worktree registrations, orphaned directories, and empty dirs. `-n`/`--dry-run` lists them without changing anything, `--json` reports them. `-a` prunes every project and sweeps the whole root, including worktrees of repos whose clone was deleted. |
+| `bonsai` / `bonsai hq` | Browse the current project, or every project with `-a`, in the terminal: checkouts, running coding agents, uncommitted changes, upstream state, and disk size, with vim keys. Add, remove, clean, trim, prune, fetch, open an editor or a coding agent, or cd into a checkout without leaving it. `--json` prints the inventory and exits. See [Headquarters](hq.md). |
+| `bonsai ps` | List running coding agents (Claude Code, Codex, OpenCode, Cursor Agent, Gemini CLI, Copilot, Amp, Aider, Goose, Crush, Qwen Code, Pi) with the checkout each works in, its pid, and its uptime. `-a` lists every agent on the machine; `--json` for scripts. See [AI coding agents](agents.md#running-agents). |
 | `bonsai start [claude\|codex\|opencode]` | Start a new coding session in the current worktree. Choose among installed providers when omitted; a single installed provider is selected automatically. `--prompt` supplies an initial prompt. `-a` picks a worktree from any project first. |
 | `bonsai resume [query]` | Fuzzy-search one recent-first list of resumable top-level Claude Code, Codex, and OpenCode sessions across every registered worktree of the current project, then resume the selected harness in its original directory. `-a` searches every project. See [AI coding agents](agents.md#resume-sessions). |
 | `bonsai workspace` | Refresh and print the repo's `.code-workspace` file, including registered external worktrees: `code "$(bonsai workspace)"`. `-a` prints the global file. See [Desktop editors](editors.md). |
@@ -58,7 +79,7 @@ Bonsai root are treated as external. This makes an existing setup from another
 worktree manager immediately usable: `list`, `cd`, `resume`, status checks,
 and the per-project editor workspace include it. External worktrees are
 clearly labelled and remain read-only to Bonsai—`add` will not adopt or move
-one, and `remove`/`clean` never delete one. Registered worktrees anywhere under
+one, and `remove`/`clean`/`trim` never touch one. Registered worktrees anywhere under
 the global root remain Bonsai-managed even if the main checkout moves or the
 repository ID changes. New worktrees still use the current project's directory,
 and `bonsai add --path` is limited to that directory.
@@ -70,9 +91,17 @@ worktrees concurrently, `list --status` probes checkouts concurrently,
 `resume` scans provider stores and transcripts concurrently, global `cd` and
 workspace generation probe checkouts concurrently, `prune` deletes confirmed
 independent orphans concurrently, and `add` installs independent ecosystems
-together. Output remains deterministic and identifies concurrent contexts with
-labels such as `[branch]`, `[npm]`, or `[1/3]`. Operations that mutate shared
-Git metadata—worktree removal and branch deletion—remain sequential.
+together. File trees are measured and deleted across all cores: `trim` fans
+out over every ignored path, and removal deletes a worktree's ignored files
+(usually most of it) before Git removes the rest. Output remains
+deterministic and identifies concurrent contexts with labels such as
+`[branch]`, `[npm]`, or `[1/3]`. Operations that mutate shared Git
+metadata—unregistering worktrees and deleting branches—remain sequential.
+
+Coding agents are processes bonsai can see: `remove` refuses, and `clean` and
+`trim` skip, a worktree another agent is working in (`bonsai ps` lists
+them). An agent that runs bonsai itself never blocks its own request, so it
+can clean up after its finished task.
 
 Concurrent mutations in the same repository are guarded by an OS lock; a busy
 operation reports that you should retry. Global prune excludes concurrent
