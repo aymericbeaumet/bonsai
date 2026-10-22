@@ -717,7 +717,7 @@ struct Model {
     filtering: bool,
     /// Counts and two-key prefixes between keys, shared by every view.
     keys: keys::Keys,
-    /// How the home list groups projects; `t` and `T` step through these.
+    /// How the home list groups projects; `v` and `V` step through these.
     grouping: Grouping,
     /// `s` cycles this. Alphabetical is the order the list opens in.
     sort: Sort,
@@ -727,14 +727,13 @@ struct Model {
     chooser: Option<choice::Choice>,
     /// The `?` list of keys, scrolled like a pager.
     help: Option<keys::Pager>,
-    /// The latest command's output, full screen (`O`).
+    /// The latest command's output, full screen (`o`).
     output: Option<keys::Pager>,
     /// Output of the latest background command.
     pane: Option<jobs::Pane>,
     /// Checkout to select once the next reload finishes.
     select_after: Option<PathBuf>,
-    /// A clean or trim plan that arrived while you were typing, opened by
-    /// `C` or `x`.
+    /// A cleanup plan that arrived while typing, opened by its command key.
     ready_plan: Option<ReadyPlan>,
     /// Global options passed on to the commands hq starts.
     flags: Vec<OsString>,
@@ -793,7 +792,7 @@ impl Sort {
 }
 
 /// How the home list groups its rows, from the shortest list to the
-/// longest: each step adds one level. `t` moves to the next, `T` back.
+/// longest: each step adds one level. `v` moves to the next, `V` back.
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
 enum Grouping {
     /// One row per project.
@@ -807,7 +806,7 @@ enum Grouping {
 }
 
 impl Grouping {
-    /// In order of list length: the order `t` follows.
+    /// In order of list length: the order `v` follows.
     const ALL: [Self; 4] = [Self::Table, Self::Projects, Self::Owners, Self::Hosts];
 
     fn index(self) -> usize {
@@ -882,11 +881,16 @@ enum PlanKind {
 
 impl PlanKind {
     fn key(&self) -> &'static str {
-        match self {
-            Self::Clean { .. } => "C",
-            Self::Prune { .. } => "P",
-            Self::Trim { .. } => "x",
-        }
+        let command = match self {
+            Self::Clean { .. } => Cmd::Clean,
+            Self::Prune { .. } => Cmd::Prune,
+            Self::Trim { .. } => Cmd::Trim,
+        };
+        COMMANDS
+            .iter()
+            .find(|spec| spec.cmd == command)
+            .expect("every command has a shortcut")
+            .key
     }
 
     fn name(&self) -> &'static str {
@@ -966,7 +970,7 @@ const COMMANDS: &[CommandSpec] = &[
         aliases: &["rm"],
         args: "",
         hint: "remove worktrees in scope, keep their branches",
-        key: "dd",
+        key: "R",
         cmd: Cmd::Remove,
     },
     CommandSpec {
@@ -998,7 +1002,7 @@ const COMMANDS: &[CommandSpec] = &[
         aliases: &["free"],
         args: "",
         hint: "free disk: delete ignored files such as node_modules and target",
-        key: "x",
+        key: "T",
         cmd: Cmd::Trim,
     },
     CommandSpec {
@@ -1014,7 +1018,7 @@ const COMMANDS: &[CommandSpec] = &[
         aliases: &["agent"],
         args: "[claude|codex|opencode]",
         hint: "start a coding agent in the selected checkout",
-        key: "A",
+        key: "s",
         cmd: Cmd::Start,
     },
     CommandSpec {
@@ -1022,12 +1026,12 @@ const COMMANDS: &[CommandSpec] = &[
         aliases: &[],
         args: "[query]",
         hint: "resume a coding-agent session from here",
-        key: "R",
+        key: "r",
         cmd: Cmd::Resume,
     },
     CommandSpec {
-        name: "running",
-        aliases: &["agents", "ps"],
+        name: "ps",
+        aliases: &["running", "agents"],
         args: "[agent]",
         hint: "show only checkouts where a coding agent is running",
         key: "p",
@@ -1042,11 +1046,11 @@ const COMMANDS: &[CommandSpec] = &[
         cmd: Cmd::Edit,
     },
     CommandSpec {
-        name: "copy",
-        aliases: &["yank"],
+        name: "yank",
+        aliases: &["copy"],
         args: "",
         hint: "copy the selected checkout's path",
-        key: "yy",
+        key: "y",
         cmd: Cmd::Copy,
     },
     CommandSpec {
@@ -1054,7 +1058,7 @@ const COMMANDS: &[CommandSpec] = &[
         aliases: &["log"],
         args: "",
         hint: "show the latest command's output in full",
-        key: "O",
+        key: "o",
         cmd: Cmd::Output,
     },
     CommandSpec {
@@ -1062,7 +1066,7 @@ const COMMANDS: &[CommandSpec] = &[
         aliases: &["reload"],
         args: "",
         hint: "reload worktrees, status, and sizes",
-        key: "r",
+        key: "ctrl-r",
         cmd: Cmd::Refresh,
     },
     CommandSpec {
@@ -1070,15 +1074,15 @@ const COMMANDS: &[CommandSpec] = &[
         aliases: &[],
         args: "[name|recent|size]",
         hint: "change the order",
-        key: "s",
+        key: "ctrl-s",
         cmd: Cmd::Sort,
     },
     CommandSpec {
         name: "view",
         aliases: &["tree", "group"],
         args: "[table|projects|owners|hosts]",
-        hint: "show another view; t and T step through them",
-        key: "t",
+        hint: "show another view; v and V step through them",
+        key: "v",
         cmd: Cmd::Tree,
     },
     CommandSpec {
@@ -1098,6 +1102,32 @@ const COMMANDS: &[CommandSpec] = &[
         cmd: Cmd::Quit,
     },
 ];
+
+/// Resolve command shortcuts from the command palette definitions.
+fn shortcut(key: &KeyEvent) -> Option<Cmd> {
+    if key
+        .modifiers
+        .intersects(KeyModifiers::ALT | KeyModifiers::SUPER)
+    {
+        return None;
+    }
+    COMMANDS.iter().find_map(|spec| {
+        let (control, letter) = spec
+            .key
+            .strip_prefix("ctrl-")
+            .map_or((false, spec.key), |letter| (true, letter));
+        if control != key.modifiers.contains(KeyModifiers::CONTROL) {
+            return None;
+        }
+        let expected = letter.chars().next()?;
+        let matches = if control {
+            ctrl_letter(key, expected)
+        } else {
+            keys::shifted(key) == KeyCode::Char(expected)
+        };
+        matches.then_some(spec.cmd)
+    })
+}
 
 /// A command started from headquarters.
 #[derive(Debug)]
@@ -1249,7 +1279,7 @@ impl Model {
                 }
                 let own = match overlay {
                     Overlay::Help => '?',
-                    Overlay::Output => 'O',
+                    Overlay::Output => 'o',
                 };
                 let close = matches!(key.code, KeyCode::Esc | KeyCode::Char('q'))
                     || keys::shifted(&key) == KeyCode::Char(own)
@@ -1326,16 +1356,18 @@ impl Model {
     }
 
     fn on_normal_key(&mut self, key: KeyEvent) -> Effect {
-        let key = match self.keys.feed(key, &['d', 'y']) {
+        let key = match self.keys.feed(key, &[]) {
             keys::Input::Pending => return Effect::None,
             keys::Input::Motion(motion, count) => {
                 self.move_by(motion, count);
                 return Effect::None;
             }
-            keys::Input::Pair('d') => return self.command(Cmd::Remove, ""),
-            keys::Input::Pair(_) => return self.command(Cmd::Copy, ""),
+            keys::Input::Pair(_) => return Effect::None,
             keys::Input::Key(key, _) => key,
         };
+        if let Some(command) = shortcut(&key) {
+            return self.command(command, "");
+        }
         if key.modifiers.contains(KeyModifiers::CONTROL) {
             if ctrl_letter(&key, 'c') {
                 return Effect::Quit;
@@ -1355,27 +1387,10 @@ impl Model {
         match keys::shifted(&key) {
             KeyCode::Left | KeyCode::Char('h') | KeyCode::Esc => self.go_up(),
             KeyCode::Right | KeyCode::Char('l') | KeyCode::Tab => self.go_in(),
-            KeyCode::Enter | KeyCode::Char('o') => return self.open(),
+            KeyCode::Enter => return self.open(),
             KeyCode::Char('/') => self.filtering = true,
             KeyCode::Char(':') => self.open_palette(""),
-            KeyCode::Char('?') => return self.command(Cmd::Help, ""),
-            KeyCode::Char('q') => return Effect::Quit,
-            KeyCode::Char('r') => return Effect::Refresh,
-            KeyCode::Char('t') => return self.command(Cmd::Tree, ""),
-            KeyCode::Char('T') => return self.command(Cmd::Tree, "previous"),
-            KeyCode::Char('s') => return self.command(Cmd::Sort, ""),
-            KeyCode::Char('a') => return self.command(Cmd::Add, ""),
-            KeyCode::Char('c') => return self.command(Cmd::Cd, ""),
-            KeyCode::Char('D') => return self.command(Cmd::Delete, ""),
-            KeyCode::Char('C') => return self.command(Cmd::Clean, ""),
-            KeyCode::Char('P') => return self.command(Cmd::Prune, ""),
-            KeyCode::Char('x') => return self.command(Cmd::Trim, ""),
-            KeyCode::Char('p') => return self.command(Cmd::Running, ""),
-            KeyCode::Char('f') => return self.command(Cmd::Fetch, ""),
-            KeyCode::Char('e') => return self.command(Cmd::Edit, ""),
-            KeyCode::Char('A') => return self.command(Cmd::Start, ""),
-            KeyCode::Char('R') => return self.command(Cmd::Resume, ""),
-            KeyCode::Char('O') => return self.command(Cmd::Output, ""),
+            KeyCode::Char('V') => return self.command(Cmd::Tree, "previous"),
             _ => {}
         }
         Effect::None
@@ -1748,7 +1763,7 @@ impl Model {
             return self.say("the main checkout cannot be removed");
         }
         if delete_branch && worktree.branch.is_none() {
-            return self.say("a detached checkout has no branch to delete; use dd");
+            return self.say("a detached checkout has no branch to delete; use R to remove");
         }
         let branch = rows::branch_label(worktree);
         let warn = Style::new().fg(Color::Yellow);
@@ -3410,13 +3425,10 @@ mod tests {
     }
 
     #[test]
-    fn enter_and_o_open_a_project_then_cd_into_a_checkout() {
+    fn enter_opens_a_project_then_cds_into_a_checkout() {
         let mut model = Model::from_snapshot(sample());
         assert!(model.selected_path().unwrap().ends_with("dev"));
-        assert!(matches!(
-            model.on_key(press(KeyCode::Char('o'))),
-            Effect::None
-        ));
+        assert!(matches!(model.on_key(press(KeyCode::Enter)), Effect::None));
         assert!(matches!(&model.view, View::Detail { project } if project == "bonsai"));
         assert!(model.rows.iter().any(|row| row.title.contains("ab/dev")));
         assert!(model.rows.iter().any(|row| row.title == "main"));
@@ -3430,7 +3442,7 @@ mod tests {
             Effect::Cd(path) if path.ends_with("bonsai/main")
         ));
         assert!(matches!(
-            model.on_key(press(KeyCode::Char('o'))),
+            model.on_key(press(KeyCode::Enter)),
             Effect::Cd(path) if path.ends_with("bonsai/main")
         ));
         model.on_key(press(KeyCode::Esc));
@@ -3650,7 +3662,7 @@ mod tests {
     #[test]
     fn gg_and_half_page_move_through_the_tree() {
         let mut model = many(20);
-        model.on_key(press(KeyCode::Char('T')));
+        model.on_key(press(KeyCode::Char('V')));
         model.viewport = 10;
         let path = |model: &Model| model.selected_path().unwrap();
         assert!(path(&model).ends_with("p00/main"));
@@ -3747,7 +3759,7 @@ mod tests {
             &home_layout,
             width,
         );
-        model.on_key(press(KeyCode::Char('T')));
+        model.on_key(press(KeyCode::Char('V')));
         let line = |model: &Model, pred: fn(&Row) -> bool| {
             let layout = table::layout(Kind::Tree, &model.rows, width);
             table::line(
@@ -3878,16 +3890,16 @@ mod tests {
     }
 
     #[test]
-    fn dd_asks_before_removing_and_keeps_the_branch() {
+    fn uppercase_r_asks_before_removing_and_keeps_the_branch() {
         let mut model = Model::from_snapshot(sample());
-        typed(&mut model, "dd");
+        typed(&mut model, "R");
         assert!(
             model.confirm.is_some(),
             "project removal uses a confirmation too"
         );
         model.on_key(press(KeyCode::Char('n')));
         model.on_key(press(KeyCode::Enter));
-        typed(&mut model, "dd");
+        typed(&mut model, "R");
         let confirm = model.confirm.as_ref().expect("a confirmation");
         assert_eq!(confirm.title, "Remove the ab/dev worktree?");
         let text: Vec<String> = confirm.lines.iter().map(ToString::to_string).collect();
@@ -3901,13 +3913,13 @@ mod tests {
             Effect::None
         ));
         assert!(model.confirm.is_none());
-        typed(&mut model, "dd");
+        typed(&mut model, "R");
         let spec = background(model.on_key(press(KeyCode::Char('y'))));
         assert_eq!(arguments(&spec)[2..], ["remove", "/trees/bonsai/ab/dev"]);
         assert_eq!(spec.label, "bonsai remove ab/dev");
 
         model.on_key(press(KeyCode::Char('j')));
-        typed(&mut model, "dd");
+        typed(&mut model, "R");
         assert!(model.confirm.is_none());
         assert!(
             model
@@ -4131,22 +4143,14 @@ mod tests {
         let mut model = Model::from_snapshot(sample());
         model.on_key(press(KeyCode::Enter));
         assert!(matches!(
-            model.on_key(press(KeyCode::Char('A'))),
+            model.on_key(press(KeyCode::Char('s'))),
             Effect::Run(Action::Foreground(task))
                 if task.dir == Path::new("/trees/bonsai/ab/dev") && task.label == "bonsai start"
         ));
         assert!(matches!(
-            model.on_key(press(KeyCode::Char('R'))),
+            model.on_key(press(KeyCode::Char('r'))),
             Effect::Run(Action::Foreground(task)) if task.label == "bonsai resume ab/dev"
         ));
-        typed(&mut model, "yy");
-        assert!(matches!(
-            model.on_key(press(KeyCode::Char('y'))),
-            Effect::None
-        ));
-        let mut model = Model::from_snapshot(sample());
-        model.on_key(press(KeyCode::Enter));
-        model.on_key(press(KeyCode::Char('y')));
         assert!(matches!(
             model.on_key(press(KeyCode::Char('y'))),
             Effect::Copy(path) if path == "/trees/bonsai/ab/dev"
@@ -4327,7 +4331,7 @@ mod tests {
     #[test]
     fn the_output_view_scrolls_and_follows_a_running_command() {
         let mut model = Model::from_snapshot(sample());
-        model.on_key_text("O");
+        model.on_key_text("o");
         assert!(model.output.is_none());
         assert!(model.status_line().contains("no command has run yet"));
         let mut pane = jobs::Pane::new("bonsai add feat-x");
@@ -4339,7 +4343,7 @@ mod tests {
             });
         }
         model.pane = Some(pane);
-        model.on_key_text("O");
+        model.on_key_text("o");
         let (screen, _) = paint(&mut model, 80, 20);
         assert!(screen.contains("line 99"), "follows the end: {screen}");
         model.on_key_text("gg");
@@ -4395,7 +4399,7 @@ mod tests {
                 PathBuf::from("/trees/other/feature"),
             ]
         );
-        model.on_key(press(KeyCode::Char('s')));
+        model.on_key(ctrl('s'));
         assert_eq!(model.sort, Sort::Recent);
         assert_eq!(
             paths(&model),
@@ -4413,7 +4417,7 @@ mod tests {
                 PathBuf::from("/trees/bonsai/ab/dev"),
             ]
         );
-        model.on_key(press(KeyCode::Char('s')));
+        model.on_key(ctrl('s'));
         assert_eq!(model.sort, Sort::Size);
         model.on_key(press(KeyCode::Char('/')));
         model.on_key(press(KeyCode::Char('s')));
@@ -4433,8 +4437,8 @@ mod tests {
         model
             .footprints
             .insert("/trees/bonsai/ab/dev".into(), sized(3_000));
-        model.on_key(press(KeyCode::Char('s')));
-        model.on_key(press(KeyCode::Char('s')));
+        model.on_key(ctrl('s'));
+        model.on_key(ctrl('s'));
         assert_eq!(model.sort, Sort::Size);
         assert_eq!(model.rows[0].project, "other");
         model.on_key(press(KeyCode::Char('j')));
@@ -4444,17 +4448,14 @@ mod tests {
     }
 
     #[test]
-    fn enter_on_an_empty_filter_does_nothing_and_r_refreshes() {
+    fn enter_on_an_empty_filter_does_nothing_and_ctrl_r_refreshes() {
         let mut model = Model::from_snapshot(sample());
         model.on_key(press(KeyCode::Char('/')));
         typed(&mut model, "missing");
         assert!(matches!(model.on_key(press(KeyCode::Enter)), Effect::None));
         assert!(matches!(model.view, View::List));
         model.on_key(press(KeyCode::Esc));
-        assert!(matches!(
-            model.on_key(press(KeyCode::Char('r'))),
-            Effect::Refresh
-        ));
+        assert!(matches!(model.on_key(ctrl('r')), Effect::Refresh));
     }
 
     #[test]
@@ -4646,7 +4647,7 @@ mod tests {
         assert!(home.add_modifier.contains(Modifier::REVERSED));
         assert_eq!(home.bg, Some(Color::Reset));
 
-        model.on_key(press(KeyCode::Char('T')));
+        model.on_key(press(KeyCode::Char('V')));
         let (tree, tree_buf) = painted(&mut model);
         assert!(tree.contains(" hosts "), "{tree}");
         assert!(tree.contains("┌─ github.com"));
@@ -4738,7 +4739,7 @@ mod tests {
             "{screen}"
         );
 
-        model.on_key(press(KeyCode::Char('T')));
+        model.on_key(press(KeyCode::Char('V')));
         let host = model
             .rows
             .iter()
@@ -4894,7 +4895,7 @@ mod tests {
         assert_eq!(local.host, "example");
         assert_eq!(local.owner, "");
 
-        model.on_key(press(KeyCode::Char('T')));
+        model.on_key(press(KeyCode::Char('V')));
         assert!(model.rows.iter().any(|row| {
             row.depth == Depth::Host && row.host == "gitlab.com" && row.owner.is_empty()
         }));
@@ -4949,7 +4950,7 @@ mod tests {
             worktrees: vec![worktree("main", "/trees/plain/main", true, Some(false))],
         });
         let mut model = Model::from_snapshot(snapshot);
-        model.on_key(press(KeyCode::Char('T')));
+        model.on_key(press(KeyCode::Char('V')));
 
         let open_owner = child_prefix(TREE_RAIL, true);
         let shut_owner = child_prefix(TREE_RAIL, false);
@@ -5018,7 +5019,7 @@ mod tests {
                 ),
             ]
         );
-        model.on_key(press(KeyCode::Char('s')));
+        model.on_key(ctrl('s'));
         let labels: Vec<_> = model
             .rows
             .iter()
@@ -5069,13 +5070,13 @@ mod tests {
     }
 
     #[test]
-    fn t_and_t_step_through_views_from_the_shortest_list() {
+    fn v_and_v_step_through_views_from_the_shortest_list() {
         let mut model = Model::from_snapshot(sample());
         assert_eq!(model.grouping, Grouping::Table);
         let mut lengths = vec![model.rows.len()];
         let mut views = vec![Grouping::Table];
         for _ in 0..3 {
-            model.on_key(press(KeyCode::Char('t')));
+            model.on_key(press(KeyCode::Char('v')));
             lengths.push(model.rows.len());
             views.push(model.grouping);
         }
@@ -5092,12 +5093,12 @@ mod tests {
             lengths.windows(2).all(|pair| pair[0] < pair[1]),
             "each view adds rows: {lengths:?}"
         );
-        // t wraps from the longest back to the table; T goes the other way.
-        model.on_key(press(KeyCode::Char('t')));
+        // v wraps from the longest back to the table; V goes the other way.
+        model.on_key(press(KeyCode::Char('v')));
         assert_eq!(model.grouping, Grouping::Table);
-        model.on_key(press(KeyCode::Char('T')));
+        model.on_key(press(KeyCode::Char('V')));
         assert_eq!(model.grouping, Grouping::Hosts);
-        model.on_key(press(KeyCode::Char('T')));
+        model.on_key(press(KeyCode::Char('V')));
         assert_eq!(model.grouping, Grouping::Owners);
     }
 
@@ -5108,7 +5109,7 @@ mod tests {
         };
         let mut model = Model::from_snapshot(sample());
         let selected = model.selected_path();
-        model.on_key(press(KeyCode::Char('t')));
+        model.on_key(press(KeyCode::Char('v')));
         assert_eq!(
             labels(&model),
             [
@@ -5120,7 +5121,7 @@ mod tests {
             ]
         );
         assert_eq!(model.selected_path(), selected, "the selection follows");
-        model.on_key(press(KeyCode::Char('t')));
+        model.on_key(press(KeyCode::Char('v')));
         assert_eq!(
             labels(&model),
             [
@@ -5133,7 +5134,7 @@ mod tests {
                 "│     └─ feature",
             ]
         );
-        model.on_key(press(KeyCode::Char('t')));
+        model.on_key(press(KeyCode::Char('v')));
         assert_eq!(
             labels(&model),
             [
@@ -5151,7 +5152,7 @@ mod tests {
 
         model.on_key(press(KeyCode::Enter));
         assert!(matches!(model.view, View::Detail { .. }));
-        model.on_key(press(KeyCode::Char('t')));
+        model.on_key(press(KeyCode::Char('v')));
         assert_eq!(model.grouping, Grouping::Table);
         assert!(matches!(model.view, View::List));
         assert_eq!(model.rows.len(), 2);
@@ -5159,8 +5160,8 @@ mod tests {
         assert_eq!(model.selected_path(), selected);
 
         model.on_key(press(KeyCode::Char('/')));
-        model.on_key(press(KeyCode::Char('t')));
-        assert_eq!(model.filter.text(), "t");
+        model.on_key(press(KeyCode::Char('v')));
+        assert_eq!(model.filter.text(), "v");
         assert_eq!(model.grouping, Grouping::Table);
     }
 
@@ -5170,7 +5171,7 @@ mod tests {
         for (presses, current) in [(0, "table"), (1, "projects"), (2, "owners"), (3, "hosts")] {
             let mut model = Model::from_snapshot(sample());
             for _ in 0..presses {
-                model.on_key(press(KeyCode::Char('t')));
+                model.on_key(press(KeyCode::Char('v')));
             }
             let (screen, buffer) = paint(&mut model, 120, 12);
             let top = screen.lines().next().unwrap();
@@ -5465,7 +5466,7 @@ mod tests {
         assert!(screen.contains("2 checkouts · 1 with uncommitted changes · 2 agents running"));
 
         model.on_key(press(KeyCode::Esc));
-        model.on_key(press(KeyCode::Char('T')));
+        model.on_key(press(KeyCode::Char('V')));
         let host = model
             .rows
             .iter()
@@ -5609,10 +5610,10 @@ mod tests {
         "skipped_agents":[],"trimmed":[],"freed":0}"#;
 
     #[test]
-    fn x_shows_the_trim_plan_then_trims_the_reviewed_worktrees() {
+    fn uppercase_t_shows_the_trim_plan_then_trims_the_reviewed_worktrees() {
         let mut model = Model::from_snapshot(sample());
         // A project row plans every worktree of the project.
-        let spec = background(model.on_key(press(KeyCode::Char('x'))));
+        let spec = background(model.on_key(press(KeyCode::Char('T'))));
         assert_eq!(
             arguments(&spec)[2..],
             ["trim", "--dry-run", "--json", "/trees/bonsai/ab/dev"]
@@ -5627,7 +5628,7 @@ mod tests {
         );
 
         model.on_key(press(KeyCode::Enter));
-        let spec = background(model.on_key(press(KeyCode::Char('x'))));
+        let spec = background(model.on_key(press(KeyCode::Char('T'))));
         assert_eq!(
             arguments(&spec)[2..],
             ["trim", "--dry-run", "--json", "/trees/bonsai/ab/dev"]
@@ -5683,7 +5684,7 @@ mod tests {
         model.on_key(press(KeyCode::Char('j')));
         assert!(model.selected_path().unwrap().ends_with("bonsai/main"));
         assert!(matches!(
-            model.on_key(press(KeyCode::Char('x'))),
+            model.on_key(press(KeyCode::Char('T'))),
             Effect::None
         ));
         model.on_key(press(KeyCode::Char('k')));
@@ -5707,12 +5708,12 @@ mod tests {
     }
 
     #[test]
-    fn x_plans_external_worktrees_and_refuses_deleted_worktrees() {
+    fn uppercase_t_plans_external_worktrees_and_refuses_deleted_worktrees() {
         let mut snapshot = sample();
         snapshot.projects[0].worktrees[0].external = true;
         let mut model = Model::from_snapshot(snapshot);
         model.on_key(press(KeyCode::Enter));
-        let spec = background(model.on_key(press(KeyCode::Char('x'))));
+        let spec = background(model.on_key(press(KeyCode::Char('T'))));
         assert_eq!(
             arguments(&spec)[2..],
             ["trim", "--dry-run", "--json", "/trees/bonsai/ab/dev"]
@@ -5721,7 +5722,7 @@ mod tests {
         model.rebuild();
         model.reveal(Path::new("/trees/bonsai/ab/dev"));
         assert!(matches!(
-            model.on_key(press(KeyCode::Char('x'))),
+            model.on_key(press(KeyCode::Char('T'))),
             Effect::None
         ));
         assert!(model.status_line().contains("press P"));
@@ -5733,8 +5734,7 @@ mod tests {
         snapshot.projects[0].worktrees[0].external = true;
         let mut model = Model::from_snapshot(snapshot);
         model.on_key(press(KeyCode::Enter));
-        model.on_key(press(KeyCode::Char('d')));
-        model.on_key(press(KeyCode::Char('d')));
+        model.on_key(press(KeyCode::Char('R')));
         let confirm = model
             .confirm
             .as_ref()
@@ -5747,21 +5747,21 @@ mod tests {
     }
 
     #[test]
-    fn a_trim_plan_that_arrives_while_typing_waits_for_x() {
+    fn a_trim_plan_that_arrives_while_typing_waits_for_uppercase_t() {
         let mut model = Model::from_snapshot(sample());
         model.on_key(press(KeyCode::Enter));
         let targets = vec![PathBuf::from("/trees/bonsai/ab/dev")];
         model.on_key(press(KeyCode::Char('/')));
         model.offer_trim_plan(Path::new("/trees/bonsai"), &targets, TRIM_PLAN);
         assert!(model.confirm.is_none());
-        assert!(model.status_line().contains("press x to review it"));
+        assert!(model.status_line().contains("press T to review it"));
         model.on_key(press(KeyCode::Esc));
         // Clean does not take a trim plan.
         model.ready_plan.as_ref().expect("still waiting");
         model.on_key(press(KeyCode::Char('C')));
         assert!(model.confirm.is_none());
         assert!(model.ready_plan.is_some());
-        model.on_key(press(KeyCode::Char('x')));
+        model.on_key(press(KeyCode::Char('T')));
         let confirm = model.confirm.as_ref().expect("the ready plan");
         assert_eq!(confirm.title, "Trim 1 worktree?");
         assert!(confirm.ready_at.is_none());
@@ -5773,7 +5773,7 @@ mod tests {
         let mut model = Model::from_snapshot(sample());
         with_agents(&mut model);
         model.on_key(press(KeyCode::Enter));
-        typed(&mut model, "dd");
+        typed(&mut model, "R");
         let confirm = model.confirm.take().expect("a confirmation");
         let text: Vec<String> = confirm.lines.iter().map(ToString::to_string).collect();
         assert!(
@@ -5788,7 +5788,7 @@ mod tests {
                 agent.caller = true;
             }
         }
-        typed(&mut model, "dd");
+        typed(&mut model, "R");
         let confirm = model.confirm.take().expect("a confirmation");
         let text: Vec<String> = confirm.lines.iter().map(ToString::to_string).collect();
         assert!(
@@ -5859,21 +5859,21 @@ mod tests {
             .insert("/trees/bonsai/main".into(), sized(8_000));
         model.on_key(press(KeyCode::Enter));
         let (screen, _) = paint(&mut model, 140, 24);
-        assert!(!screen.contains("press x"), "{screen}");
+        assert!(!screen.contains("press T"), "{screen}");
         model
             .footprints
             .insert("/trees/bonsai/ab/dev".into(), sized(6_000));
         model.rebuild();
         let (screen, _) = paint(&mut model, 140, 24);
         assert!(
-            screen.contains("3 kB of dependencies in worktrees (press x to trim)"),
+            screen.contains("3 kB of dependencies in worktrees (press T to trim)"),
             "{screen}"
         );
         model.on_key(press(KeyCode::Esc));
         assert!(
             model
                 .status_line()
-                .contains("3 kB of dependencies in worktrees (press x to trim)"),
+                .contains("3 kB of dependencies in worktrees (press T to trim)"),
             "{}",
             model.status_line()
         );

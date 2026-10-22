@@ -3646,7 +3646,7 @@ fn hq_help_describes_the_terminal_list() {
         .stdout(
             predicate::str::contains("--json")
                 .and(predicate::str::contains("Enter opens a project"))
-                .and(predicate::str::contains("dd removes"))
+                .and(predicate::str::contains("R removes"))
                 .and(predicate::str::contains("tmux").not())
                 .and(predicate::str::contains("--port").not())
                 .and(predicate::str::contains("--no-tui").not())
@@ -4129,7 +4129,7 @@ fn running_agents_are_listed_and_protect_their_worktrees() {
 fn bare_bonsai_without_a_terminal_prints_grouped_help() {
     let repo = TestRepo::new();
     repo.bonsai(&repo.clone).assert().code(2).stderr(
-        predicate::str::contains("Free disk and tidy up:")
+        predicate::str::contains("Free disk or remove worktrees:")
             .and(predicate::str::contains("trim [TARGETS]..."))
             .and(predicate::str::contains("open hq")),
     );

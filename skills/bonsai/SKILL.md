@@ -74,6 +74,15 @@ plans, `--json` reports, and `--yes` skips the prompt.
 
 ### Cleanup and removal
 
+Choose by what should remain: `trim` keeps the worktree and branch while
+removing ignored files; `remove` deletes the chosen checkout directory but
+keeps the branch unless `-d`; `clean` deletes integrated checkout directories
+and their branches; `prune` drops missing registrations and deletes orphan
+directories under the Bonsai root, keeping branches and live registrations.
+`remove` matches `git worktree remove`; `trim` is ignored-only cleanup like
+`git clean -X`, with additional keep rules. `clean` selects merged worktrees;
+`prune` extends `git worktree prune` with orphan-directory deletion.
+
 - Inspect cleanup candidates with `bonsai clean --dry-run --json`.
   A preview-only request ends with the plan. When the user authorized
   cleanup and the inspected targets fit that scope, execute with `--yes`;
@@ -85,17 +94,18 @@ plans, `--json` reports, and `--yes` skips the prompt.
   add `-d` only when branch deletion is intended.
 - `trim` deletes git-ignored files (dependencies, build output, caches) from
   all Git-registered linked worktrees, including other tools’ checkouts. It keeps worktrees, branches, tracked and
-  untracked files and common local state (`.env*`, databases, keys, Terraform
-  state). Inside ignored dependency/build directories, only explicit `[trim]
+  non-ignored untracked files and common local state (`.env*`, databases,
+  keys, Terraform state). Inside ignored dependency/build directories, only explicit `[trim]
   keep` globs and registered nested worktrees are protected; package fixtures
   and dependency checkouts are regenerable (see `bonsai trim --help`). Other
   ignored files are lost, so read the `--dry-run --json` plan. A request to
   free disk space or trim authorizes `--yes` within the planned scope; name
   branches to narrow it, and ask before deleting plan entries that look like
   irreplaceable local data.
-- Inspect `prune --dry-run --json` before deleting orphaned directories,
-  which may contain uncommitted work. Keep `-a`/`--all`, and runs outside a
-  repo, which span repositories, within the user's scope.
+- `prune` removes missing, unlocked registrations (HQ: `directory deleted`)
+  without deleting branches. Inspect `prune --dry-run --json` before deleting
+  orphaned directories, which may contain uncommitted work. Keep `-a`/`--all`
+  and runs outside a repo, which span repositories, within the user's scope.
 - Other agents' worktrees are protected: `remove` refuses, and `clean` and
   `trim` skip, a worktree where `bonsai ps` shows another agent working.
   Report the skip; do not stop that agent or force removal unless the user

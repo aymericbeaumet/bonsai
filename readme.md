@@ -116,10 +116,10 @@ act on them from one screen.
 | `bonsai add [branch]` | Create (or reuse) a branch and its worktree, then cd into it |
 | `bonsai cd [query]` | Fuzzy-jump to a worktree, most recently used first |
 | `bonsai list` | List the repository's worktrees (`--status`, `--json`) |
-| `bonsai remove [branch…]` | Remove worktrees; `-d` also deletes their branches |
-| `bonsai clean` | Remove merged and squash-merged worktrees and their branches |
-| `bonsai trim [branch…]` | Delete ignored files (`node_modules`, `target`, ...); worktrees stay |
-| `bonsai prune` | Tidy stale registrations and orphaned directories |
+| `bonsai remove [target…]` | Delete chosen checkout directories; keep branches unless `-d` |
+| `bonsai clean [target…]` | Delete merged or squash-merged checkout directories and their branches |
+| `bonsai trim [target…]` | Delete ignored builds/dependencies; keep checkouts and branches |
+| `bonsai prune [target…]` | Drop missing checkout registrations and delete orphan directories; keep branches |
 | `bonsai` / `bonsai hq` | See and manage every project, worktree, and agent in a terminal UI |
 | `bonsai ps` | List running coding agents and the worktree each works in |
 | `bonsai start` / `resume` | Start or resume Claude Code, Codex, or OpenCode sessions |
@@ -129,7 +129,7 @@ act on them from one screen.
 `-a` widens most commands to every project, and every command has a detailed
 `--help`; `bonsai --help` groups them by task. `trim`, `clean`, and `prune`
 share `-n`/`--dry-run`, `-y`/`--yes`, and `--json`. See the
-[command reference](docs/commands.md).
+[cleanup comparison and command reference](docs/commands.md#free-disk-or-remove-worktrees).
 
 ## Documentation
 

@@ -46,14 +46,14 @@ owner, and repository:
 
 The header above the list names the remote, the main checkout, and the
 project's totals, suggests `P` when checkouts were deleted by hand, and
-suggests `x` when its worktrees hold dependency directories that trimming
+suggests `T` when its worktrees hold dependency directories that trimming
 would free.
 `upstream gone` usually means the pull request was merged and its branch
 deleted; `C` cleans those.
 
 The home list has four **views**, named by tabs on the top border with the
 current one highlighted. They go from the shortest list to the longest, each
-adding one level of grouping: `t` moves to the next view and `T` to the
+adding one level of grouping: `v` moves to the next view and `V` to the
 previous one, wrapping around at either end.
 
 | View | Top-level rows | Then |
@@ -77,9 +77,9 @@ their process IDs.
 hq looks for running coding agents (Claude Code, Codex, OpenCode, Cursor,
 Gemini, and others) every two seconds, in the background, and lists each
 under the checkout its directory is in. The `running` column, the titles,
-and every group total count them. `p` (`:running`) shows only the checkouts
+and every group total count them. `p` (`:ps`) shows only the checkouts
 where an agent is running, across every listed project or inside the open
-one; `:running codex` keeps one kind. It is the search `running:` and stays
+one; `:ps codex` keeps one kind. It is the search `running:` and stays
 live as agents start and exit; Esc clears it. Outside hq, `bonsai ps`
 lists the same agents, and `bonsai ps -a` also those working outside any
 checkout.
@@ -91,7 +91,7 @@ in while large directories are walked. The last measurement of each checkout
 is remembered in `~/.local/state/bonsai/footprints.json`, so the next `hq`
 shows every total at once and updates it as checkouts are measured again; a
 size that is still being measured is dimmed. After a command, only the
-affected project is measured again; `r` measures everything.
+affected projects are measured again; Ctrl-R measures everything.
 
 A checkout's size is the logical size of its files. Shared dependencies are
 symlinks, hardlinked files, or external stores such as Go modules; their
@@ -103,7 +103,7 @@ space actually used.
 
 The motion keys work the same in every view: the home list, an open project,
 the tree, search results, and also the `?` help, confirmation dialogs, and
-the full-screen output (`O`), which they scroll like a pager.
+the full-screen output (`o`), which they scroll like a pager.
 
 | Keys | Action |
 |---|---|
@@ -114,15 +114,15 @@ the full-screen output (`O`), which they scroll like a pager.
 | `H` `M` `L` | Top / middle / bottom of the screen |
 | `zz` `zt` `zb` | Put the cursor row at the center / top / bottom |
 | `{` `}` | Previous / next project |
-| Enter, `o` | Open a project; on a checkout, quit and change into it |
+| Enter | Open a project; on a checkout, quit and change into it |
 | `l`, →, Tab | Open a project |
 | `h`, ←, Esc, Ctrl-O | Back: close the output, clear a search, leave the project |
 | `/` | Fuzzy-find by host, owner, project, branch, path, stack, or agent |
-| `p` | Only checkouts where a coding agent is running (`:running [agent]`) |
-| `t` `T` | Next / previous view: table, projects, owners, hosts |
-| `s` | Sort by name, recent activity, or size |
-| `r` | Refresh |
-| `O` | Show the latest command's output full screen |
+| `p` | Only checkouts where a coding agent is running (`:ps [agent]`) |
+| `v` `V` | Next / previous view: table, projects, owners, hosts |
+| Ctrl-S | Sort by name, recent activity, or size |
+| Ctrl-R | Refresh |
+| `o` | Show the latest command's output full screen |
 | `?` | List every key |
 | `q` | Quit, or close help and the output view |
 
@@ -154,20 +154,38 @@ in-UI picker chooses that checkout without leaving HQ.
 |---|---|---|
 | `a` | `:add <branch>` | Create a branch and its worktree in each project in scope |
 | `c`, Enter | `:cd` | Quit and change into the checkout (needs the [shell integration](integrations.md#shells)) |
-| `dd` | `:remove` | Remove selected worktrees and keep their branches |
+| `R` | `:remove` | Remove selected worktrees and keep their branches |
 | `D` | `:delete` | Remove selected worktrees and delete their branches, if their commits are on their upstream or merged |
-| `C` | `:clean` | Remove merged and squash-merged worktrees in the selection |
-| `P` | `:prune` | Drop deleted and stale worktrees in the selection, including `directory deleted` entries |
-| `x` | `:trim` | Free disk: delete ignored files (`node_modules`, `target`, …) of selected worktrees |
+| `C` | `:clean` | Delete merged and squash-merged worktrees and their branches in the selection |
+| `P` | `:prune` | Drop missing registrations (`directory deleted`) and delete eligible orphan directories in the selection; keep branches |
+| `T` | `:trim` | Free disk: delete ignored files (`node_modules`, `target`, …) of selected worktrees |
 | `f` | `:fetch` | Fetch selected projects' remotes, then refresh ahead and behind counts |
 | `e` | `:edit` | Open the checkout in `$VISUAL` or `$EDITOR` |
-| `A` | `:start [agent]` | Start Claude Code, Codex, or OpenCode in the checkout |
-| `R` | `:resume [query]` | Resume a coding-agent session from the checkout |
-| `yy` | `:copy` | Copy the checkout's path to the clipboard |
+| `s` | `:start [agent]` | Start Claude Code, Codex, or OpenCode in the checkout |
+| `r` | `:resume [query]` | Resume a coding-agent session from the checkout |
+| `y` | `:yank` | Copy the checkout's path to the clipboard |
 
 `:` opens a command line listing these commands, plus `refresh`, `sort`,
-`view`, `running`, `output`, `help`, and `quit`. Type to filter, Tab completes the name, and
+`view`, `ps`, `output`, `help`, and `quit`. Type to filter, Tab completes the name, and
 Enter runs it with the rest of the line as arguments.
+
+Action bindings use the command's first letter. Destructive actions are
+uppercase: `R` remove, `D` delete, `C` clean, `P` prune, and `T` trim.
+Ctrl-R refresh and Ctrl-S sort leave `r` and `s` for resume and start.
+`ps` also accepts `running` and `agents`; `yank` also accepts `copy`.
+The footer uses up to two hint lines, keeping each key and its label together.
+At narrow widths it prioritizes destructive actions, `?` help, and `:` commands;
+these always expose the full command list. An ellipsis marks omitted hints.
+
+For disk cleanup, choose what you want to keep:
+
+| Command | Deletes | Keeps |
+|---|---|---|
+| `T` trim | Ignored dependency and build files in selected worktrees | Worktree directories, source files, branches, and protected local configuration |
+| `R` remove | Selected worktree directories and their Git registrations | Branches |
+| `D` delete | Selected worktree directories, registrations, and their branches | Other checkouts and branches |
+| `C` clean | Eligible merged or squash-merged worktrees and branches | Unmerged work, dirty worktrees, and the main checkout |
+| `P` prune | Stale registrations, eligible orphaned directories, and empty directories in scope | Branches and existing registered worktrees |
 
 Removing worktrees, deleting branches, cleaning, trimming, and pruning ask
 inside hq first, showing the precise targets and explaining what will happen.
@@ -192,7 +210,7 @@ Bonsai root.
 Bonsai commands, including prune, run in the background and stream progress,
 results, and failures into a pane below the list. The list stays visible and
 usable throughout; actions never switch to full-screen command output.
-Press `O` to explicitly open the latest output full screen, or Esc to close
+Press `o` to explicitly open the latest output full screen, or Esc to close
 the finished pane. Coding agents and editors use the terminal until they exit,
 then hq refreshes.
 

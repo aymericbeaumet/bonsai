@@ -63,8 +63,12 @@
   exact checkout. Keep commands available in every view; only their targets
   change. Carry known project roots into child discovery, including projects
   whose linked checkouts are missing. Destructive commands show exact paths
-  in an in-UI confirmation and run in the output pane; only explicit `O`
-  opens full-screen output. Apply reviewed trim/prune manifests under locks
+  in an in-UI confirmation and run in the output pane; only explicit `o`
+  opens full-screen output. Destructive command initials are uppercase
+  (`R`, `D`, `C`, `P`, `T`); other command shortcuts match their names, with
+  Ctrl-R/Ctrl-S for refresh/sort. Derive dispatch from `COMMANDS`, and wrap
+  footer hints across two lines without splitting key-label pairs. Apply
+  reviewed trim/prune manifests under locks
   so confirmation cannot widen from metadata removal to directory deletion.
 - hq draws on stderr so the shell wrapper can capture stdout for the cd
   target (Enter on a checkout, or `c`). Never call `Terminal::clear`: it
@@ -75,8 +79,8 @@
   (one row per checkout), and search results. The home list has four
   views, ordered from the shortest list to the longest so each adds one
   grouping level: table, projects (`host/owner/project` with checkouts),
-  owners (`host/owner`, then projects), hosts (host, then owners). `t` moves
-  forward, `T` back, both wrapping; tabs on the top border name them and
+  owners (`host/owner`, then projects), hosts (host, then owners). `v` moves
+  forward, `V` back, both wrapping; tabs on the top border name them and
   mark the current one. Every tree group sums its checkouts. `table.rs` drops the least useful
   columns first when the terminal is narrow. Host, owner, and project keep
   their colours in the table and the tree; an open project or tree uses a

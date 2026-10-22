@@ -26,6 +26,8 @@ pub(super) fn draw(frame: &mut Frame, model: &mut Model) {
         );
         return;
     }
+    let hints = key_lines(model, usize::from(area.width));
+    let footer_height = u16::try_from(hints.len() + 1).unwrap_or(3);
     let pane_height = model
         .pane
         .as_ref()
@@ -33,11 +35,11 @@ pub(super) fn draw(frame: &mut Frame, model: &mut Model) {
     let layout = Layout::vertical([
         Constraint::Min(1),
         Constraint::Length(pane_height),
-        Constraint::Length(2),
+        Constraint::Length(footer_height),
     ])
     .split(area);
     let mut block = Block::bordered().title(title(model));
-    // The views `t` and `T` step through, on the top border when they fit.
+    // The views `v` and `V` step through, on the top border when they fit.
     if let Some(tabs) = tabs(model)
         && title(model).width() + tabs.width() + 4 <= usize::from(area.width)
     {
@@ -127,19 +129,15 @@ pub(super) fn draw(frame: &mut Frame, model: &mut Model) {
         draw_pane(frame, layout[1], pane);
     }
     let footer_width = usize::from(layout[2].width);
-    frame.render_widget(
-        Paragraph::new(vec![
-            Line::from(truncate(&keys(model), footer_width)),
-            Line::styled(
-                truncate(&model.status_line(), footer_width),
-                Style::new().add_modifier(Modifier::DIM),
-            ),
-        ]),
-        layout[2],
-    );
+    let mut footer: Vec<Line<'static>> = hints.into_iter().map(Line::raw).collect();
+    footer.push(Line::styled(
+        truncate(&model.status_line(), footer_width),
+        Style::new().add_modifier(Modifier::DIM),
+    ));
+    frame.render_widget(Paragraph::new(footer), layout[2]);
     // Overlays leave the key hints and status line in view.
     let above_footer = Rect {
-        height: area.height.saturating_sub(2),
+        height: area.height.saturating_sub(footer_height),
         ..area
     };
     if let (Some(pager), Some(pane)) = (model.output.as_mut(), model.pane.as_ref()) {
@@ -283,57 +281,116 @@ fn tree_frame(model: &Model) -> bool {
         && model.filter.is_empty()
 }
 
-fn keys(model: &Model) -> String {
-    let scroll = "j k  ctrl-d ctrl-u  ctrl-f ctrl-b  gg G  scroll";
+fn keys(model: &Model) -> Vec<&'static str> {
+    let scroll = [
+        "j k scroll",
+        "ctrl-d/u half page",
+        "ctrl-f/b page",
+        "gg G ends",
+    ];
     if model.chooser.is_some() {
-        return format!("enter choose checkout   esc cancel   {scroll}");
+        return [vec!["enter choose checkout", "esc cancel"], scroll.to_vec()].concat();
     }
     if model.help.is_some() {
-        return format!("{scroll}   ? or esc close");
+        return [vec!["? or esc close"], scroll.to_vec()].concat();
     }
     if model.confirm.is_some() {
-        return format!("y confirm   n or esc cancel   {scroll}");
+        return [vec!["y confirm", "n or esc cancel"], scroll.to_vec()].concat();
     }
     if model.output.is_some() {
-        return format!("{scroll}   O or esc close");
+        return [vec!["o or esc close"], scroll.to_vec()].concat();
     }
     if model.palette.is_some() {
-        return "enter run   tab complete   ↑↓ choose   ctrl-w word   esc cancel".to_string();
+        return vec![
+            "enter run",
+            "tab complete",
+            "↑↓ choose",
+            "ctrl-w word",
+            "esc cancel",
+        ];
     }
     if model.filtering {
-        return "enter done   esc clear   ↑↓ move   ctrl-w word   ctrl-c quit".to_string();
+        return vec![
+            "enter done",
+            "esc clear",
+            "↑↓ move",
+            "ctrl-w word",
+            "ctrl-c quit",
+        ];
     }
-    let mut keys = Vec::new();
-    if model.pane.as_ref().is_some_and(|pane| !pane.running()) {
-        keys.push("esc close output");
-    }
-    keys.extend([
-        "a add",
-        "dd remove",
+    let mut keys = vec![
+        "R remove",
         "D delete",
         "C clean",
         "P prune",
-        "x trim",
-        "f fetch",
-        ": commands",
+        "T trim",
         "? help",
-        "enter open/cd",
+        ": commands",
+        "a add",
         "c cd",
+        "f fetch",
         "e edit",
-        "A agent",
-        "R resume",
-        "yy copy",
-        "O full output",
+        "s start",
+        "r resume",
+        "p ps",
+        "y yank",
+        "o output",
         "/ search",
-        "p running",
-        "t next view",
-        "T previous view",
-        "s sort",
-        "r refresh",
+        "v/V view",
+        "ctrl-s sort",
+        "ctrl-r refresh",
+        "enter open/cd",
         "esc back",
         "q quit",
-    ]);
-    keys.join("   ")
+    ];
+    if model.pane.as_ref().is_some_and(|pane| !pane.running()) {
+        keys.push("esc close output");
+    }
+    keys
+}
+
+/// Preserve complete key-label pairs, using a second row before omitting hints.
+fn key_lines(model: &Model, width: usize) -> Vec<String> {
+    let mut lines = vec![String::new()];
+    let mut omitted = false;
+    let mut hints = keys(model);
+    if width < 40 {
+        for priority in [": commands", "? help"] {
+            if let Some(index) = hints.iter().position(|hint| *hint == priority) {
+                hints.remove(index);
+                hints.insert(0, priority);
+            }
+        }
+    }
+    for hint in hints {
+        let current = lines.last_mut().expect("one hint line");
+        let separator = if current.is_empty() { "" } else { "   " };
+        if Line::raw(current.as_str()).width() + separator.len() + Line::raw(hint).width() <= width
+        {
+            current.push_str(separator);
+            current.push_str(hint);
+        } else if lines.len() < 2 && Line::raw(hint).width() <= width {
+            lines.push(hint.to_string());
+        } else {
+            omitted = true;
+        }
+    }
+    if omitted && width > 0 {
+        let last = lines.last_mut().expect("one hint line");
+        while Line::raw(last.as_str()).width() + 2 > width {
+            if let Some(separator) = last.rfind("   ") {
+                last.truncate(separator);
+            } else {
+                last.clear();
+                break;
+            }
+        }
+        if !last.is_empty() {
+            last.push(' ');
+        }
+        last.push('…');
+    }
+    lines
 }
 
 fn detail_header(model: &Model, width: usize) -> Vec<Line<'static>> {
@@ -413,16 +470,16 @@ fn detail_header(model: &Model, width: usize) -> Vec<Line<'static>> {
     ]
 }
 
-/// `3 GB of dependencies in worktrees (press x to trim)`.
+/// `3 GB of dependencies in worktrees (press T to trim)`.
 fn trim_hint(bytes: u64) -> String {
     format!(
-        "{} of dependencies in worktrees (press x to trim)",
+        "{} of dependencies in worktrees (press T to trim)",
         footprint::format_bytes(bytes)
     )
 }
 
 /// Dependency directories of the project's linked worktrees that live in the
-/// checkout itself: roughly what `x` frees. Shared stores free nothing, and
+/// checkout itself: roughly what `T` frees. Shared stores free nothing, and
 /// the main checkout is never trimmed.
 pub(super) fn trimmable_bytes(model: &Model, project: &super::Project) -> u64 {
     project
@@ -596,37 +653,40 @@ pub(super) const HELP: &[(&str, &[(&str, &str)])] = &[
         "Open",
         &[
             (
-                "enter  o",
+                "enter",
                 "open a project; on a checkout, cd into it and quit",
             ),
             ("l  →  tab", "open a project"),
             ("c", "cd into the selected checkout and quit"),
             ("h  ←  esc", "back"),
             ("/", "search; enter keeps the results, esc clears them"),
-            ("p", "only checkouts where a coding agent is running"),
+            ("p", "ps: only checkouts where a coding agent is running"),
             (
-                "t  T",
+                "v  V",
                 "next / previous view: table, projects, owners, hosts; each adds a level",
             ),
-            ("s  r", "sort by name, recent activity, or size; refresh"),
+            (
+                "ctrl-s  ctrl-r",
+                "sort by name, recent activity, or size; refresh",
+            ),
         ],
     ),
     (
         "Act on the selection",
         &[
             ("a", "add a worktree: type the branch name"),
-            ("dd", "remove selected worktrees and keep their branches"),
-            ("D", "remove selected worktrees and delete their branches"),
+            ("R", "remove selected worktrees and keep their branches"),
+            ("D", "delete selected worktrees and their branches"),
             ("C  P", "clean merged worktrees / prune deleted ones"),
             (
-                "x",
+                "T",
                 "trim: delete ignored files such as node_modules and target",
             ),
             ("f", "fetch selected projects' remotes"),
             ("e", "open the checkout in $VISUAL or $EDITOR"),
-            ("A  R", "start / resume a coding agent there"),
-            ("yy", "copy the checkout's path"),
-            ("O", "the latest command's output, full screen"),
+            ("s  r", "start / resume a coding agent there"),
+            ("y", "yank: copy the checkout's path"),
+            ("o", "output: the latest command's output, full screen"),
             (":", "command line; tab completes, :add <branch>"),
             ("q  ?", "quit, this help"),
         ],
@@ -884,6 +944,68 @@ mod tests {
         let screen = screen(&mut model, 100).join("\n");
         assert!(!screen.contains("scope-project"));
         assert!(screen.contains("command progress"));
+    }
+
+    #[test]
+    fn footer_wraps_complete_action_hints_at_common_terminal_widths() {
+        let model = model();
+        for width in [80, 120] {
+            let lines = key_lines(&model, width);
+            assert_eq!(lines.len(), 2);
+            assert!(
+                lines
+                    .iter()
+                    .all(|line| Line::raw(line.as_str()).width() <= width)
+            );
+            let hints = lines.join("   ");
+            for hint in [
+                "R remove",
+                "D delete",
+                "C clean",
+                "P prune",
+                "T trim",
+                "? help",
+                ": commands",
+            ] {
+                assert!(hints.contains(hint), "missing {hint} at width {width}");
+            }
+            for line in &lines {
+                for token in line.trim_end_matches(" …").split("   ") {
+                    assert!(keys(&model).contains(&token), "partial hint {token:?}");
+                }
+            }
+        }
+        assert_eq!(key_lines(&model, 500).len(), 1);
+        assert!(key_lines(&model, 80).last().unwrap().ends_with('…'));
+        let narrow = key_lines(&model, 24).join("   ");
+        assert!(narrow.contains("? help"));
+        assert!(narrow.contains(": commands"));
+    }
+
+    #[test]
+    fn two_line_footer_keeps_the_list_pane_and_overlay_boundaries() {
+        for width in [80, 120] {
+            let mut model = model();
+            let mut pane = jobs::Pane::new("prune");
+            pane.lines.push_back("command progress".to_string());
+            model.pane = Some(pane);
+            let rendered = screen(&mut model, width);
+            assert!(rendered.iter().any(|line| line.contains("scope-project")));
+            assert!(
+                rendered
+                    .iter()
+                    .any(|line| line.contains("command progress"))
+            );
+            assert!(rendered[21].contains("R remove"));
+            assert!(rendered[22].contains("y yank"));
+            let viewport = model.viewport;
+            model.output = Some(Pager::default());
+            let output = screen(&mut model, width);
+            assert!(output.iter().any(|line| line.contains("command progress")));
+            let footer_start = 24 - key_lines(&model, usize::from(width)).len() - 1;
+            assert!(output[footer_start].contains("o or esc close"));
+            assert!(model.viewport >= viewport);
+        }
     }
 
     #[test]

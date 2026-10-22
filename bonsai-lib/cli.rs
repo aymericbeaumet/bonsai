@@ -38,7 +38,7 @@ const GROUPS: &[(&str, &[&str])] = &[
         &["hq", "add", "cd", "list", "ps", "start", "resume"],
     ),
     (
-        "Free disk and tidy up",
+        "Free disk or remove worktrees",
         &["trim", "remove", "clean", "prune"],
     ),
     (
@@ -52,9 +52,9 @@ Run `bonsai` alone in a terminal to open hq: every project and worktree with
 its running agents, status, and sizes, and one key per command.";
 
 const BULK_NOTE: &str = "\
-Bulk commands (trim, clean, prune) print a plan and confirm before deleting:
--n/--dry-run previews, -y/--yes skips the prompt, and --json reports. Like
-every command, -a/--all spans every project.";
+Bulk cleanup (trim, clean, prune): -n/--dry-run previews, -y/--yes skips
+confirmation, and --json reports. -a/--all spans every project.
+Start with trim to free disk while keeping your worktrees and branches.";
 
 /// The clap command with the grouped overview as its help template.
 pub fn command() -> clap::Command {
@@ -181,12 +181,15 @@ dirty is null when Git cannot determine status; errors are never shown as clean.
 const REMOVE_LONG: &str = "\
 Remove worktrees by branch or exact checkout path (including detached
 worktrees). Without arguments, opens a fuzzy
-multi-select of this repo's worktrees (terminal only).
+multi-select of this repo's worktrees (terminal only). Like git worktree
+remove, this removes a checkout rather than its branch.
 
-The branch itself is kept unless -d/--delete-branch is passed (use `clean`
-for \"remove everything that is merged\"). Worktrees with uncommitted changes
-are refused unless --force. Removing the worktree you are standing in is
-supported: the shell wrapper brings you back to the main checkout.
+The entire checkout directory is deleted, including its ignored files; the
+branch and its commits stay unless -d/--delete-branch is passed. Use `clean`
+to select merged worktrees automatically and delete their branches too.
+Worktrees with uncommitted changes are refused unless --force. Removing
+the worktree you are standing in is supported: the shell wrapper brings you
+back to the main checkout.
 
 With -a/--all (the default outside a repo), candidates span every project,
 labelled by repo id, and a branch argument selects that branch's worktree
@@ -197,21 +200,36 @@ Examples:
   bonsai remove fix-parser -d   # remove worktree and delete the branch";
 
 const PRUNE_LONG: &str = "\
-Housekeeping for the bonsai root: immediately drops missing, unlocked linked
-worktree registrations in the current repo, deletes orphaned directories (crash leftovers not registered as
-worktrees, after confirmation), and removes empty directories. With
--a/--all (the default outside a repo), prunes every project and sweeps the
-entire bonsai root, including worktrees whose main clone has been deleted
-(their .git file points nowhere). Confirmed independent
-orphan directories are deleted concurrently with numbered result lines.
-Optional branches or exact checkout paths restrict the operation to those
-worktrees, including missing directories. Branches are preserved.";
+Repair leftovers after checkout directories or their main clone were deleted.
+Branches are never deleted, and existing registered checkouts stay.
+
+There are three distinct effects:
+  1. Drop Git registrations for missing, unlocked linked worktrees, including
+     external ones (shown as 'directory deleted' in hq). No files remain to
+     delete; this metadata cleanup happens without a prompt.
+  2. Delete orphan directories under the bonsai root: directories no longer
+     registered as worktrees. Their contents may include uncommitted work,
+     so deletion requires confirmation or --yes. Review --dry-run first.
+  3. Remove empty directories left under the bonsai root.
+
+Optional branches or exact checkout paths restrict cleanup to those targets,
+including missing paths. With -a/--all (the default outside a repo), every
+project and the entire bonsai root are checked, including worktrees whose
+main clone was deleted. Confirmed independent orphan directories are deleted
+concurrently with numbered result lines. Use `trim` to free ignored build
+files from worktrees you want to keep; `prune` does not trim live worktrees.
+
+Examples:
+  bonsai prune --dry-run        # inspect registrations and directories
+  bonsai prune fix-parser       # clean up one missing worktree
+  bonsai prune -a --dry-run     # inspect leftovers across every project";
 
 const CLEAN_LONG: &str = "\
-Remove every worktree whose branch is already integrated into the default
-branch, then delete those branches. Detects regular merges and squash-merges
-(content comparison), including branches whose upstream was deleted after
-merging. A missing upstream alone never proves integration. Fetches with
+Delete entire worktree directories, including ignored files, and their
+local branches when already integrated into the default branch. Use `trim`
+instead to keep the worktrees and branches. Detects regular merges and
+squash-merges (content comparison), including branches whose upstream was
+deleted after merging. A missing upstream alone never proves integration. Fetches with
 --prune first (disable with --no-fetch or [clean] fetch = false).
 
 Never touched: the main checkout, the default branch, locked worktrees,
@@ -220,6 +238,7 @@ with unpushed commits on a live upstream, and branches matching [clean]
 protected globs. The plan is always printed; without --yes (alias
 -f/--force) a confirmation multi-select opens (terminal only).
 
+Optional branches or exact checkout paths restrict the plan and deletion.
 With -a/--all (the default outside a repo), every project is analyzed with
 its own configuration, then one combined plan is confirmed; --json prints
 an array with one report per project, each carrying its repo id.
@@ -237,7 +256,10 @@ Examples:
 const TRIM_LONG: &str = "\
 Free disk space by deleting what git ignores (node_modules, target, .venv,
 build output, caches) from Git-registered linked worktrees. Worktrees, branches,
-tracked files, and untracked files stay.
+tracked files, and non-ignored untracked files stay. Like git clean -X,
+this targets ignored files, with additional keep rules. Dependencies and builds
+will need to be restored before using them again. This does not remove
+worktrees (`remove` or `clean`) or repair missing registrations (`prune`).
 
 Without arguments, every linked worktree of the current project is
 planned (-a/--all, the default outside a repo: of every project); branches
@@ -370,8 +392,8 @@ changes, total size, age, stack, coding agents, running agents, and deleted
 checkouts. Open a project to list each checkout with its changes, upstream,
 size, dependency directories, and the coding agents running in it. The home list has four views, from the shortest
 list to the longest: table, projects (each with its checkouts), owners, and
-hosts, each group with its totals. t moves to the next view and T back;
-tabs on the top border show the current one. s sorts by name, recent activity, or size. Sizes from
+hosts, each group with its totals. v moves to the next view and V back;
+tabs on the top border show the current one. ctrl-s sorts by name, recent activity, or size. Sizes from
 the previous session show at once and update as they are measured again.
 
 Keys follow vim: j/k with counts (5j), gg/G, ctrl-d/u, ctrl-f/b, ctrl-e/y,
@@ -380,13 +402,15 @@ to search (user: and org: match owners, running: keeps checkouts where
 coding agents run). Enter opens a project; on a
 checkout it quits and, with the shell wrapper, changes into it.
 
-Commands act on the selection: a adds a worktree, dd removes one, D also
-deletes its branch, C cleans merged worktrees, x trims ignored files
-(node_modules, target, ...), P prunes deleted ones, f fetches, e opens
-$VISUAL or $EDITOR, A and R start or resume a coding agent, p shows where
-agents are running, and yy copies the path. Removals, clean, and trim ask
-first. : opens a command line with the
-same commands (:add <branch>). Bonsai commands stream into an output pane;
+Commands act on the selection: a adds a worktree, R removes it while
+keeping its branch, D deletes both, C cleans merged worktrees and branches,
+T trims ignored files (node_modules, target, ...), P prunes leftovers,
+f fetches, e edits with $VISUAL or $EDITOR, s starts and r resumes a coding
+agent, p lists running agents (ps), and y yanks the path. Every destructive
+action uses an uppercase key and confirms exactly what will be deleted.
+v/V changes views, ctrl-r refreshes, ctrl-s sorts, and o opens the output.
+: opens a command line with the same commands (:add <branch>).
+Bonsai commands stream into an output pane;
 agents and editors take over the terminal until they exit. ? lists every
 key.
 
@@ -528,10 +552,10 @@ pub enum Commands {
         #[arg(long)]
         json: bool,
     },
-    /// Remove worktrees, keeping their branches unless -d
+    /// Delete chosen worktree directories; keep branches unless -d
     #[command(alias = "rm", long_about = REMOVE_LONG)]
     Remove {
-        /// Branches or exact managed paths to remove; omit (on a terminal) to
+        /// Branches or exact checkout paths to remove; omit (on a terminal) to
         /// fuzzy multi-select
         branches: Vec<String>,
         /// Also delete the branch (refuses unmerged branches unless --force)
@@ -544,7 +568,7 @@ pub enum Commands {
         #[arg(short, long)]
         all: bool,
     },
-    /// Clean up stale registrations, orphaned directories, and empty dirs
+    /// Drop missing registrations; delete orphan dirs; keep branches
     #[command(long_about = PRUNE_LONG)]
     Prune {
         /// Branches or exact checkout paths to prune (default: all in scope)
@@ -565,7 +589,7 @@ pub enum Commands {
         #[arg(short, long)]
         all: bool,
     },
-    /// Delete ignored files (node_modules, target, ...); worktrees stay
+    /// Delete ignored files (builds, dependencies); keep worktrees and branches
     #[command(long_about = TRIM_LONG)]
     Trim {
         /// Branches or exact checkout paths to trim (default: every
@@ -587,7 +611,7 @@ pub enum Commands {
         #[arg(short, long)]
         all: bool,
     },
-    /// Remove worktrees merged into the default branch (incl. squash-merges)
+    /// Delete merged worktrees and their branches (including squash-merges)
     #[command(long_about = CLEAN_LONG)]
     Clean {
         /// Branches or exact checkout paths to clean (default: every linked worktree in scope)

@@ -4,6 +4,104 @@ use super::*;
 
 const DESTRUCTIVE: [Cmd; 5] = [Cmd::Remove, Cmd::Delete, Cmd::Clean, Cmd::Prune, Cmd::Trim];
 
+#[test]
+fn command_shortcuts_are_mnemonic_and_destructive_shortcuts_are_uppercase() {
+    let mut keys = std::collections::HashSet::new();
+    for spec in COMMANDS {
+        assert!(keys.insert(spec.key), "duplicate shortcut: {}", spec.key);
+        if spec.cmd == Cmd::Help {
+            continue;
+        }
+        let letter = spec.key.strip_prefix("ctrl-").unwrap_or(spec.key);
+        assert_eq!(letter.len(), 1, "{} needs one command initial", spec.name);
+        assert!(
+            letter.eq_ignore_ascii_case(&spec.name[..1]),
+            "{} must start with {}",
+            spec.key,
+            spec.name
+        );
+        if DESTRUCTIVE.contains(&spec.cmd) {
+            assert!(letter.chars().all(|key| key.is_ascii_uppercase()));
+        }
+        let event = KeyEvent::new(
+            KeyCode::Char(letter.chars().next().unwrap()),
+            if spec.key.starts_with("ctrl-") {
+                KeyModifiers::CONTROL
+            } else {
+                KeyModifiers::NONE
+            },
+        );
+        assert_eq!(shortcut(&event), Some(spec.cmd), "{}", spec.name);
+    }
+}
+
+#[test]
+fn shifted_command_initials_are_normalized_without_modified_deletion_shortcuts() {
+    for (letter, command) in [
+        ('r', Cmd::Remove),
+        ('d', Cmd::Delete),
+        ('c', Cmd::Clean),
+        ('p', Cmd::Prune),
+        ('t', Cmd::Trim),
+    ] {
+        assert_eq!(
+            shortcut(&KeyEvent::new(KeyCode::Char(letter), KeyModifiers::SHIFT)),
+            Some(command)
+        );
+        assert_eq!(
+            shortcut(&KeyEvent::new(
+                KeyCode::Char(letter.to_ascii_uppercase()),
+                KeyModifiers::ALT
+            )),
+            None
+        );
+        assert!(
+            !shortcut(&KeyEvent::new(
+                KeyCode::Char(letter.to_ascii_uppercase()),
+                KeyModifiers::CONTROL
+            ))
+            .is_some_and(|command| DESTRUCTIVE.contains(&command))
+        );
+    }
+}
+
+#[test]
+fn lowercase_old_destructive_shortcuts_cannot_offer_deletion() {
+    for input in ["dd", "x", "t"] {
+        let mut model = fixture();
+        for key in input.chars() {
+            assert!(matches!(
+                model.on_key(press(KeyCode::Char(key))),
+                Effect::None
+            ));
+        }
+        assert!(model.confirm.is_none());
+        assert!(model.ready_plan.is_none());
+    }
+}
+
+#[test]
+fn uppercase_command_initials_offer_the_correct_destructive_action() {
+    for (key, command) in [
+        ('R', Cmd::Remove),
+        ('D', Cmd::Delete),
+        ('C', Cmd::Clean),
+        ('P', Cmd::Prune),
+        ('T', Cmd::Trim),
+    ] {
+        let mut model = fixture();
+        let expected = destructive(&mut fixture(), command);
+        let effect = model.on_key(press(KeyCode::Char(key)));
+        let actual = if matches!(command, Cmd::Remove | Cmd::Delete) {
+            assert!(matches!(effect, Effect::None));
+            background(model.on_key(press(KeyCode::Char('y'))))
+        } else {
+            background(effect)
+        };
+        assert_eq!(arguments(&actual), arguments(&expected), "{key}");
+    }
+}
+
 fn linked(path: &str) -> WorktreeEntry {
     WorktreeEntry {
         path: path.into(),
