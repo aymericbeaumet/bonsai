@@ -1766,6 +1766,198 @@ fn prune_cleans_up_after_manual_deletion() {
 }
 
 #[test]
+fn prune_immediately_removes_missing_external_registrations() {
+    let repo = TestRepo::new();
+    let path = repo.add_external("feat-gone");
+    repo.git(&repo.clone, &["config", "gc.worktreePruneExpire", "never"]);
+    std::fs::remove_dir_all(&path).unwrap();
+
+    repo.bonsai(&repo.clone)
+        .args(["prune", "--yes"])
+        .assert()
+        .success();
+
+    assert!(!repo.worktree_list().contains("feat-gone"));
+    repo.git(
+        &repo.clone,
+        &["show-ref", "--verify", "refs/heads/feat-gone"],
+    );
+}
+
+#[test]
+fn prune_selected_missing_path_preserves_other_registrations_and_orphans() {
+    let repo = TestRepo::new();
+    let selected = repo.add_external("feat-selected");
+    let other = repo.add("feat-other");
+    let orphan = other.parent().unwrap().join("orphan");
+    std::fs::create_dir_all(&orphan).unwrap();
+    std::fs::write(orphan.join(".git"), "gitdir: /nonexistent\n").unwrap();
+    std::fs::remove_dir_all(&selected).unwrap();
+    std::fs::remove_dir_all(&other).unwrap();
+
+    repo.bonsai(&repo.clone)
+        .args(["prune", selected.to_str().unwrap(), "--dry-run", "--json"])
+        .assert()
+        .success()
+        .stdout(predicate::str::contains(selected.to_str().unwrap()))
+        .stdout(predicate::str::contains(other.to_str().unwrap()).not());
+    assert!(repo.worktree_list().contains("feat-selected"));
+
+    repo.bonsai(&repo.clone)
+        .args(["prune", selected.to_str().unwrap(), "--yes"])
+        .assert()
+        .success();
+    let list = repo.worktree_list();
+    assert!(!list.contains("feat-selected"));
+    assert!(list.contains("feat-other"));
+    assert!(orphan.exists());
+}
+
+#[test]
+fn prune_by_branch_preserves_locked_missing_and_existing_dirty_worktrees() {
+    let repo = TestRepo::new();
+    let selected = repo.add_external("feat-selected");
+    let locked = repo.add_external("feat-locked");
+    let dirty = repo.add_external("feat-dirty");
+    repo.git(&repo.clone, &["worktree", "lock", locked.to_str().unwrap()]);
+    std::fs::write(dirty.join("uncommitted"), "keep\n").unwrap();
+    std::fs::remove_dir_all(&selected).unwrap();
+    std::fs::remove_dir_all(&locked).unwrap();
+
+    repo.bonsai(&repo.clone)
+        .args([
+            "prune",
+            "feat-selected",
+            "feat-locked",
+            "feat-dirty",
+            "--yes",
+        ])
+        .assert()
+        .success();
+
+    let list = repo.worktree_list();
+    assert!(!list.contains("feat-selected"));
+    assert!(list.contains("feat-locked"));
+    assert!(list.contains("feat-dirty"));
+    assert!(dirty.join("uncommitted").exists());
+}
+
+#[test]
+fn prune_unknown_target_does_not_prune_valid_selection() {
+    let repo = TestRepo::new();
+    let selected = repo.add_external("feat-selected");
+    std::fs::remove_dir_all(&selected).unwrap();
+    repo.bonsai(&repo.clone)
+        .args(["prune", "feat-selected", "unknown", "--yes"])
+        .assert()
+        .failure();
+    assert!(repo.worktree_list().contains("feat-selected"));
+}
+
+#[test]
+fn prune_selected_orphan_does_not_delete_its_sibling() {
+    let repo = TestRepo::new();
+    let anchor = repo.add("feat-anchor");
+    let selected = anchor.parent().unwrap().join("selected-orphan");
+    let other = anchor.parent().unwrap().join("other-orphan");
+    for path in [&selected, &other] {
+        std::fs::create_dir_all(path).unwrap();
+        std::fs::write(path.join(".git"), "gitdir: /nonexistent\n").unwrap();
+    }
+
+    let output = repo
+        .bonsai(&repo.clone)
+        .args(["prune", selected.to_str().unwrap(), "--dry-run", "--json"])
+        .output()
+        .unwrap();
+    assert!(output.status.success());
+    let plan: serde_json::Value = serde_json::from_slice(&output.stdout).unwrap();
+    assert_eq!(plan["stale"], serde_json::json!([]));
+    assert_eq!(plan["orphans"], serde_json::json!([selected]));
+
+    repo.bonsai(&repo.clone)
+        .args(["prune", selected.to_str().unwrap(), "--yes"])
+        .assert()
+        .success();
+    assert!(!selected.exists());
+    assert!(other.exists());
+    assert!(anchor.exists());
+}
+
+#[test]
+fn prune_reviewed_plan_rejects_recreated_orphan_before_any_deletion() {
+    let repo = TestRepo::new();
+    let selected = repo.add("feat-selected");
+    let other = repo.add("feat-other");
+    std::fs::remove_dir_all(&selected).unwrap();
+    std::fs::remove_dir_all(&other).unwrap();
+    let output = repo
+        .bonsai(&repo.clone)
+        .args(["prune", "--all", "--dry-run", "--json"])
+        .output()
+        .unwrap();
+    assert!(output.status.success());
+    let reviewed = repo.dir.join("reviewed-prune.json");
+    std::fs::write(&reviewed, output.stdout).unwrap();
+
+    repo.git(
+        &repo.clone,
+        &["worktree", "remove", selected.to_str().unwrap()],
+    );
+    std::fs::create_dir_all(&selected).unwrap();
+    std::fs::write(selected.join(".git"), "gitdir: /nonexistent\n").unwrap();
+    std::fs::write(selected.join("uncommitted"), "preserve\n").unwrap();
+
+    repo.bonsai(&repo.clone)
+        .args([
+            "prune",
+            "--all",
+            "--yes",
+            "--reviewed-plan",
+            reviewed.to_str().unwrap(),
+        ])
+        .assert()
+        .failure()
+        .stderr(predicate::str::contains("prune plan changed; review again"));
+    assert!(selected.join("uncommitted").exists());
+    assert!(repo.worktree_list().contains("feat-other"));
+}
+
+#[test]
+fn prune_reviewed_plan_applies_unchanged_registration_and_orphan_plan() {
+    let repo = TestRepo::new();
+    let missing = repo.add_external("feat-missing");
+    let anchor = repo.add("feat-anchor");
+    let orphan = anchor.parent().unwrap().join("orphan");
+    std::fs::create_dir_all(&orphan).unwrap();
+    std::fs::write(orphan.join(".git"), "gitdir: /nonexistent\n").unwrap();
+    std::fs::remove_dir_all(&missing).unwrap();
+    let output = repo
+        .bonsai(&repo.clone)
+        .args(["prune", "--dry-run", "--json"])
+        .output()
+        .unwrap();
+    assert!(output.status.success());
+    let reviewed = repo.dir.join("reviewed-prune.json");
+    std::fs::write(&reviewed, output.stdout).unwrap();
+
+    repo.bonsai(&repo.clone)
+        .args([
+            "prune",
+            missing.to_str().unwrap(),
+            orphan.to_str().unwrap(),
+            "--yes",
+            "--reviewed-plan",
+            reviewed.to_str().unwrap(),
+        ])
+        .assert()
+        .success();
+    assert!(!repo.worktree_list().contains("feat-missing"));
+    assert!(!orphan.exists());
+    assert!(anchor.exists());
+}
+
+#[test]
 fn prune_reports_only_the_registrations_it_dropped() {
     let repo = TestRepo::new();
     let path = repo.add("feat-gone");
@@ -3646,6 +3838,92 @@ fn trim_confirms_unless_yes_and_selects_targets() {
         .assert()
         .success()
         .stderr(predicate::str::contains("nothing to trim"));
+}
+
+#[test]
+fn trim_reviewed_plan_rejects_new_ignored_roots_before_deletion() {
+    let repo = TestRepo::new();
+    repo.commit_files(&[(".gitignore", "node_modules/\ntarget/\n")]);
+    let path = repo.add("feat-reviewed");
+    std::fs::create_dir(path.join("node_modules")).unwrap();
+    std::fs::write(path.join("node_modules/old"), "old").unwrap();
+    let preview = repo
+        .bonsai(&repo.clone)
+        .args(["trim", "feat-reviewed", "--dry-run", "--json"])
+        .assert()
+        .success()
+        .get_output()
+        .stdout
+        .clone();
+    let manifest = repo.dir.join("trim-plan.json");
+    std::fs::write(&manifest, preview).unwrap();
+    std::fs::create_dir(path.join("target")).unwrap();
+    std::fs::write(path.join("target/new"), "new").unwrap();
+
+    repo.bonsai(&repo.clone)
+        .args(["trim", "feat-reviewed", "--yes", "--reviewed-plan"])
+        .arg(manifest)
+        .assert()
+        .failure()
+        .stderr(predicate::str::contains("trim plan changed; review again"));
+    assert!(path.join("node_modules/old").exists());
+    assert!(path.join("target/new").exists());
+}
+
+#[test]
+fn trim_reviewed_plan_accepts_unchanged_roots_with_growing_contents() {
+    let repo = TestRepo::new();
+    repo.commit_files(&[(".gitignore", "node_modules/\n")]);
+    let path = repo.add("feat-reviewed");
+    std::fs::create_dir(path.join("node_modules")).unwrap();
+    std::fs::write(path.join("node_modules/old"), "old").unwrap();
+    let preview = repo
+        .bonsai(&repo.clone)
+        .args(["trim", "feat-reviewed", "--dry-run", "--json"])
+        .assert()
+        .success()
+        .get_output()
+        .stdout
+        .clone();
+    let manifest = repo.dir.join("trim-plan.json");
+    std::fs::write(&manifest, preview).unwrap();
+    std::fs::write(path.join("node_modules/new"), "more regenerated content").unwrap();
+
+    repo.bonsai(&repo.clone)
+        .args(["trim", "feat-reviewed", "--yes", "--reviewed-plan"])
+        .arg(manifest)
+        .assert()
+        .success();
+    assert!(!path.join("node_modules").exists());
+}
+
+#[test]
+fn trim_reviewed_plan_rejects_changed_kept_paths() {
+    let repo = TestRepo::new();
+    repo.commit_files(&[(".gitignore", "node_modules/\n.env\n")]);
+    let path = repo.add("feat-reviewed");
+    std::fs::create_dir(path.join("node_modules")).unwrap();
+    std::fs::write(path.join("node_modules/old"), "old").unwrap();
+    let preview = repo
+        .bonsai(&repo.clone)
+        .args(["trim", "feat-reviewed", "--dry-run", "--json"])
+        .assert()
+        .success()
+        .get_output()
+        .stdout
+        .clone();
+    let manifest = repo.dir.join("trim-plan.json");
+    std::fs::write(&manifest, preview).unwrap();
+    std::fs::write(path.join(".env"), "LOCAL_TOKEN=keep").unwrap();
+
+    repo.bonsai(&repo.clone)
+        .args(["trim", "feat-reviewed", "--yes", "--reviewed-plan"])
+        .arg(manifest)
+        .assert()
+        .failure()
+        .stderr(predicate::str::contains("trim plan changed; review again"));
+    assert!(path.join("node_modules/old").exists());
+    assert!(path.join(".env").exists());
 }
 
 #[test]

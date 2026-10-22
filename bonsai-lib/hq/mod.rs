@@ -1,3 +1,5 @@
+mod actions;
+mod choice;
 mod footprint;
 mod inventory;
 mod jobs;
@@ -5,6 +7,7 @@ mod keys;
 mod owner;
 mod rows;
 mod running;
+mod scope;
 mod table;
 mod view;
 
@@ -220,6 +223,8 @@ fn drive(terminal: &mut Term, source: &mut Source<'_>) -> Result<Option<PathBuf>
     let mut running: Option<(jobs::Background, Option<String>)> = None;
     // A first `q` while a command runs only warns; only keys clear that.
     let mut stop_armed = false;
+    let mut queued = std::collections::VecDeque::new();
+    let mut batch_active = false;
     let outcome = loop {
         terminal.draw(|frame| view::draw(frame, &mut model))?;
         let mut next: Option<Action> = None;
@@ -231,12 +236,20 @@ fn drive(terminal: &mut Term, source: &mut Source<'_>) -> Result<Option<PathBuf>
                     Pumped::Output => changed = true,
                     Pumped::Exited(status) => {
                         let (job, project) = running.take().expect("a running command");
-                        let remeasure = project.map_or(Remeasure::None, Remeasure::Project);
+                        let remeasure = project.map_or(Remeasure::All, Remeasure::Project);
                         let finished = finish(&job, status, &mut model);
                         if finished.reload {
                             reload(source, &mut model, &mut probes, remeasure);
                         }
                         next = finished.next;
+                        if status.success() {
+                            next = next.or_else(|| queued.pop_front());
+                        } else {
+                            queued.clear();
+                        }
+                        if next.is_none() {
+                            batch_active = false;
+                        }
                         changed = true;
                     }
                 }
@@ -305,13 +318,48 @@ fn drive(terminal: &mut Term, source: &mut Source<'_>) -> Result<Option<PathBuf>
                     model.notice = Some(format!("wait for {} to finish", job.spec.label));
                     continue;
                 }
+                let action = match action {
+                    Action::Batch(actions) => {
+                        queued.extend(actions);
+                        let Some(first) = queued.pop_front() else {
+                            continue;
+                        };
+                        batch_active = true;
+                        model.pane = Some(jobs::Pane::new("Actions in selected scope"));
+                        first
+                    }
+                    action => action,
+                };
                 match action {
+                    Action::Batch(_) => unreachable!("batches contain individual actions"),
                     Action::Background { spec, project } => match jobs::Background::start(spec) {
                         Ok(job) => {
-                            model.pane = Some(jobs::Pane::new(&job.spec.label));
+                            if batch_active {
+                                if let Some(pane) = model.pane.as_mut() {
+                                    pane.state = jobs::State::Running;
+                                    pane.push(jobs::Chunk {
+                                        text: format!(
+                                            "{} · {}",
+                                            job.spec.label,
+                                            job.spec.dir.display()
+                                        ),
+                                        progress: false,
+                                        stdout: false,
+                                    });
+                                }
+                            } else {
+                                model.pane = Some(jobs::Pane::new(&job.spec.label));
+                            }
                             running = Some((job, project));
                         }
-                        Err(error) => model.notice = Some(format!("{error:#}")),
+                        Err(error) => {
+                            if batch_active && let Some(pane) = model.pane.as_mut() {
+                                pane.state = jobs::State::Failed(format!("{error:#}"));
+                            }
+                            queued.clear();
+                            batch_active = false;
+                            model.notice = Some(format!("{error:#}"));
+                        }
                     },
                     Action::Foreground(task) => {
                         suspend_terminal(terminal)?;
@@ -406,6 +454,7 @@ fn finish(job: &jobs::Background, status: ExitStatus, model: &mut Model) -> Fini
         jobs::After::CleanPlan { .. }
             | jobs::After::CleanVerify { .. }
             | jobs::After::TrimPlan { .. }
+            | jobs::After::PrunePlan { .. }
     );
     if !ok {
         model.notice = Some(format!(
@@ -429,13 +478,23 @@ fn finish(job: &jobs::Background, status: ExitStatus, model: &mut Model) -> Fini
                 .map(|line| PathBuf::from(line.trim()));
             model.notice = Some(format!("{label} finished"));
         }
-        jobs::After::CleanPlan { project } => {
+        jobs::After::CleanPlan { project, targets } => {
             model.pane = None;
-            model.offer_clean_plan(project, &job.stdout.join("\n"));
+            model.offer_clean_plan(project, targets, &job.stdout.join("\n"));
         }
         jobs::After::CleanVerify { project, expected } => {
             model.pane = None;
             next = model.verified_clean(project, expected, &job.stdout.join("\n"));
+        }
+        jobs::After::PrunePlan { project, targets } => {
+            model.pane = None;
+            model.offer_plan(
+                PlanKind::Prune {
+                    targets: targets.clone(),
+                },
+                project,
+                &job.stdout.join("\n"),
+            );
         }
         jobs::After::TrimPlan { project, targets } => {
             model.pane = None;
@@ -665,6 +724,7 @@ struct Model {
     view: View,
     palette: Option<Palette>,
     confirm: Option<Confirm>,
+    chooser: Option<choice::Choice>,
     /// The `?` list of keys, scrolled like a pager.
     help: Option<keys::Pager>,
     /// The latest command's output, full screen (`O`).
@@ -808,7 +868,12 @@ struct ReadyPlan {
 
 #[derive(Clone, Debug, PartialEq, Eq)]
 enum PlanKind {
-    Clean,
+    Clean {
+        targets: Vec<PathBuf>,
+    },
+    Prune {
+        targets: Vec<PathBuf>,
+    },
     /// The checkouts it plans; empty for every worktree of the project.
     Trim {
         targets: Vec<PathBuf>,
@@ -818,14 +883,16 @@ enum PlanKind {
 impl PlanKind {
     fn key(&self) -> &'static str {
         match self {
-            Self::Clean => "C",
+            Self::Clean { .. } => "C",
+            Self::Prune { .. } => "P",
             Self::Trim { .. } => "x",
         }
     }
 
     fn name(&self) -> &'static str {
         match self {
-            Self::Clean => "clean",
+            Self::Clean { .. } => "clean",
+            Self::Prune { .. } => "prune",
             Self::Trim { .. } => "trim",
         }
     }
@@ -882,7 +949,7 @@ const COMMANDS: &[CommandSpec] = &[
         name: "add",
         aliases: &["new"],
         args: "<branch>",
-        hint: "create a branch and its worktree in this project",
+        hint: "create a worktree in each project in scope",
         key: "a",
         cmd: Cmd::Add,
     },
@@ -898,7 +965,7 @@ const COMMANDS: &[CommandSpec] = &[
         name: "remove",
         aliases: &["rm"],
         args: "",
-        hint: "remove the selected worktree, keep its branch",
+        hint: "remove worktrees in scope, keep their branches",
         key: "dd",
         cmd: Cmd::Remove,
     },
@@ -906,7 +973,7 @@ const COMMANDS: &[CommandSpec] = &[
         name: "delete",
         aliases: &[],
         args: "",
-        hint: "remove the selected worktree and delete its branch",
+        hint: "remove worktrees and their branches in scope",
         key: "D",
         cmd: Cmd::Delete,
     },
@@ -914,22 +981,22 @@ const COMMANDS: &[CommandSpec] = &[
         name: "clean",
         aliases: &[],
         args: "",
-        hint: "remove this project's merged worktrees",
+        hint: "remove merged worktrees and branches in scope",
         key: "C",
         cmd: Cmd::Clean,
     },
     CommandSpec {
         name: "prune",
         aliases: &[],
-        args: "[all]",
-        hint: "drop deleted and stale worktrees; all: every project",
+        args: "",
+        hint: "prune deleted registrations and orphan directories in scope",
         key: "P",
         cmd: Cmd::Prune,
     },
     CommandSpec {
         name: "trim",
         aliases: &["free"],
-        args: "[project]",
+        args: "",
         hint: "free disk: delete ignored files such as node_modules and target",
         key: "x",
         cmd: Cmd::Trim,
@@ -938,7 +1005,7 @@ const COMMANDS: &[CommandSpec] = &[
         name: "fetch",
         aliases: &[],
         args: "",
-        hint: "fetch this project's remote",
+        hint: "fetch each project in scope",
         key: "f",
         cmd: Cmd::Fetch,
     },
@@ -1035,6 +1102,7 @@ const COMMANDS: &[CommandSpec] = &[
 /// A command started from headquarters.
 #[derive(Debug)]
 enum Action {
+    Batch(Vec<Action>),
     /// Streams into the output pane. `project` is re-measured afterwards.
     Background {
         spec: jobs::Spec,
@@ -1091,6 +1159,7 @@ impl Model {
             view: View::List,
             palette: None,
             confirm: None,
+            chooser: None,
             help: None,
             output: None,
             pane: None,
@@ -1138,6 +1207,9 @@ impl Model {
     fn on_key(&mut self, key: KeyEvent) -> Effect {
         if key.kind == KeyEventKind::Release {
             return Effect::None;
+        }
+        if self.chooser.is_some() {
+            return self.choice_key(key);
         }
         self.notice = None;
         if self.help.is_some() {
@@ -1407,37 +1479,29 @@ impl Model {
             Cmd::Cd => match self.checkout_path() {
                 Some((path, missing)) if !missing => Effect::Cd(path),
                 Some(_) => self.say("its directory was deleted; press P to prune it"),
-                None => self.say("select a checkout first"),
+                None => self.choose_checkout(Cmd::Cd, ""),
             },
             Cmd::Remove => self.confirm_remove(false),
             Cmd::Delete => self.confirm_remove(true),
             Cmd::Clean => {
-                if let Some((project, report)) = self.take_ready(&PlanKind::Clean) {
+                let targets = self.linked_targets(false);
+                if let Some((project, report)) = self.take_ready(&PlanKind::Clean {
+                    targets: targets.clone(),
+                }) {
                     self.open_clean_plan(&project, &report, None);
                     return Effect::None;
                 }
-                self.background(&["clean", "--dry-run", "--json"], |project| {
+                self.scoped_background(&["clean", "--dry-run", "--json"], &targets, |project| {
                     jobs::After::CleanPlan {
                         project: project.to_path_buf(),
+                        targets: targets.clone(),
                     }
                 })
             }
-            Cmd::Prune => {
-                let all = args.trim() == "all";
-                let args: &[&str] = if all { &["prune", "-a"] } else { &["prune"] };
-                self.foreground_bonsai(args, true, !all)
-            }
+            Cmd::Prune => self.prune(),
             Cmd::Trim => self.trim(args.trim() == "project"),
             Cmd::Running => self.show_running(args.split_whitespace().next().unwrap_or("")),
-            Cmd::Fetch => {
-                let Some(project) = self.selected_project() else {
-                    return self.say("select a project first");
-                };
-                let spec =
-                    jobs::Spec::git(&project.path, &["fetch", "--prune"], jobs::After::Refresh);
-                let project = Some(project.id.clone());
-                Effect::Run(Action::Background { spec, project })
-            }
+            Cmd::Fetch => self.fetch_scope(),
             Cmd::Start => {
                 let agent = args.split_whitespace().next();
                 let mut args = vec!["start"];
@@ -1460,7 +1524,7 @@ impl Model {
             }
             Cmd::Edit => {
                 let Some((path, missing)) = self.checkout_path() else {
-                    return self.say("select a checkout first");
+                    return self.choose_checkout(Cmd::Edit, args);
                 };
                 if missing {
                     return self.say("its directory was deleted");
@@ -1480,7 +1544,7 @@ impl Model {
             }
             Cmd::Copy => match self.checkout_path() {
                 Some((path, _)) => Effect::Copy(path.display().to_string()),
-                None => self.say("select a checkout first"),
+                None => self.choose_checkout(Cmd::Copy, args),
             },
             Cmd::Refresh => Effect::Refresh,
             Cmd::Sort => {
@@ -1538,19 +1602,21 @@ impl Model {
     /// project on a project row, the main checkout, or with `project`. The
     /// plan is shown before anything is deleted.
     fn trim(&mut self, whole: bool) -> Effect {
-        let mut targets = Vec::new();
-        let mut label = "bonsai trim --dry-run".to_string();
-        if !whole && let Some((_, worktree)) = self.selected_worktree() {
-            if worktree.missing {
-                return self.say("its directory was deleted; press P to prune it");
-            }
-            // The main checkout itself is never trimmed: it stands for the
-            // project, as on the home list.
-            if !worktree.main {
-                label = format!("bonsai trim --dry-run {}", rows::branch_label(worktree));
-                targets.push(worktree.path.clone());
-            }
+        let targets: Vec<_> = self
+            .linked_targets(whole)
+            .into_iter()
+            .filter(|path| {
+                self.snapshot
+                    .projects
+                    .iter()
+                    .flat_map(|project| &project.worktrees)
+                    .any(|worktree| &worktree.path == path && !worktree.missing)
+            })
+            .collect();
+        if targets.is_empty() {
+            return self.say("nothing to trim in this scope; press P for deleted directories");
         }
+        let label = "bonsai trim --dry-run".to_string();
         let kind = PlanKind::Trim {
             targets: targets.clone(),
         };
@@ -1558,17 +1624,13 @@ impl Model {
             self.open_trim_plan(&project, &targets, &report, None);
             return Effect::None;
         }
-        let mut args = vec!["trim".to_string(), "--dry-run".into(), "--json".into()];
-        args.extend(
-            targets
-                .iter()
-                .map(|path| path.to_string_lossy().into_owned()),
-        );
-        let args: Vec<&str> = args.iter().map(String::as_str).collect();
-        let mut effect = self.background(&args, |project| jobs::After::TrimPlan {
-            project: project.to_path_buf(),
-            targets: targets.clone(),
-        });
+        let mut effect =
+            self.scoped_background(&["trim", "--dry-run", "--json"], &targets, |project| {
+                jobs::After::TrimPlan {
+                    project: project.to_path_buf(),
+                    targets: targets.clone(),
+                }
+            });
         if let Effect::Run(Action::Background { spec, .. }) = &mut effect {
             spec.label = label;
         }
@@ -1606,37 +1668,44 @@ impl Model {
             return None;
         }
         let ready = self.ready_plan.take()?;
-        let project = self.selected_project().map(|project| project.path.clone());
+        let project = self.scope_anchor().map(|(path, _)| path);
         (&ready.kind == kind && project.as_ref() == Some(&ready.project))
             .then_some((ready.project, ready.report))
     }
 
     /// A bonsai subcommand for the selected project, streamed into the pane.
     fn background(&mut self, args: &[&str], after: impl Fn(&Path) -> jobs::After) -> Effect {
-        let Some(project) = self.selected_project() else {
-            return self.say("select a project first");
-        };
-        let (path, id) = (project.path.clone(), project.id.clone());
-        match jobs::Spec::bonsai(&path, &self.flags, args, after(&path)) {
-            Ok(spec) => Effect::Run(Action::Background {
+        let selection = scope::resolve(self);
+        let mut actions = Vec::new();
+        for selected in selection.projects {
+            let project = selected.project;
+            let spec =
+                match jobs::Spec::bonsai(&project.path, &self.flags, args, after(&project.path)) {
+                    Ok(spec) => spec,
+                    Err(error) => return self.say(&format!("{error:#}")),
+                };
+            actions.push(Action::Background {
                 spec,
-                project: Some(id),
-            }),
-            Err(error) => self.say(&format!("{error:#}")),
+                project: Some(project.id.clone()),
+            });
         }
-    }
-
-    fn foreground_bonsai(&mut self, args: &[&str], pause: bool, scoped: bool) -> Effect {
-        let Some(project) = self.selected_project() else {
-            return self.say("select a project first");
-        };
-        let (dir, id) = (project.path.clone(), project.id.clone());
-        self.foreground_at(&dir, args, pause, scoped.then_some(id))
+        match actions.len() {
+            0 => self.say("select a scope first"),
+            1 => Effect::Run(actions.pop().expect("one action")),
+            _ => Effect::Run(Action::Batch(actions)),
+        }
     }
 
     fn foreground_in_checkout(&mut self, args: &[&str]) -> Effect {
         let Some((dir, missing)) = self.checkout_path() else {
-            return self.say("select a checkout first");
+            let (command, arguments) = match args.split_first() {
+                Some((&"start", arguments)) => (Cmd::Start, arguments.join(" ")),
+                _ => (
+                    Cmd::Resume,
+                    args.iter().skip(1).copied().collect::<Vec<_>>().join(" "),
+                ),
+            };
+            return self.choose_checkout(command, &arguments);
         };
         if missing {
             return self.say("its directory was deleted; press P to prune it");
@@ -1673,7 +1742,7 @@ impl Model {
 
     fn confirm_remove(&mut self, delete_branch: bool) -> Effect {
         let Some((project, worktree)) = self.selected_worktree() else {
-            return self.say("open a project and select a checkout first");
+            return self.confirm_remove_scope(delete_branch);
         };
         if worktree.main {
             return self.say("the main checkout cannot be removed");
@@ -1779,8 +1848,14 @@ impl Model {
     }
 
     /// A clean plan finished.
-    fn offer_clean_plan(&mut self, project: &Path, report: &str) {
-        self.offer_plan(PlanKind::Clean, project, report);
+    fn offer_clean_plan(&mut self, project: &Path, targets: &[PathBuf], report: &str) {
+        self.offer_plan(
+            PlanKind::Clean {
+                targets: targets.to_vec(),
+            },
+            project,
+            report,
+        );
     }
 
     /// A trim plan finished.
@@ -1795,6 +1870,7 @@ impl Model {
     /// cannot answer a question you have not read.
     fn offer_plan(&mut self, kind: PlanKind, project: &Path, report: &str) {
         let busy = self.palette.is_some()
+            || self.chooser.is_some()
             || self.filtering
             || self.confirm.is_some()
             || self.help.is_some()
@@ -1815,8 +1891,11 @@ impl Model {
         }
         let ready_at = Some(Instant::now() + ANSWER_DELAY);
         match kind {
-            PlanKind::Clean => self.open_clean_plan(project, report, ready_at),
+            PlanKind::Clean { .. } => self.open_clean_plan(project, report, ready_at),
             PlanKind::Trim { targets } => self.open_trim_plan(project, &targets, report, ready_at),
+            PlanKind::Prune { targets } => {
+                self.open_prune_plan(project, &targets, report, ready_at)
+            }
         }
     }
 
@@ -1879,6 +1958,9 @@ impl Model {
                 Span::styled(entry.reason.clone(), Style::new().fg(Color::Green)),
             ]));
         }
+        for entry in &plan.planned {
+            lines.push(Line::raw(format!("  {}", entry.path.display())));
+        }
         if !skipped.is_empty() {
             lines.push(Line::raw(""));
             lines.push(Line::raw(format!("Kept: {}.", skipped.join(", "))));
@@ -1887,18 +1969,13 @@ impl Model {
         let skipped: Vec<(String, PathBuf)> = plan.agents.iter().map(entry).collect();
         let planned: Vec<(String, PathBuf)> = plan.planned.iter().map(entry).collect();
         lines.extend(self.agent_lines(&skipped, &planned, "clean"));
-        let id = self
-            .snapshot
-            .projects
-            .iter()
-            .find(|item| item.path == project)
-            .map(|item| item.id.clone());
+        let id = self.project_for_paths(&plan.paths());
         // `clean --yes` plans again when it runs, so check first that it
         // would remove exactly these worktrees.
-        let spec = match jobs::Spec::bonsai(
+        let spec = match self.paths_spec(
             project,
-            &self.flags,
             &["clean", "--dry-run", "--json", "--no-fetch"],
+            &plan.paths(),
             jobs::After::CleanVerify {
                 project: project.to_path_buf(),
                 expected: plan.paths(),
@@ -1914,7 +1991,7 @@ impl Model {
             }
         };
         self.confirm = Some(Confirm {
-            title: format!("Clean {name}?"),
+            title: format!("Clean {}?", view::plural(plan.planned.len(), "worktree")),
             lines,
             yes: "clean",
             tone: Color::Yellow,
@@ -1947,7 +2024,6 @@ impl Model {
             .iter()
             .find(|item| item.path == project);
         let name = found.map_or_else(|| path_label(project), |item| item.name.clone());
-        let id = found.map(|item| item.id.clone());
         let label = |branch: &Option<String>, path: &Path| {
             branch.clone().unwrap_or_else(|| path_label(path))
         };
@@ -2017,6 +2093,20 @@ impl Model {
                 ),
             ]));
         }
+        for entry in &plan.planned {
+            lines.push(Line::raw(""));
+            lines.push(Line::styled(
+                entry.path.display().to_string(),
+                Style::new().add_modifier(ratatui::style::Modifier::BOLD),
+            ));
+            for ignored in &entry.entries {
+                lines.push(Line::raw(format!(
+                    "  {}  {}",
+                    ignored.path.display(),
+                    footprint::format_bytes(ignored.bytes)
+                )));
+            }
+        }
         lines.push(Line::raw(""));
         lines.push(Line::raw(format!(
             "That frees {} in {}.",
@@ -2033,20 +2123,21 @@ impl Model {
             .zip(plan.planned.iter().map(|entry| entry.path.clone()))
             .collect();
         lines.extend(self.agent_lines(&skipped, &planned, "trim"));
-        let paths: Vec<String> = plan
+        let paths: Vec<PathBuf> = plan
             .planned
             .iter()
-            .map(|entry| entry.path.to_string_lossy().into_owned())
+            .map(|entry| entry.path.clone())
             .collect();
-        let mut args = vec!["trim", "--yes"];
-        args.extend(paths.iter().map(String::as_str));
-        let mut spec = match jobs::Spec::bonsai(project, &self.flags, &args, jobs::After::Refresh) {
-            Ok(spec) => spec,
-            Err(error) => {
-                self.notice = Some(format!("{error:#}"));
-                return;
-            }
-        };
+        let id = self.project_for_paths(&paths);
+        let mut spec =
+            match self.paths_spec(project, &["trim", "--yes"], &paths, jobs::After::Refresh) {
+                Ok(spec) => spec,
+                Err(error) => {
+                    self.notice = Some(format!("{error:#}"));
+                    return;
+                }
+            };
+        spec.reviewed = Some(report.to_string());
         // The paths are the precise arguments; the branches read better.
         spec.label = match branches.as_slice() {
             [branch] => format!("bonsai trim --yes {branch}"),
@@ -2056,7 +2147,7 @@ impl Model {
             ),
         };
         self.confirm = Some(Confirm {
-            title: format!("Trim {subject}?"),
+            title: format!("Trim {}?", view::plural(plan.planned.len(), "worktree")),
             lines,
             yes: "trim",
             tone: Color::Yellow,
@@ -2153,16 +2244,11 @@ impl Model {
             }
             return None;
         }
-        let id = self
-            .snapshot
-            .projects
-            .iter()
-            .find(|item| item.path == project)
-            .map(|item| item.id.clone());
-        match jobs::Spec::bonsai(
+        let id = self.project_for_paths(expected);
+        match self.paths_spec(
             project,
-            &self.flags,
             &["clean", "--yes", "--no-fetch"],
+            expected,
             jobs::After::Refresh,
         ) {
             Ok(spec) => Some(Action::Background { spec, project: id }),
@@ -2806,13 +2892,29 @@ impl CleanPlan {
             #[serde(default)]
             skipped_agents: Vec<PlannedRemoval>,
         }
-        let report: Report = serde_json::from_str(report)?;
-        Ok(Self {
-            planned: report.planned,
-            dirty: report.skipped_dirty.len(),
-            missing: report.skipped_missing.len(),
-            agents: report.skipped_agents,
-        })
+        #[derive(serde::Deserialize)]
+        #[serde(untagged)]
+        enum Reports {
+            One(Report),
+            Many(Vec<Report>),
+        }
+        let reports = match serde_json::from_str(report)? {
+            Reports::One(report) => vec![report],
+            Reports::Many(reports) => reports,
+        };
+        let mut plan = Self {
+            planned: Vec::new(),
+            dirty: 0,
+            missing: 0,
+            agents: Vec::new(),
+        };
+        for report in reports {
+            plan.planned.extend(report.planned);
+            plan.dirty += report.skipped_dirty.len();
+            plan.missing += report.skipped_missing.len();
+            plan.agents.extend(report.skipped_agents);
+        }
+        Ok(plan)
     }
 
     fn paths(&self) -> Vec<PathBuf> {
@@ -3083,6 +3185,9 @@ fn pad(mut text: String, width: usize) -> String {
 }
 
 #[cfg(test)]
+mod action_tests;
+
+#[cfg(test)]
 mod tests {
     use super::rows::{Depth, TREE_RAIL, child_prefix};
     use super::table::{self, Col, Kind};
@@ -3119,7 +3224,7 @@ mod tests {
         .expect("row")
     }
 
-    fn press(code: KeyCode) -> KeyEvent {
+    pub(super) fn press(code: KeyCode) -> KeyEvent {
         KeyEvent::new(code, KeyModifiers::NONE)
     }
 
@@ -3208,7 +3313,7 @@ mod tests {
         }
     }
 
-    fn sample() -> Snapshot {
+    pub(super) fn sample() -> Snapshot {
         Snapshot {
             root: "/trees".into(),
             warnings: vec!["one checkout is unreadable".to_string()],
@@ -3290,14 +3395,14 @@ mod tests {
         }
     }
 
-    fn background(effect: Effect) -> jobs::Spec {
+    pub(super) fn background(effect: Effect) -> jobs::Spec {
         match effect {
             Effect::Run(Action::Background { spec, .. }) => spec,
             other => panic!("expected a background command, got {other:?}"),
         }
     }
 
-    fn arguments(spec: &jobs::Spec) -> Vec<String> {
+    pub(super) fn arguments(spec: &jobs::Spec) -> Vec<String> {
         spec.args
             .iter()
             .map(|arg| arg.to_string_lossy().into_owned())
@@ -3726,7 +3831,7 @@ mod tests {
         model.on_key(ctrl('w'));
         assert!(matches!(
             model.on_key(press(KeyCode::Enter)),
-            Effect::Run(Action::Foreground(task)) if task.label == "bonsai prune" && task.pause
+            Effect::Run(Action::Background { spec, .. }) if matches!(spec.after, jobs::After::PrunePlan { .. })
         ));
     }
 
@@ -3747,7 +3852,7 @@ mod tests {
         typed(&mut model, "all");
         assert!(matches!(
             model.on_key(press(KeyCode::Enter)),
-            Effect::Run(Action::Foreground(task)) if task.label == "bonsai prune -a" && task.project.is_none()
+            Effect::Run(Action::Background { spec, .. }) if matches!(spec.after, jobs::After::PrunePlan { .. })
         ));
         model.open_palette("sort size");
         model.on_key(press(KeyCode::Enter));
@@ -3776,8 +3881,11 @@ mod tests {
     fn dd_asks_before_removing_and_keeps_the_branch() {
         let mut model = Model::from_snapshot(sample());
         typed(&mut model, "dd");
-        assert!(model.confirm.is_none());
-        assert!(model.status_line().contains("select a checkout"));
+        assert!(
+            model.confirm.is_some(),
+            "project removal uses a confirmation too"
+        );
+        model.on_key(press(KeyCode::Char('n')));
         model.on_key(press(KeyCode::Enter));
         typed(&mut model, "dd");
         let confirm = model.confirm.as_ref().expect("a confirmation");
@@ -3861,13 +3969,16 @@ mod tests {
     fn clean_shows_the_plan_and_checks_it_again_before_removing_anything() {
         let mut model = Model::from_snapshot(sample());
         let spec = background(model.on_key(press(KeyCode::Char('C'))));
-        assert_eq!(arguments(&spec)[2..], ["clean", "--dry-run", "--json"]);
+        assert_eq!(
+            arguments(&spec)[2..],
+            ["clean", "--dry-run", "--json", "/trees/bonsai/ab/dev"]
+        );
         assert!(matches!(spec.after, jobs::After::CleanPlan { .. }));
 
         let project = Path::new("/trees/bonsai");
-        model.offer_clean_plan(project, PLAN);
+        model.offer_clean_plan(project, &["/trees/bonsai/ab/dev".into()], PLAN);
         let confirm = model.confirm.as_ref().expect("a plan");
-        assert_eq!(confirm.title, "Clean bonsai?");
+        assert_eq!(confirm.title, "Clean 1 worktree?");
         let text: Vec<String> = confirm.lines.iter().map(ToString::to_string).collect();
         assert!(
             text.iter()
@@ -3887,7 +3998,13 @@ mod tests {
         let spec = background(model.on_key(press(KeyCode::Char('y'))));
         assert_eq!(
             arguments(&spec)[2..],
-            ["clean", "--dry-run", "--json", "--no-fetch"]
+            [
+                "clean",
+                "--dry-run",
+                "--json",
+                "--no-fetch",
+                "/trees/bonsai/ab/dev"
+            ]
         );
         let jobs::After::CleanVerify { expected, .. } = &spec.after else {
             panic!("expected a verification, got {:?}", spec.after);
@@ -3899,7 +4016,10 @@ mod tests {
         else {
             panic!("expected the clean to run");
         };
-        assert_eq!(arguments(&spec)[2..], ["clean", "--yes", "--no-fetch"]);
+        assert_eq!(
+            arguments(&spec)[2..],
+            ["clean", "--yes", "--no-fetch", "/trees/bonsai/ab/dev"]
+        );
         // It changed: show the new plan instead.
         let changed = PLAN
             .replace("ab/dev\"", "ab/other\"")
@@ -3930,7 +4050,11 @@ mod tests {
         let mut model = Model::from_snapshot(sample());
         model.on_key(press(KeyCode::Char('/')));
         typed(&mut model, "b");
-        model.offer_clean_plan(Path::new("/trees/bonsai"), PLAN);
+        model.offer_clean_plan(
+            Path::new("/trees/bonsai"),
+            &["/trees/bonsai/ab/dev".into()],
+            PLAN,
+        );
         assert!(model.confirm.is_none());
         assert!(model.status_line().contains("press C to review it"));
         typed(&mut model, "y");
@@ -3939,7 +4063,7 @@ mod tests {
         model.on_key(press(KeyCode::Esc));
         model.on_key(press(KeyCode::Char('C')));
         let confirm = model.confirm.as_ref().expect("the ready plan");
-        assert_eq!(confirm.title, "Clean bonsai?");
+        assert_eq!(confirm.title, "Clean 1 worktree?");
         assert!(confirm.ready_at.is_none());
     }
 
@@ -4386,8 +4510,8 @@ mod tests {
         typed(&mut model, "pru");
         assert!(matches!(
             model.on_key(press(KeyCode::Enter)),
-            Effect::Run(Action::Foreground(task))
-                if task.label == "bonsai prune" && task.project.as_deref() == Some("bonsai")
+            Effect::Run(Action::Background { spec, project })
+                if matches!(spec.after, jobs::After::PrunePlan { .. }) && project.as_deref() == Some("bonsai")
         ));
         assert!(model.palette.is_none());
     }
@@ -4496,7 +4620,7 @@ mod tests {
         assert!(screen.contains("interfaceinc"));
         assert!(screen.contains("1 changed"));
         assert!(!screen.contains("feature"));
-        assert!(screen.contains("enter open"));
+        assert!(screen.contains("P prune"));
         assert!(screen.contains("? help"));
         assert!(screen.contains(" bonsai · 2 projects · 3 checkouts · sorted by name "));
         assert!(screen.contains("/trees/bonsai  ·  2 checkouts, 1 with uncommitted changes"));
@@ -5070,8 +5194,6 @@ mod tests {
                 Some(Color::Cyan),
                 "{current} is highlighted"
             );
-            assert!(screen.contains("t next view"), "{screen}");
-            assert!(screen.contains("T previous view"), "{screen}");
         }
         // Inside a project and in search results the views do not apply.
         model.on_key(press(KeyCode::Enter));
@@ -5491,13 +5613,16 @@ mod tests {
         let mut model = Model::from_snapshot(sample());
         // A project row plans every worktree of the project.
         let spec = background(model.on_key(press(KeyCode::Char('x'))));
-        assert_eq!(arguments(&spec)[2..], ["trim", "--dry-run", "--json"]);
+        assert_eq!(
+            arguments(&spec)[2..],
+            ["trim", "--dry-run", "--json", "/trees/bonsai/ab/dev"]
+        );
         assert_eq!(spec.label, "bonsai trim --dry-run");
         assert_eq!(
             spec.after,
             jobs::After::TrimPlan {
                 project: PathBuf::from("/trees/bonsai"),
-                targets: Vec::new()
+                targets: vec![PathBuf::from("/trees/bonsai/ab/dev")]
             }
         );
 
@@ -5507,12 +5632,12 @@ mod tests {
             arguments(&spec)[2..],
             ["trim", "--dry-run", "--json", "/trees/bonsai/ab/dev"]
         );
-        assert_eq!(spec.label, "bonsai trim --dry-run ab/dev");
+        assert_eq!(spec.label, "bonsai trim --dry-run");
         let targets = vec![PathBuf::from("/trees/bonsai/ab/dev")];
         let project = Path::new("/trees/bonsai");
         model.offer_trim_plan(project, &targets, TRIM_PLAN);
         let confirm = model.confirm.as_ref().expect("a plan");
-        assert_eq!(confirm.title, "Trim ab/dev?");
+        assert_eq!(confirm.title, "Trim 1 worktree?");
         assert_eq!(confirm.yes, "trim");
         let text: Vec<String> = confirm.lines.iter().map(ToString::to_string).collect();
         assert!(
@@ -5554,15 +5679,20 @@ mod tests {
             "the project is measured again"
         );
 
-        // The main checkout stands for the project; it is never a target.
+        // Main is an exact checkout, so it never expands to sibling targets.
         model.on_key(press(KeyCode::Char('j')));
         assert!(model.selected_path().unwrap().ends_with("bonsai/main"));
-        let spec = background(model.on_key(press(KeyCode::Char('x'))));
-        assert_eq!(arguments(&spec)[2..], ["trim", "--dry-run", "--json"]);
+        assert!(matches!(
+            model.on_key(press(KeyCode::Char('x'))),
+            Effect::None
+        ));
         model.on_key(press(KeyCode::Char('k')));
         model.open_palette("trim project");
         let spec = background(model.on_key(press(KeyCode::Enter)));
-        assert_eq!(arguments(&spec)[2..], ["trim", "--dry-run", "--json"]);
+        assert_eq!(
+            arguments(&spec)[2..],
+            ["trim", "--dry-run", "--json", "/trees/bonsai/ab/dev"]
+        );
 
         model.open_trim_plan(
             project,
@@ -5633,7 +5763,7 @@ mod tests {
         assert!(model.ready_plan.is_some());
         model.on_key(press(KeyCode::Char('x')));
         let confirm = model.confirm.as_ref().expect("the ready plan");
-        assert_eq!(confirm.title, "Trim ab/dev?");
+        assert_eq!(confirm.title, "Trim 1 worktree?");
         assert!(confirm.ready_at.is_none());
         assert!(model.ready_plan.is_none());
     }
@@ -5701,7 +5831,7 @@ mod tests {
         );
         model.open_trim_plan(project, &[], &trim, None);
         let confirm = model.confirm.take().expect("a plan");
-        assert_eq!(confirm.title, "Trim bonsai?");
+        assert_eq!(confirm.title, "Trim 1 worktree?");
         let text: Vec<String> = confirm.lines.iter().map(ToString::to_string).collect();
         assert!(
             text.iter()

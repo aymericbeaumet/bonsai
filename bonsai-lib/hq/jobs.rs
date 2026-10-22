@@ -30,7 +30,10 @@ pub enum After {
     /// Reload, then select the path the command printed last (`bonsai add`).
     SelectPrinted,
     /// Show the `bonsai clean --dry-run --json` plan for confirmation.
-    CleanPlan { project: PathBuf },
+    CleanPlan {
+        project: PathBuf,
+        targets: Vec<PathBuf>,
+    },
     /// Run the clean only if a fresh plan removes exactly these checkouts.
     CleanVerify {
         project: PathBuf,
@@ -39,6 +42,10 @@ pub enum After {
     /// Show the `bonsai trim --dry-run --json` plan for these checkouts
     /// (every worktree of the project when empty) for confirmation.
     TrimPlan {
+        project: PathBuf,
+        targets: Vec<PathBuf>,
+    },
+    PrunePlan {
         project: PathBuf,
         targets: Vec<PathBuf>,
     },
@@ -52,6 +59,9 @@ pub struct Spec {
     pub args: Vec<OsString>,
     pub dir: PathBuf,
     pub after: After,
+    pub projects: Vec<PathBuf>,
+    /// Original preview checked by the CLI before applying a confirmed action.
+    pub reviewed: Option<String>,
 }
 
 impl Spec {
@@ -68,6 +78,8 @@ impl Spec {
             args: full,
             dir: dir.to_path_buf(),
             after,
+            projects: Vec::new(),
+            reviewed: None,
         })
     }
 
@@ -78,14 +90,21 @@ impl Spec {
             args: args.iter().map(OsString::from).collect(),
             dir: dir.to_path_buf(),
             after,
+            projects: Vec::new(),
+            reviewed: None,
         }
     }
 
-    fn command(&self) -> Command {
+    fn command(&self) -> Result<Command> {
         let mut command = Command::new(&self.program);
         command.args(&self.args).current_dir(&self.dir);
+        if !self.projects.is_empty() {
+            command.env("_BONSAI_PROJECTS", serde_json::to_string(&self.projects)?);
+        } else {
+            command.env_remove("_BONSAI_PROJECTS");
+        }
         scrub_wrapper_env(&mut command);
-        command
+        Ok(command)
     }
 }
 
@@ -161,6 +180,7 @@ pub struct Background {
     pub stdout: Vec<String>,
     readers: usize,
     exited: Option<(ExitStatus, Instant)>,
+    _reviewed: Option<tempfile::NamedTempFile>,
 }
 
 pub enum Poll {
@@ -171,7 +191,19 @@ pub enum Poll {
 
 impl Background {
     pub fn start(spec: Spec) -> Result<Self> {
-        let mut command = spec.command();
+        let mut command = spec.command()?;
+        let reviewed = spec
+            .reviewed
+            .as_ref()
+            .map(|report| -> Result<_> {
+                let mut file =
+                    tempfile::NamedTempFile::new().context("cannot store the reviewed plan")?;
+                file.write_all(report.as_bytes())?;
+                file.flush()?;
+                command.arg("--reviewed-plan").arg(file.path());
+                Ok(file)
+            })
+            .transpose()?;
         detach(&mut command);
         let mut child = command
             .stdin(Stdio::null())
@@ -198,6 +230,7 @@ impl Background {
             stdout: Vec::new(),
             readers,
             exited: None,
+            _reviewed: reviewed,
         })
     }
 
@@ -587,5 +620,43 @@ mod tests {
         assert!(status.success());
         assert!(lines.iter().any(|line| line.starts_with("git version")));
         assert_eq!(job.stdout, lines);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn reviewed_plan_and_project_context_live_until_the_child_finishes() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut spec = Spec::git(dir.path(), &[], After::Refresh);
+        spec.program = "/bin/sh".into();
+        spec.args = vec![
+            "-c".into(),
+            "cat \"$1\"; printf '\\n%s\\n' \"$_BONSAI_PROJECTS\"".into(),
+        ];
+        spec.projects = vec![dir.path().to_path_buf()];
+        spec.reviewed = Some("{\"planned\":[]}".into());
+        let mut job = Background::start(spec).unwrap();
+        let manifest = job._reviewed.as_ref().unwrap().path().to_path_buf();
+        assert!(manifest.exists());
+        let deadline = Instant::now() + Duration::from_secs(10);
+        loop {
+            assert!(Instant::now() < deadline, "child did not finish");
+            match job.poll().unwrap() {
+                Poll::Exited(status) => {
+                    assert!(status.success());
+                    break;
+                }
+                Poll::Pending => thread_sleep(),
+                Poll::Chunk(_) => {}
+            }
+        }
+        assert_eq!(job.stdout[0], "{\"planned\":[]}");
+        let roots: Vec<PathBuf> = serde_json::from_str(job.stdout.last().unwrap()).unwrap();
+        assert_eq!(roots, [dir.path()]);
+        drop(job);
+        assert!(!manifest.exists());
+
+        fn thread_sleep() {
+            std::thread::sleep(Duration::from_millis(5));
+        }
     }
 }

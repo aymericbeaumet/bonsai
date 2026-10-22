@@ -1,7 +1,7 @@
 use std::collections::HashSet;
 use std::path::{Path, PathBuf};
 
-use anyhow::{Result, bail};
+use anyhow::{Context, Result, bail};
 
 use crate::config::Config;
 use crate::parallel;
@@ -14,9 +14,10 @@ pub struct Options {
     pub dry_run: bool,
     pub yes: bool,
     pub json: bool,
+    pub reviewed_plan: Option<PathBuf>,
 }
 
-#[derive(Default, serde::Serialize)]
+#[derive(Default, serde::Serialize, serde::Deserialize)]
 struct Report {
     dry_run: bool,
     /// Registrations whose directory is gone.
@@ -27,49 +28,64 @@ struct Report {
 }
 
 pub fn run(config: &Config, scope: &Scope, options: Options) -> Result<()> {
+    run_selected(config, scope, &[], options)
+}
+
+pub fn run_selected(
+    config: &Config,
+    scope: &Scope,
+    targets: &[String],
+    options: Options,
+) -> Result<()> {
     let mut report = Report {
         dry_run: options.dry_run,
         ..Default::default()
     };
-    let outcome = run_inner(config, scope, &options, &mut report);
+    let outcome = run_inner(config, scope, targets, &options, &mut report);
     if options.json && outcome.is_ok() {
         crate::output::line(format_args!("{}", serde_json::to_string_pretty(&report)?))?;
     }
     outcome
 }
 
-fn run_inner(config: &Config, scope: &Scope, options: &Options, report: &mut Report) -> Result<()> {
+fn run_inner(
+    config: &Config,
+    scope: &Scope,
+    targets: &[String],
+    options: &Options,
+    report: &mut Report,
+) -> Result<()> {
     let Options { dry_run, yes, .. } = *options;
     let root = config.root_dir();
     let all = scope.is_all();
     let _root_lock = crate::paths::lock_root(&root, all)?;
-    let repo = match scope {
-        Scope::Current(project) => Some(&project.repo),
-        Scope::All(_) => None,
-    };
-    let _lock = repo.map(|repo| repo.lock_mutations()).transpose()?;
+    let _locks = scope
+        .projects()
+        .iter()
+        .map(|project| project.repo.lock_mutations())
+        .collect::<Result<Vec<_>>>()?;
+    let selection = resolve_selection(scope, &root, targets).map_err(|error| {
+        if options.reviewed_plan.is_some() {
+            error.context("prune plan changed; review again")
+        } else {
+            error
+        }
+    })?;
+    let mut registrations = Vec::new();
+    for project in scope.projects() {
+        let stale = missing_registrations(&project.repo, selection.as_ref())?;
+        report.stale.extend(stale.iter().cloned());
+        registrations.push((project, stale));
+    }
 
     let orphans: Vec<PathBuf> = if all {
-        for project in scope.projects() {
-            let pruned = project
-                .repo
-                .lock_mutations()
-                .and_then(|_lock| prune_registrations(&project.repo, dry_run));
-            match pruned {
-                Ok(stale) => {
-                    report_pruned(&format!("[{}] ", project.id()), &stale, dry_run);
-                    report.stale.extend(stale);
-                }
-                Err(error) => eprintln!("bonsai: [{}] skipped: {error:#}", project.id()),
-            }
-        }
         // Whole-root sweep: a checkout whose `.git` file points at a git dir
         // that no longer exists (the main clone was deleted) is unrecoverable
         // from the git side and can only be found here.
         let paths = find_worktree_dirs_checked(&root)?;
         let mut orphans = Vec::new();
         for path in paths {
-            if is_orphan(&path)? {
+            if selected(&path, selection.as_ref()) && is_orphan(&path)? {
                 orphans.push(path);
             }
         }
@@ -80,9 +96,6 @@ fn run_inner(config: &Config, scope: &Scope, options: &Options, report: &mut Rep
         };
         let repo = &project.repo;
         let config = &project.config;
-        let stale = prune_registrations(repo, dry_run)?;
-        report_pruned("", &stale, dry_run);
-        report.stale.extend(stale);
         // Directories on disk that git does not know about (crash leftovers).
         let registered: HashSet<PathBuf> = repo
             .worktrees()?
@@ -94,7 +107,10 @@ fn run_inner(config: &Config, scope: &Scope, options: &Options, report: &mut Rep
         let mut orphans = Vec::new();
         for path in paths {
             let canonical = crate::paths::canonicalize_or_self(&path);
-            if !registered.contains(&canonical) && is_orphan(&path)? {
+            if selected(&path, selection.as_ref())
+                && !registered.contains(&canonical)
+                && is_orphan(&path)?
+            {
                 orphans.push(path);
             }
         }
@@ -102,7 +118,27 @@ fn run_inner(config: &Config, scope: &Scope, options: &Options, report: &mut Rep
     };
 
     report.orphans = orphans.clone();
+    if let Some(path) = &options.reviewed_plan {
+        let expected: Report = serde_json::from_slice(
+            &std::fs::read(path).context("cannot read the reviewed prune plan")?,
+        )
+        .context("cannot parse the reviewed prune plan")?;
+        let paths = |paths: &[PathBuf]| paths.iter().cloned().collect::<HashSet<_>>();
+        anyhow::ensure!(
+            paths(&expected.stale) == paths(&report.stale)
+                && paths(&expected.orphans) == paths(&report.orphans),
+            "prune plan changed; review again"
+        );
+    }
     if dry_run {
+        for (project, stale) in &registrations {
+            let tag = if all {
+                format!("[{}] ", project.id())
+            } else {
+                String::new()
+            };
+            report_pruned(&tag, stale, true);
+        }
         if !orphans.is_empty() {
             eprintln!("bonsai: orphaned directories (not registered as worktrees):");
             for (index, path) in orphans.iter().enumerate() {
@@ -112,11 +148,20 @@ fn run_inner(config: &Config, scope: &Scope, options: &Options, report: &mut Rep
         eprintln!("bonsai: dry run, nothing pruned or deleted");
         return Ok(());
     }
+    let snapshots = orphans
+        .iter()
+        .map(std::fs::symlink_metadata)
+        .collect::<std::io::Result<Vec<_>>>()?;
+    for (project, stale) in &registrations {
+        prune_registrations(&project.repo, stale)?;
+        let tag = if all {
+            format!("[{}] ", project.id())
+        } else {
+            String::new()
+        };
+        report_pruned(&tag, stale, false);
+    }
     if !orphans.is_empty() {
-        let snapshots = orphans
-            .iter()
-            .map(std::fs::symlink_metadata)
-            .collect::<std::io::Result<Vec<_>>>()?;
         eprintln!("bonsai: orphaned directories (not registered as worktrees):");
         for (index, path) in orphans.iter().enumerate() {
             eprintln!("  [{}/{}] {}", index + 1, orphans.len(), path.display());
@@ -196,29 +241,78 @@ fn run_inner(config: &Config, scope: &Scope, options: &Options, report: &mut Rep
             crate::workspace::sync_global_quietly(config);
         }
     }
-    remove_empty_tree(&root);
+    if selection.is_none() {
+        remove_empty_tree(&root);
+    }
     eprintln!("bonsai: done");
     Ok(())
 }
 
-/// Stale registrations (their directory is gone), dropped from Git unless
-/// this is a dry run.
-fn prune_registrations(repo: &Repo, dry_run: bool) -> Result<Vec<PathBuf>> {
-    let before = repo.worktrees()?;
-    if dry_run {
-        return Ok(before
-            .into_iter()
-            .filter(|wt| wt.is_prunable)
-            .map(|wt| wt.path)
-            .collect());
-    }
-    repo.git.run(&["worktree", "prune"])?;
-    let after: HashSet<PathBuf> = repo.worktrees()?.into_iter().map(|wt| wt.path).collect();
-    Ok(before
+fn missing_registrations(
+    repo: &Repo,
+    selection: Option<&HashSet<PathBuf>>,
+) -> Result<Vec<PathBuf>> {
+    Ok(repo
+        .linked_worktrees()?
         .into_iter()
-        .map(|wt| wt.path)
-        .filter(|path| !after.contains(path))
+        .filter(|worktree| worktree.is_missing() && selected(&worktree.path, selection))
+        .map(|worktree| worktree.path)
         .collect())
+}
+
+fn prune_registrations(repo: &Repo, stale: &[PathBuf]) -> Result<()> {
+    for path in stale {
+        let worktree = repo.validate_linked_worktree(path)?;
+        anyhow::ensure!(
+            worktree.is_missing(),
+            "worktree is no longer missing: {}; retry",
+            path.display()
+        );
+        repo.git
+            .run(&["worktree", "remove", &path.to_string_lossy()])?;
+    }
+    Ok(())
+}
+
+fn selected(path: &Path, selection: Option<&HashSet<PathBuf>>) -> bool {
+    selection.is_none_or(|paths| paths.contains(&crate::paths::canonicalize_lenient(path)))
+}
+
+fn resolve_selection(
+    scope: &Scope,
+    root: &Path,
+    targets: &[String],
+) -> Result<Option<HashSet<PathBuf>>> {
+    if targets.is_empty() {
+        return Ok(None);
+    }
+    let mut worktrees = Vec::new();
+    for project in scope.projects() {
+        worktrees.extend(project.repo.linked_worktrees()?);
+    }
+    let mut selection = HashSet::new();
+    for wanted in targets {
+        let path = crate::paths::canonicalize_lenient(&std::path::absolute(wanted)?);
+        let mut matched = false;
+        for worktree in &worktrees {
+            let checkout = crate::paths::canonicalize_lenient(&worktree.path);
+            if worktree.branch.as_deref() == Some(wanted) || checkout == path {
+                selection.insert(checkout);
+                matched = true;
+            }
+        }
+        if !matched
+            && path.starts_with(root)
+            && path.join(".git").is_file()
+            && crate::paths::ensure_contained(&path, root).is_ok()
+            && is_orphan(&path)?
+        {
+            selection.insert(path);
+            matched = true;
+        }
+        anyhow::ensure!(matched, "no linked worktree or orphan for '{wanted}'");
+    }
+    Ok(Some(selection))
 }
 
 fn report_pruned(tag: &str, stale: &[PathBuf], dry_run: bool) {

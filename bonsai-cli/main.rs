@@ -136,14 +136,22 @@ fn run(cli: Cli) -> Result<Option<PathBuf>> {
             all,
         } => commands::remove::run(&config, &scope(all), branches, delete_branch, force),
         Commands::Prune {
+            targets,
+            reviewed_plan,
             dry_run,
             yes,
             json,
             all,
-        } => commands::prune::run(
+        } => commands::prune::run_selected(
             &config,
             &scope(all),
-            commands::prune::Options { dry_run, yes, json },
+            &targets,
+            commands::prune::Options {
+                dry_run,
+                yes,
+                json,
+                reviewed_plan,
+            },
         )
         .map(|_| None),
         Commands::Trim {
@@ -151,30 +159,44 @@ fn run(cli: Cli) -> Result<Option<PathBuf>> {
             dry_run,
             yes,
             json,
+            reviewed_plan,
             all,
         } => commands::trim::run(
             &config,
             &scope(all),
             targets,
-            commands::trim::Options { dry_run, yes, json },
+            commands::trim::Options {
+                dry_run,
+                yes,
+                json,
+                reviewed_plan,
+            },
         )
         .map(|_| None),
         Commands::Ps { all, json } => commands::ps::run(&scope(all), json).map(|_| None),
         Commands::Clean {
+            targets,
             dry_run,
             yes,
             no_fetch,
             json,
             all,
-        } => {
-            commands::clean::run(&config, &scope(all), dry_run, yes, no_fetch, json).map(|target| {
-                if json && std::env::var_os(shell::WRAPPED_ENV).is_none() {
-                    None
-                } else {
-                    target
-                }
-            })
-        }
+        } => commands::clean::run_selected(
+            &config,
+            &scope(all),
+            &targets,
+            dry_run,
+            yes,
+            no_fetch,
+            json,
+        )
+        .map(|target| {
+            if json && std::env::var_os(shell::WRAPPED_ENV).is_none() {
+                None
+            } else {
+                target
+            }
+        }),
         Commands::Cd { query, all } => commands::cd::run(&scope(all), query),
         Commands::Resume {
             query,

@@ -54,10 +54,18 @@
   UI, and do not run a shell or tmux inside hq. Bonsai commands run as child
   processes (`bonsai -C <project> …`) streaming into the output pane; coding
   agents and editors run in the foreground on `/dev/tty` while the interface
-  is suspended. Removal, branch deletion, clean, and trim ask inside hq first
+  is suspended. Removal, branch deletion, clean, trim, and prune ask inside hq first
   (clean shows its `--dry-run --json` plan, then runs `--yes --no-fetch`;
   trim shows its `--dry-run --json` plan, then runs `--yes` on the reviewed
-  paths); never pass `--force`.
+  paths; prune previews exact missing registrations/orphan paths before `--yes`);
+  never pass `--force`.
+- HQ commands resolve the selected row once: host/owner groups, project, or
+  exact checkout. Keep commands available in every view; only their targets
+  change. Carry known project roots into child discovery, including projects
+  whose linked checkouts are missing. Destructive commands show exact paths
+  in an in-UI confirmation and run in the output pane; only explicit `O`
+  opens full-screen output. Apply reviewed trim/prune manifests under locks
+  so confirmation cannot widen from metadata removal to directory deletion.
 - hq draws on stderr so the shell wrapper can capture stdout for the cd
   target (Enter on a checkout, or `c`). Never call `Terminal::clear`: it
   queries the cursor position on stdout. Clear with an escape sequence and

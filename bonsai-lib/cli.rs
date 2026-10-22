@@ -197,13 +197,15 @@ Examples:
   bonsai remove fix-parser -d   # remove worktree and delete the branch";
 
 const PRUNE_LONG: &str = "\
-Housekeeping for the bonsai root: runs `git worktree prune` for the current
-repo, deletes orphaned directories (crash leftovers not registered as
+Housekeeping for the bonsai root: immediately drops missing, unlocked linked
+worktree registrations in the current repo, deletes orphaned directories (crash leftovers not registered as
 worktrees, after confirmation), and removes empty directories. With
 -a/--all (the default outside a repo), prunes every project and sweeps the
 entire bonsai root, including worktrees whose main clone has been deleted
 (their .git file points nowhere). Confirmed independent
-orphan directories are deleted concurrently with numbered result lines.";
+orphan directories are deleted concurrently with numbered result lines.
+Optional branches or exact checkout paths restrict the operation to those
+worktrees, including missing directories. Branches are preserved.";
 
 const CLEAN_LONG: &str = "\
 Remove every worktree whose branch is already integrated into the default
@@ -545,6 +547,10 @@ pub enum Commands {
     /// Clean up stale registrations, orphaned directories, and empty dirs
     #[command(long_about = PRUNE_LONG)]
     Prune {
+        /// Branches or exact checkout paths to prune (default: all in scope)
+        targets: Vec<String>,
+        #[arg(long, hide = true, value_name = "FILE")]
+        reviewed_plan: Option<PathBuf>,
         /// Show what would be pruned without touching anything
         #[arg(short = 'n', long)]
         dry_run: bool,
@@ -574,6 +580,9 @@ pub enum Commands {
         /// Output the plan/result as JSON on stdout
         #[arg(long)]
         json: bool,
+        /// Require the deletion roots to match a previously reviewed JSON plan
+        #[arg(long, hide = true)]
+        reviewed_plan: Option<PathBuf>,
         /// Trim every project
         #[arg(short, long)]
         all: bool,
@@ -581,6 +590,8 @@ pub enum Commands {
     /// Remove worktrees merged into the default branch (incl. squash-merges)
     #[command(long_about = CLEAN_LONG)]
     Clean {
+        /// Branches or exact checkout paths to clean (default: every linked worktree in scope)
+        targets: Vec<String>,
         /// Show what would be removed without touching anything
         #[arg(short = 'n', long)]
         dry_run: bool,

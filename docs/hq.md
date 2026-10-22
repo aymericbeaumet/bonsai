@@ -141,19 +141,25 @@ and `running:<agent>` those where that agent is.
 
 ## Commands
 
-Commands act on the selected checkout, or on the selected project's main
-checkout on the home list.
+The same commands are available in every view. The selected row determines
+their scope: a host includes all its projects and checkouts, an owner includes
+its projects on that host, a project includes all its checkouts, and a checkout
+includes only itself. Search results and an open project use checkout scope.
+Selecting the main checkout never expands a destructive action to the project.
+Creation and fetch operate once per project in that scope; commands that open
+an editor or coding agent need one checkout. On host or owner groups, an
+in-UI picker chooses that checkout without leaving HQ.
 
 | Key | Command | Action |
 |---|---|---|
-| `a` | `:add <branch>` | Create a branch and its worktree in the project, then select it |
+| `a` | `:add <branch>` | Create a branch and its worktree in each project in scope |
 | `c`, Enter | `:cd` | Quit and change into the checkout (needs the [shell integration](integrations.md#shells)) |
-| `dd` | `:remove` | Remove the worktree and keep its branch |
-| `D` | `:delete` | Remove the worktree and delete its branch, if its commits are on its upstream or merged |
-| `C` | `:clean` | Remove the project's merged and squash-merged worktrees |
-| `P` | `:prune [all]` | Drop deleted and stale worktrees of the project, or of every project |
-| `x` | `:trim [project]` | Free disk: delete the ignored files (`node_modules`, `target`, …) of the worktree, or of every worktree of the project |
-| `f` | `:fetch` | Fetch the project's remote, then refresh ahead and behind counts |
+| `dd` | `:remove` | Remove selected worktrees and keep their branches |
+| `D` | `:delete` | Remove selected worktrees and delete their branches, if their commits are on their upstream or merged |
+| `C` | `:clean` | Remove merged and squash-merged worktrees in the selection |
+| `P` | `:prune` | Drop deleted and stale worktrees in the selection, including `directory deleted` entries |
+| `x` | `:trim` | Free disk: delete ignored files (`node_modules`, `target`, …) of selected worktrees |
+| `f` | `:fetch` | Fetch selected projects' remotes, then refresh ahead and behind counts |
 | `e` | `:edit` | Open the checkout in `$VISUAL` or `$EDITOR` |
 | `A` | `:start [agent]` | Start Claude Code, Codex, or OpenCode in the checkout |
 | `R` | `:resume [query]` | Resume a coding-agent session from the checkout |
@@ -163,8 +169,11 @@ checkout on the home list.
 `view`, `running`, `output`, `help`, and `quit`. Type to filter, Tab completes the name, and
 Enter runs it with the rest of the line as arguments.
 
-Removing a worktree, deleting a branch, cleaning, and trimming ask first,
-explaining what will happen. A worktree with uncommitted changes is refused. A branch is
+Removing worktrees, deleting branches, cleaning, trimming, and pruning ask
+inside hq first, showing the precise targets and explaining what will happen.
+Trim and prune verify the reviewed deletion plan under their mutation locks;
+if its targets or protected paths change, execution stops for another review.
+A worktree with uncommitted changes is refused. A branch is
 deleted only when its commits are on its upstream, or merged into the main
 checkout when it has none; squash-merged branches are what `C` is for. Clean
 shows the exact worktrees its plan would remove. A worktree where another
@@ -173,19 +182,19 @@ question names the agent, and bonsai refuses or skips that worktree. Nothing
 passes `--force`.
 
 Trim shows the plan of `bonsai trim --dry-run --json` first: each worktree,
-the space it frees, its largest ignored paths, and the local configuration
+the space it frees, every ignored root it will delete, and the local configuration
 and nested repositories it keeps. Confirming runs `bonsai trim --yes` on
-exactly the worktrees you reviewed, then measures the project again. On a
-worktree, `x` trims that worktree; on a project row or the main checkout,
-and with `:trim project`, it trims every linked worktree of the project. The main
-checkout is never trimmed. External worktrees have the same trim and removal
+exactly the worktrees you reviewed, then measures the affected projects again.
+The main checkout is protected from trim and removal. External worktrees have the same trim and removal
 actions and safeguards; their `external` note only means they live outside the
 Bonsai root.
 
-Bonsai commands run in the background and stream their output into a pane
-below the list, which stays usable; Esc closes the pane. Coding agents,
-editors, and prune (which may ask about orphaned directories) take over the
-terminal until they exit, then hq refreshes.
+Bonsai commands, including prune, run in the background and stream progress,
+results, and failures into a pane below the list. The list stays visible and
+usable throughout; actions never switch to full-screen command output.
+Press `O` to explicitly open the latest output full screen, or Esc to close
+the finished pane. Coding agents and editors use the terminal until they exit,
+then hq refreshes.
 
 Warnings are appended to `~/.local/state/bonsai/hq.log`. `--json` waits for
 status and sizes and includes `footprint` on each worktree, and `agents`:

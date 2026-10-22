@@ -27,6 +27,14 @@ path = "bonsai-cli/tests/cli.rs"
 name = "safety"
 path = "bonsai-cli/tests/safety.rs"
 
+[[test]]
+name = "clean_scope"
+path = "bonsai-cli/tests/clean_scope.rs"
+
+[[test]]
+name = "hq_scope"
+path = "bonsai-cli/tests/hq_scope.rs"
+
 [dependencies]
 anyhow = "1.0.104"
 bonsai = { package = "bonsai-lib", path = "bonsai-lib", version = "0.1.1" }

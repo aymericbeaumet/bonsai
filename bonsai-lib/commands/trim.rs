@@ -2,9 +2,9 @@ use std::io::{self, IsTerminal};
 use std::path::{Component, Path, PathBuf};
 use std::sync::atomic::Ordering;
 
-use anyhow::{Result, bail};
+use anyhow::{Context, Result, bail};
 use rayon::prelude::*;
-use serde::Serialize;
+use serde::{Deserialize, Serialize};
 
 use crate::agents;
 use crate::config::Config;
@@ -18,6 +18,7 @@ pub struct Options {
     pub dry_run: bool,
     pub yes: bool,
     pub json: bool,
+    pub reviewed_plan: Option<PathBuf>,
 }
 
 struct Target {
@@ -57,6 +58,67 @@ struct Report {
     skipped_agents: Vec<JsonSkipped>,
     trimmed: Vec<PathBuf>,
     freed: u64,
+}
+
+#[derive(Deserialize)]
+struct ReviewedReport {
+    planned: Vec<ReviewedWorktree>,
+}
+
+#[derive(Deserialize, PartialEq, Eq)]
+struct ReviewedWorktree {
+    path: PathBuf,
+    entries: Vec<ReviewedEntry>,
+    kept: Vec<ReviewedKept>,
+}
+
+#[derive(Deserialize, PartialEq, Eq, PartialOrd, Ord)]
+struct ReviewedEntry {
+    path: PathBuf,
+}
+
+#[derive(Deserialize, PartialEq, Eq, PartialOrd, Ord)]
+struct ReviewedKept {
+    path: PathBuf,
+    reason: String,
+}
+
+fn normalize_review(mut planned: Vec<ReviewedWorktree>) -> Vec<ReviewedWorktree> {
+    for worktree in &mut planned {
+        worktree.entries.sort();
+        worktree.kept.sort();
+    }
+    planned.sort_by(|left, right| left.path.cmp(&right.path));
+    planned
+}
+
+fn review_roots(planned: &[JsonWorktree]) -> Result<Vec<ReviewedWorktree>> {
+    Ok(normalize_review(serde_json::from_value(
+        serde_json::to_value(planned)?,
+    )?))
+}
+
+fn verify_reviewed(path: &Path, planned: &[JsonWorktree]) -> Result<()> {
+    let reviewed: ReviewedReport = serde_json::from_slice(
+        &std::fs::read(path).with_context(|| format!("read trim review {}", path.display()))?,
+    )
+    .context("invalid trim reviewed plan")?;
+    anyhow::ensure!(
+        normalize_review(reviewed.planned) == review_roots(planned)?,
+        "trim plan changed; review again"
+    );
+    Ok(())
+}
+
+fn json_worktree(target: &Target, plan: &Plan) -> JsonWorktree {
+    JsonWorktree {
+        branch: target.branch.clone(),
+        repo: target.repo.clone(),
+        path: target.path.clone(),
+        bytes: plan.bytes(),
+        entries: plan.entries.clone(),
+        kept: plan.kept.clone(),
+    }
 }
 
 pub fn run(config: &Config, scope: &Scope, selection: Vec<String>, options: Options) -> Result<()> {
@@ -137,15 +199,11 @@ fn run_inner(
     report.bytes = planned.iter().map(|(_, plan)| plan.bytes()).sum();
     report.planned = planned
         .iter()
-        .map(|(target, plan)| JsonWorktree {
-            branch: target.branch.clone(),
-            repo: target.repo.clone(),
-            path: target.path.clone(),
-            bytes: plan.bytes(),
-            entries: plan.entries.clone(),
-            kept: plan.kept.clone(),
-        })
+        .map(|(target, plan)| json_worktree(target, plan))
         .collect();
+    if let Some(reviewed) = &options.reviewed_plan {
+        verify_reviewed(reviewed, &report.planned)?;
+    }
     if planned.is_empty() {
         eprintln!("bonsai: nothing to trim");
         return Ok(());
@@ -179,7 +237,7 @@ fn run_inner(
     // Every ignored path is independent: delete them all concurrently.
     // Recheck after the interactive wait: another agent may have started.
     let running = agents::running();
-    for (target, _) in &planned {
+    for (target, plan) in &planned {
         let current = projects[target.project]
             .repo
             .validate_linked_worktree(&target.path)?;
@@ -194,6 +252,14 @@ fn run_inner(
                 "[{}] agent started during confirmation: {}",
                 target.label,
                 agents::describe(&busy)
+            );
+        }
+        if options.reviewed_plan.is_some() && !options.yes {
+            let fresh = ignored::plan(&target.path, &keeps[target.project])?;
+            anyhow::ensure!(
+                review_roots(&[json_worktree(target, plan)])?
+                    == review_roots(&[json_worktree(target, &fresh)])?,
+                "trim plan changed; review again"
             );
         }
     }

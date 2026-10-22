@@ -151,6 +151,9 @@ pub(super) fn draw(frame: &mut Frame, model: &mut Model) {
     if let Some(pager) = model.help.as_mut() {
         draw_help(frame, above_footer, pager);
     }
+    if let Some(choice) = model.chooser.as_mut() {
+        super::choice::draw(frame, above_footer, choice);
+    }
 }
 
 fn kind(model: &Model) -> Kind {
@@ -282,6 +285,9 @@ fn tree_frame(model: &Model) -> bool {
 
 fn keys(model: &Model) -> String {
     let scroll = "j k  ctrl-d ctrl-u  ctrl-f ctrl-b  gg G  scroll";
+    if model.chooser.is_some() {
+        return format!("enter choose checkout   esc cancel   {scroll}");
+    }
     if model.help.is_some() {
         return format!("{scroll}   ? or esc close");
     }
@@ -301,46 +307,32 @@ fn keys(model: &Model) -> String {
     if model.pane.as_ref().is_some_and(|pane| !pane.running()) {
         keys.push("esc close output");
     }
-    if model.pane.is_some() {
-        keys.push("O full output");
-    }
-    match &model.view {
-        View::Detail { .. } => keys.extend([
-            "enter cd",
-            "a add",
-            "dd remove",
-            "D delete",
-            "e edit",
-            "A agent",
-            "C clean",
-            "esc back",
-        ]),
-        View::List if !model.filter.is_empty() => {
-            keys.extend(["enter open", "c cd", "dd remove", "/ edit", "esc clear"]);
-        }
-        View::List if model.grouping.is_tree() => {
-            keys.extend([
-                "enter open",
-                "c cd",
-                "a add",
-                "dd remove",
-                "t next view",
-                "T previous view",
-                "s sort",
-            ]);
-        }
-        View::List => keys.extend([
-            "enter open",
-            "/ search",
-            "a add",
-            "C clean",
-            "P prune",
-            "t next view",
-            "T previous view",
-            "s sort",
-        ]),
-    }
-    keys.extend(["? help", "q quit"]);
+    keys.extend([
+        "a add",
+        "dd remove",
+        "D delete",
+        "C clean",
+        "P prune",
+        "x trim",
+        "f fetch",
+        ": commands",
+        "? help",
+        "enter open/cd",
+        "c cd",
+        "e edit",
+        "A agent",
+        "R resume",
+        "yy copy",
+        "O full output",
+        "/ search",
+        "p running",
+        "t next view",
+        "T previous view",
+        "s sort",
+        "r refresh",
+        "esc back",
+        "q quit",
+    ]);
     keys.join("   ")
 }
 
@@ -623,14 +615,14 @@ pub(super) const HELP: &[(&str, &[(&str, &str)])] = &[
         "Act on the selection",
         &[
             ("a", "add a worktree: type the branch name"),
-            ("dd", "remove the worktree and keep its branch"),
-            ("D", "remove the worktree and delete its branch"),
+            ("dd", "remove selected worktrees and keep their branches"),
+            ("D", "remove selected worktrees and delete their branches"),
             ("C  P", "clean merged worktrees / prune deleted ones"),
             (
                 "x",
                 "trim: delete ignored files such as node_modules and target",
             ),
-            ("f", "fetch the project's remote"),
+            ("f", "fetch selected projects' remotes"),
             ("e", "open the checkout in $VISUAL or $EDITOR"),
             ("A  R", "start / resume a coding agent there"),
             ("yy", "copy the checkout's path"),
@@ -804,6 +796,119 @@ pub(super) fn describe(model: &Model) -> Option<String> {
                 ));
             }
             Some(parts.join("  ·  "))
+        }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::hq::inventory::{Project, Snapshot, WorktreeEntry};
+    use crate::hq::{Grouping, rows};
+
+    fn model() -> Model {
+        Model::from_snapshot(Snapshot {
+            root: "/trees".into(),
+            warnings: Vec::new(),
+            projects: vec![Project {
+                id: "project-id".to_string(),
+                name: "scope-project".to_string(),
+                path: "/repos/project".into(),
+                remote: Some("git@github.com:owner/project.git".to_string()),
+                worktrees: vec![WorktreeEntry {
+                    path: "/external/feature".into(),
+                    branch: Some("feature".to_string()),
+                    head: "abc".to_string(),
+                    main: false,
+                    external: true,
+                    locked: false,
+                    prunable: false,
+                    dirty: Some(false),
+                    added: 0,
+                    modified: 0,
+                    deleted: 0,
+                    untracked: 0,
+                    ahead: 0,
+                    behind: 0,
+                    upstream: None,
+                    upstream_gone: false,
+                    missing: false,
+                    last_activity: None,
+                }],
+            }],
+        })
+    }
+
+    fn screen(model: &mut Model, width: u16) -> Vec<String> {
+        let mut terminal =
+            ratatui::Terminal::new(ratatui::backend::TestBackend::new(width, 24)).unwrap();
+        terminal.draw(|frame| draw(frame, model)).unwrap();
+        let buffer = terminal.backend().buffer();
+        (0..buffer.area.height)
+            .map(|y| {
+                (0..buffer.area.width)
+                    .map(|x| buffer[(x, y)].symbol())
+                    .collect::<String>()
+            })
+            .collect()
+    }
+
+    #[test]
+    fn command_pane_keeps_the_list_visible_in_every_state() {
+        for state in [
+            jobs::State::Running,
+            jobs::State::Succeeded,
+            jobs::State::Failed("exit 1".to_string()),
+        ] {
+            let mut model = model();
+            let mut pane = jobs::Pane::new("prune");
+            pane.state = state;
+            pane.lines.push_back("command progress".to_string());
+            model.pane = Some(pane);
+            let screen = screen(&mut model, 100).join("\n");
+            assert!(screen.contains("scope-project"));
+            assert!(screen.contains("command progress"));
+            assert!(screen.contains("prune ·"));
+            assert!(model.viewport > 0);
+        }
+    }
+
+    #[test]
+    fn full_screen_output_is_an_explicit_overlay() {
+        let mut model = model();
+        let mut pane = jobs::Pane::new("prune");
+        pane.lines.push_back("command progress".to_string());
+        model.pane = Some(pane);
+        assert!(screen(&mut model, 100).join("\n").contains("scope-project"));
+        model.output = Some(Pager::default());
+        let screen = screen(&mut model, 100).join("\n");
+        assert!(!screen.contains("scope-project"));
+        assert!(screen.contains("command progress"));
+    }
+
+    #[test]
+    fn action_hints_are_identical_in_grouped_detail_and_search_views() {
+        let mut model = model();
+        let expected = screen(&mut model, 500)[22].clone();
+        for grouping in Grouping::ALL {
+            for (detail, search) in [
+                (false, ""),
+                (true, ""),
+                (false, "feature"),
+                (true, "feature"),
+            ] {
+                model.grouping = grouping;
+                model.view = if detail {
+                    View::Detail {
+                        project: "project-id".to_string(),
+                    }
+                } else {
+                    View::List
+                };
+                model.filter.set(search);
+                model.rows = rows::visible_rows(&model, 0);
+                assert_eq!(screen(&mut model, 500)[22], expected);
+            }
         }
     }
 }

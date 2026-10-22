@@ -80,8 +80,9 @@ plans, `--json` reports, and `--yes` skips the prompt.
   the user need not name the flag. Preserve the preview's scope flags.
 - `clean` removes eligible worktrees and their branches across the projects
   in scope. A fresh worktree with no commits can qualify; exclude active work
-  from the intended cleanup. For named targets or a subset of the plan, use
-  `bonsai remove <branch>`; add `-d` only when branch deletion is intended.
+  from the intended cleanup. Name branches or exact paths with `bonsai clean <target>…` to narrow its
+  plan. For removal regardless of integration, use `bonsai remove <branch>`;
+  add `-d` only when branch deletion is intended.
 - `trim` deletes git-ignored files (dependencies, build output, caches) from
   all Git-registered linked worktrees, including other tools’ checkouts. It keeps worktrees, branches, tracked and
   untracked files and common local state (`.env*`, databases, keys, Terraform

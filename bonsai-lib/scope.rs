@@ -90,8 +90,8 @@ impl Scope {
 }
 
 /// Every project with a checkout under the root (or referenced by a
-/// workspace file there), plus the current one, ordered by id. Clones are
-/// identified by their common Git directory.
+/// workspace file there), plus the current one and explicit roots supplied
+/// by hq, ordered by id. Clones are identified by their common Git directory.
 fn discover(config: &Config, current: Option<Project>, remote: Option<&str>) -> Vec<Project> {
     let root = config.root_dir();
     let common_dir = |git: &Git| {
@@ -104,9 +104,17 @@ fn discover(config: &Config, current: Option<Project>, remote: Option<&str>) -> 
     {
         known.insert(common);
     }
-    let paths = candidates(&root, &mut Vec::new())
-        .into_iter()
-        .collect::<Vec<_>>();
+    let mut paths = candidates(&root, &mut Vec::new());
+    match std::env::var("_BONSAI_PROJECTS") {
+        Ok(roots) => {
+            if let Err(error) = add_project_roots(&mut paths, &roots) {
+                eprintln!("bonsai: ignoring _BONSAI_PROJECTS: {error:#}");
+            }
+        }
+        Err(std::env::VarError::NotPresent) => {}
+        Err(error) => eprintln!("bonsai: ignoring _BONSAI_PROJECTS: {error}"),
+    }
+    let paths = paths.into_iter().collect::<Vec<_>>();
     let commons = parallel::map_ordered(&paths, |path| common_dir(&Git::at(path)));
     let mut sources = BTreeMap::new();
     for (path, common) in paths.into_iter().zip(commons) {
@@ -135,6 +143,16 @@ fn discover(config: &Config, current: Option<Project>, remote: Option<&str>) -> 
         .collect::<Vec<_>>();
     keyed.sort_by(|(left, _), (right, _)| left.cmp(right));
     keyed.into_iter().map(|(_, project)| project).collect()
+}
+
+fn add_project_roots(paths: &mut BTreeSet<PathBuf>, supplied: &str) -> Result<()> {
+    let roots: Vec<PathBuf> = serde_json::from_str(supplied)
+        .context("expected a JSON array of absolute project paths")?;
+    if roots.iter().any(|path| !path.is_absolute()) {
+        bail!("expected absolute project paths");
+    }
+    paths.extend(roots.iter().map(|path| canonicalize_or_self(path)));
+    Ok(())
 }
 
 /// Load a project from any of its checkouts with its own configuration.
@@ -230,4 +248,29 @@ pub fn candidates(root: &Path, warnings: &mut Vec<String>) -> BTreeSet<PathBuf> 
         }
     }
     found
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn supplied_project_roots_deduplicate_existing_candidates() {
+        let existing = PathBuf::from("/bonsai-scope-tests/existing");
+        let external = PathBuf::from("/bonsai-scope-tests/external");
+        let mut paths = BTreeSet::from([existing.clone()]);
+        let supplied = serde_json::to_string(&[&existing, &external, &external]).unwrap();
+        add_project_roots(&mut paths, &supplied).unwrap();
+        assert_eq!(paths, BTreeSet::from([existing, external]));
+    }
+
+    #[test]
+    fn malformed_or_relative_project_roots_leave_candidates_unchanged() {
+        let existing = PathBuf::from("/bonsai-scope-tests/existing");
+        for supplied in ["{invalid", r#"["/absolute/project", "relative/project"]"#] {
+            let mut paths = BTreeSet::from([existing.clone()]);
+            assert!(add_project_roots(&mut paths, supplied).is_err());
+            assert_eq!(paths, BTreeSet::from([existing.clone()]));
+        }
+    }
 }
