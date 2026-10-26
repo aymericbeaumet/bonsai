@@ -308,7 +308,8 @@ fn keys(model: &Model) -> Vec<&'static str> {
         return vec![
             "enter run",
             "tab complete",
-            "↑↓ choose",
+            "↑ previous",
+            "↓ next",
             "ctrl-w word",
             "esc cancel",
         ];
@@ -317,7 +318,8 @@ fn keys(model: &Model) -> Vec<&'static str> {
         return vec![
             "enter done",
             "esc clear",
-            "↑↓ move",
+            "↑ previous",
+            "↓ next",
             "ctrl-w word",
             "ctrl-c quit",
         ];
