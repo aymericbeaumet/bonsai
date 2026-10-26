@@ -4172,7 +4172,7 @@ mod tests {
                 view::HELP
                     .iter()
                     .flat_map(|(_, keys)| keys.iter())
-                    .any(|(keys, _)| keys.split_whitespace().any(|key| key == spec.key)),
+                    .any(|(key, _)| *key == spec.key),
                 "help is missing {} ({})",
                 spec.key,
                 spec.name

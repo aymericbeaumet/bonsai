@@ -107,19 +107,31 @@ the full-screen output (`o`), which they scroll like a pager.
 
 | Keys | Action |
 |---|---|
-| `j` `k`, arrows, Ctrl-N/P | Move one row; a count repeats (`5j`) |
-| `gg` `G`, Home End | First / last row; `3G` goes to the third |
-| Ctrl-D/U, Ctrl-F/B, Page Down/Up | Half a page / a page down and up |
-| Ctrl-E/Y | Scroll, keeping the cursor where it is |
-| `H` `M` `L` | Top / middle / bottom of the screen |
-| `zz` `zt` `zb` | Put the cursor row at the center / top / bottom |
-| `{` `}` | Previous / next project |
+| `j`, ↓, Ctrl-N | Down one row; a count repeats (`5j`) |
+| `k`, ↑, Ctrl-P | Up one row; a count repeats (`5k`) |
+| `gg`, Home | First row; `3gg` goes to the third |
+| `G`, End | Last row; `3G` goes to the third |
+| Ctrl-D | Half a page down |
+| Ctrl-U | Half a page up |
+| Ctrl-F, Page Down | A page down |
+| Ctrl-B, Page Up | A page up |
+| Ctrl-E | Scroll down, keeping the cursor where it is |
+| Ctrl-Y | Scroll up, keeping the cursor where it is |
+| `H` | Top of the screen |
+| `M` | Middle of the screen |
+| `L` | Bottom of the screen |
+| `zz` | Put the cursor row at the center |
+| `zt` | Put the cursor row at the top |
+| `zb` | Put the cursor row at the bottom |
+| `{` | Previous project |
+| `}` | Next project |
 | Enter | Open a project; on a checkout, quit and change into it |
 | `l`, →, Tab | Open a project |
 | `h`, ←, Esc, Ctrl-O | Back: close the output, clear a search, leave the project |
 | `/` | Fuzzy-find by host, owner, project, branch, path, stack, or agent |
 | `p` | Only checkouts where a coding agent is running (`:ps [agent]`) |
-| `v` `V` | Next / previous view: table, projects, owners, hosts |
+| `v` | Next view: table, projects, owners, hosts |
+| `V` | Previous view: hosts, owners, projects, table |
 | Ctrl-S | Sort by name, recent activity, or size |
 | Ctrl-R | Refresh |
 | `o` | Show the latest command's output full screen |
@@ -174,6 +186,7 @@ uppercase: `R` remove, `D` delete, `C` clean, `P` prune, and `T` trim.
 Ctrl-R refresh and Ctrl-S sort leave `r` and `s` for resume and start.
 `ps` also accepts `running` and `agents`; `yank` also accepts `copy`.
 The footer uses up to two hint lines, keeping each key and its label together.
+Distinct actions have separate descriptions in help and footer hints.
 At narrow widths it prioritizes destructive actions, `?` help, and `:` commands;
 these always expose the full command list. An ellipsis marks omitted hints.
 

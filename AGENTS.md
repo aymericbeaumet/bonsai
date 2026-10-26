@@ -91,7 +91,9 @@
   move the cursor, while help, dialogs, and the output view scroll through
   `keys::Pager`. Enter in `/` keeps the results for those keys. Every
   command has a key and a `:` name; keep `COMMANDS`, `view::HELP`, and
-  `docs/hq.md` in sync (a test checks the help lists every command key). The
+  `docs/hq.md` in sync (a test checks each command has its own help row).
+  Give distinct actions separate mapping descriptions in help and footer
+  hints; never combine them to save space. The
   `/` filter and `:` line edit through `LineInput`; do not append or pop
   their strings directly. `/` accepts `user:` and `organisation:` (`org:`,
   `organization:`); GitHub owner kind is resolved off the input thread and
