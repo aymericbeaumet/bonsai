@@ -11,13 +11,14 @@ actionlint = "1.7.12"
 shellcheck = "0.11.0"
 gh = "2.103.3"
 "github:fish-shell/fish-shell" = { version = "4.9.3", os = ["linux"] }
+"conda:zsh" = { version = "5.9.2", os = ["linux"] }
 
 [env]
 MISE_TASK_RUN_AUTO_INSTALL = "false"
 
 [tasks.setup]
 description = "Install only this project's locked development tools"
-run = "mise install --locked rust node python uv actionlint shellcheck gh{% if os() == 'linux' %} github:fish-shell/fish-shell{% endif %}"
+run = "mise install --locked rust node python uv actionlint shellcheck gh{% if os() == 'linux' %} github:fish-shell/fish-shell conda:zsh{% endif %}"
 
 [tasks.build]
 description = "Build the workspace"
@@ -50,6 +51,10 @@ run = "cargo clippy --locked --all-targets -- -D warnings"
 [tasks.test]
 description = "Run the workspace tests (pass Cargo test options after --)"
 run = "cargo test --locked"
+
+[tasks.shell-check]
+description = "Verify the Bash, Zsh, and Fish test dependencies can launch"
+run = ["bash --version", "zsh --version", "fish --version"]
 
 [tasks.package]
 description = "Package both crates and verify the CLI against the packaged library"

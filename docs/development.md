@@ -34,6 +34,7 @@ underlying command.
 | `mise run check` | Everything a change needs: `fmt-check`, `lint`, `test`, `package`, `actionlint`, `release-helper-tests` |
 | `mise run build` / `release` | Debug build of the workspace / optimized CLI |
 | `mise run test -- <filter>` | The workspace tests, optionally filtered |
+| `mise run shell-check` | Verify Bash, Zsh, and Fish can launch before shell integration tests |
 | `mise run fmt` | Format the code |
 | `mise run fmt-check` / `lint` / `package` | Check formatting / Clippy / package both crates |
 | `mise run actionlint` / `release-helper-tests` | Validate workflows with pinned ShellCheck / test release automation |
@@ -59,8 +60,10 @@ but do not promise byte-identical binaries across operating systems.
 
 The PTY checks (`terminal`) require Unix. Package-manager smoke tests
 require npm, uv, and Python. On Linux, mise also installs pinned standalone
-Fish binaries from the official releases. Bash and Zsh remain OS prerequisites;
-CI installs Zsh only when the runner does not already provide it. Benchmarks use disposable repositories and synthetic
+Fish binaries from the official releases and Zsh from conda-forge, including
+its locked libraries. Bash remains an OS prerequisite. These shells are test
+dependencies; setup does not change your login shell. CI requires all three
+shells without installing OS packages. Benchmarks use disposable repositories and synthetic
 session stores, report first-run and warm median/p95 latency plus Git
 process counts, and never access personal sessions.
 
