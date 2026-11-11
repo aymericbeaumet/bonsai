@@ -49,7 +49,9 @@ it does not mean `git clean`. `prune` extends `git worktree prune` with
 orphan-directory deletion, rather than Git object pruning. Missing registrations
 are metadata and are dropped without a CLI prompt; orphan directories can
 contain uncommitted files and require confirmation. Preview them with
-`bonsai prune -n`. HQ confirms every destructive action inside the UI.
+`bonsai prune -n`. Orphan directories containing nested checkouts are
+preserved, including checkouts from other repositories. HQ confirms every
+destructive action inside the UI.
 
 ## Reference
 

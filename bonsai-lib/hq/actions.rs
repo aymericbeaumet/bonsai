@@ -8,11 +8,11 @@ impl Model {
             .map(|selected| {
                 let project = selected.project;
                 Action::Background {
-                    spec: jobs::Spec::git(
+                    spec: Box::new(jobs::Spec::git(
                         &project.path,
                         &["fetch", "--prune"],
                         jobs::After::Refresh,
-                    ),
+                    )),
                     project: Some(project.id.clone()),
                 }
             })
@@ -99,7 +99,10 @@ impl Model {
             lines,
             yes: if delete_branch { "delete" } else { "remove" },
             tone: Color::Yellow,
-            action: Action::Background { spec, project },
+            action: Action::Background {
+                spec: Box::new(spec),
+                project,
+            },
             ready_at: None,
             pager: keys::Pager::default(),
         });
@@ -218,7 +221,10 @@ impl Model {
             return self.say("no linked worktrees in this scope");
         }
         match self.paths_spec(&anchor, args, targets, after(&anchor)) {
-            Ok(spec) => Effect::Run(Action::Background { spec, project }),
+            Ok(spec) => Effect::Run(Action::Background {
+                spec: Box::new(spec),
+                project,
+            }),
             Err(error) => self.say(&format!("{error:#}")),
         }
     }
@@ -298,7 +304,7 @@ impl Model {
             yes: "prune",
             tone: Color::Yellow,
             action: Action::Background {
-                spec,
+                spec: Box::new(spec),
                 project: self.project_for_paths(targets),
             },
             ready_at,

@@ -4161,8 +4161,10 @@ fn prune_dry_run_reports_without_pruning() {
 }
 
 /// A child process killed when the test ends, even on failure.
+#[cfg(unix)]
 struct KillOnDrop(std::process::Child);
 
+#[cfg(unix)]
 impl Drop for KillOnDrop {
     fn drop(&mut self) {
         let _ = self.0.kill();
@@ -4170,16 +4172,25 @@ impl Drop for KillOnDrop {
     }
 }
 
-/// A process named like a coding agent (`sleep` under the name `claude`),
-/// working in `dir`.
+#[cfg(unix)]
+#[test]
+fn fake_agent_process() {
+    if std::env::var_os("_BONSAI_TEST_FAKE_AGENT").as_deref() == Some(std::ffi::OsStr::new("1")) {
+        std::thread::sleep(std::time::Duration::from_secs(60));
+    }
+}
+
+/// Run this test executable as `claude`; some system utilities reject aliases.
 #[cfg(unix)]
 fn fake_agent(repo: &TestRepo, dir: &Path) -> KillOnDrop {
     let agent = repo.fake_bin_dir().join("claude");
     if !agent.exists() {
-        std::os::unix::fs::symlink(which("sleep").unwrap(), &agent).unwrap();
+        std::os::unix::fs::symlink(std::env::current_exe().unwrap(), &agent).unwrap();
     }
     let child = StdCommand::new(agent)
-        .arg("60")
+        .args(["--exact", "fake_agent_process"])
+        .env("_BONSAI_TEST_FAKE_AGENT", "1")
+        .stdout(std::process::Stdio::null())
         .current_dir(dir)
         .spawn()
         .unwrap();

@@ -178,6 +178,104 @@ fn prune_retains_unrecognized_workspace_files() {
     assert!(custom.exists());
 }
 
+#[test]
+fn prune_preserves_orphans_containing_independent_checkouts() {
+    for linked in [true, false] {
+        let fixture = Fixture::new();
+        let orphan = fixture.root.join("orphan");
+        let nested = orphan.join("deep/nested");
+        std::fs::create_dir_all(nested.parent().unwrap()).unwrap();
+        std::fs::write(orphan.join(".git"), "gitdir: /nonexistent\n").unwrap();
+        if linked {
+            let other = fixture.temp.path().join("other-repository");
+            std::fs::create_dir(&other).unwrap();
+            fixture.git(&other, &["init", "-b", "main"]);
+            fixture.git(&other, &["commit", "--allow-empty", "-m", "seed"]);
+            fixture.git(
+                &other,
+                &[
+                    "worktree",
+                    "add",
+                    "-b",
+                    "ab/nested",
+                    nested.to_str().unwrap(),
+                ],
+            );
+        } else {
+            std::fs::create_dir(&nested).unwrap();
+            fixture.git(&nested, &["init", "-b", "main"]);
+        }
+        std::fs::write(nested.join("uncommitted"), "valuable local work").unwrap();
+
+        let output = fixture.bonsai(&fixture.repo, &["prune", "--all", "--yes"]);
+        assert!(output.status.success(), "{output:?}");
+        assert_eq!(
+            std::fs::read_to_string(nested.join("uncommitted")).unwrap(),
+            "valuable local work"
+        );
+        assert!(orphan.join(".git").exists());
+        assert!(
+            String::from_utf8_lossy(&output.stderr).contains("contains a nested checkout"),
+            "{output:?}"
+        );
+    }
+}
+
+#[test]
+fn prune_rejects_reviewed_orphan_when_a_nested_checkout_appears() {
+    let fixture = Fixture::new();
+    let orphan = fixture.root.join("orphan");
+    std::fs::create_dir_all(&orphan).unwrap();
+    std::fs::write(orphan.join(".git"), "gitdir: /nonexistent\n").unwrap();
+    let preview = fixture.bonsai(&fixture.repo, &["prune", "--all", "--dry-run", "--json"]);
+    assert!(preview.status.success(), "{preview:?}");
+    let reviewed = fixture.temp.path().join("reviewed.json");
+    std::fs::write(&reviewed, preview.stdout).unwrap();
+    let nested = orphan.join("nested");
+    std::fs::create_dir(&nested).unwrap();
+    fixture.git(&nested, &["init", "-b", "main"]);
+    std::fs::write(nested.join("uncommitted"), "keep").unwrap();
+
+    let output = fixture.bonsai(
+        &fixture.repo,
+        &[
+            "prune",
+            "--all",
+            "--yes",
+            "--reviewed-plan",
+            reviewed.to_str().unwrap(),
+        ],
+    );
+    assert!(!output.status.success(), "{output:?}");
+    assert!(
+        String::from_utf8_lossy(&output.stderr).contains("prune plan changed; review again"),
+        "{output:?}"
+    );
+    assert_eq!(
+        std::fs::read_to_string(nested.join("uncommitted")).unwrap(),
+        "keep"
+    );
+}
+
+#[cfg(unix)]
+#[test]
+fn prune_unlinks_orphan_symlinks_without_inspecting_their_checkouts() {
+    let fixture = Fixture::new();
+    let orphan = fixture.root.join("orphan");
+    std::fs::create_dir_all(&orphan).unwrap();
+    std::fs::write(orphan.join(".git"), "gitdir: /nonexistent\n").unwrap();
+    std::fs::write(fixture.repo.join("uncommitted"), "keep").unwrap();
+    std::os::unix::fs::symlink(&fixture.repo, orphan.join("linked-directory")).unwrap();
+
+    let output = fixture.bonsai(&fixture.repo, &["prune", "--all", "--yes"]);
+    assert!(output.status.success(), "{output:?}");
+    assert!(!orphan.exists());
+    assert_eq!(
+        std::fs::read_to_string(fixture.repo.join("uncommitted")).unwrap(),
+        "keep"
+    );
+}
+
 #[cfg(unix)]
 #[test]
 fn prune_never_follows_external_symlinks() {

@@ -85,7 +85,7 @@ fn run_inner(
         let paths = find_worktree_dirs_checked(&root)?;
         let mut orphans = Vec::new();
         for path in paths {
-            if selected(&path, selection.as_ref()) && is_orphan(&path)? {
+            if selected(&path, selection.as_ref()) && deletable_orphan(&path)? {
                 orphans.push(path);
             }
         }
@@ -109,7 +109,7 @@ fn run_inner(
             let canonical = crate::paths::canonicalize_or_self(&path);
             if selected(&path, selection.as_ref())
                 && !registered.contains(&canonical)
-                && is_orphan(&path)?
+                && deletable_orphan(&path)?
             {
                 orphans.push(path);
             }
@@ -188,7 +188,7 @@ fn run_inner(
                     path.display()
                 );
                 anyhow::ensure!(
-                    is_orphan(path)?,
+                    deletable_orphan(path)?,
                     "orphan metadata changed since selection: {}",
                     path.display()
                 );
@@ -356,6 +356,45 @@ fn is_orphan(worktree: &Path) -> Result<bool> {
         Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(true),
         Err(error) => Err(error.into()),
     }
+}
+
+fn deletable_orphan(worktree: &Path) -> Result<bool> {
+    if !is_orphan(worktree)? {
+        return Ok(false);
+    }
+    if let Some(nested) = nested_checkout(worktree)? {
+        eprintln!(
+            "bonsai: preserving {}: contains a nested checkout: {}",
+            worktree.display(),
+            nested.display()
+        );
+        return Ok(false);
+    }
+    Ok(true)
+}
+
+/// An orphan can still contain independent work from a surviving repository.
+/// Preserve any nested `.git` metadata, including standalone repositories,
+/// without following directory links or assuming the project is in scope.
+fn nested_checkout(root: &Path) -> Result<Option<PathBuf>> {
+    let mut pending = vec![root.to_path_buf()];
+    while let Some(directory) = pending.pop() {
+        for entry in std::fs::read_dir(&directory)? {
+            let entry = entry?;
+            if !entry.file_type()?.is_dir() {
+                continue;
+            }
+            let path = entry.path();
+            match std::fs::symlink_metadata(path.join(".git")) {
+                Ok(_) => return Ok(Some(path)),
+                Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
+                    pending.push(path);
+                }
+                Err(error) => return Err(error.into()),
+            }
+        }
+    }
+    Ok(None)
 }
 
 /// Depth-first removal of empty directories under `root` (root itself stays).

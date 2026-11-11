@@ -138,6 +138,8 @@
   lifecycle targets; validate registrations before destructive work. The
   `external` flag describes location only. Protect registered descendants
   when trimming or removing a parent checkout.
+  Prune preserves orphan parents containing nested `.git` metadata, even
+  for other repositories; check again before deletion without following links.
 - Trim validates parents without resolving the final symlink: dangling
   package links must be unlinked safely. Keep progress counts separate from
   disk usage so deletion does not need a metadata lookup for every file.
@@ -145,6 +147,8 @@
   the top-level help is generated from it. Bulk commands (`trim`, `clean`,
   `prune`) share `-n/--dry-run`, `-y/--yes` (alias `-f`), and `--json`.
 - `REQUIRE_TEST_SHELLS=1` makes Bash/Zsh/Fish coverage mandatory.
+  Fake agent processes use the integration-test executable: system utilities
+  such as Rust coreutils may reject being launched under another name.
 - Release PTY checks are in `tests/terminal.py`; scalable disposable benchmarks
   are in `scripts/benchmark.py`. The two real package-manager CLI tests are
   ignored in ordinary runs and must be requested with `--ignored`.

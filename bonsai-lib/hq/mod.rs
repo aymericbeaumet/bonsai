@@ -332,7 +332,7 @@ fn drive(terminal: &mut Term, source: &mut Source<'_>) -> Result<Option<PathBuf>
                 };
                 match action {
                     Action::Batch(_) => unreachable!("batches contain individual actions"),
-                    Action::Background { spec, project } => match jobs::Background::start(spec) {
+                    Action::Background { spec, project } => match jobs::Background::start(*spec) {
                         Ok(job) => {
                             if batch_active {
                                 if let Some(pane) = model.pane.as_mut() {
@@ -1135,7 +1135,7 @@ enum Action {
     Batch(Vec<Action>),
     /// Streams into the output pane. `project` is re-measured afterwards.
     Background {
-        spec: jobs::Spec,
+        spec: Box<jobs::Spec>,
         project: Option<String>,
     },
     /// Takes over the terminal while the interface is suspended.
@@ -1700,7 +1700,7 @@ impl Model {
                     Err(error) => return self.say(&format!("{error:#}")),
                 };
             actions.push(Action::Background {
-                spec,
+                spec: Box::new(spec),
                 project: Some(project.id.clone()),
             });
         }
@@ -1853,7 +1853,7 @@ impl Model {
                 Color::Yellow
             },
             action: Action::Background {
-                spec,
+                spec: Box::new(spec),
                 project: Some(id),
             },
             ready_at: None,
@@ -2010,7 +2010,10 @@ impl Model {
             lines,
             yes: "clean",
             tone: Color::Yellow,
-            action: Action::Background { spec, project: id },
+            action: Action::Background {
+                spec: Box::new(spec),
+                project: id,
+            },
             ready_at,
             pager: keys::Pager::default(),
         });
@@ -2166,7 +2169,10 @@ impl Model {
             lines,
             yes: "trim",
             tone: Color::Yellow,
-            action: Action::Background { spec, project: id },
+            action: Action::Background {
+                spec: Box::new(spec),
+                project: id,
+            },
             ready_at,
             pager: keys::Pager::default(),
         });
@@ -2266,7 +2272,10 @@ impl Model {
             expected,
             jobs::After::Refresh,
         ) {
-            Ok(spec) => Some(Action::Background { spec, project: id }),
+            Ok(spec) => Some(Action::Background {
+                spec: Box::new(spec),
+                project: id,
+            }),
             Err(error) => {
                 self.notice = Some(format!("{error:#}"));
                 None
@@ -3412,7 +3421,7 @@ mod tests {
 
     pub(super) fn background(effect: Effect) -> jobs::Spec {
         match effect {
-            Effect::Run(Action::Background { spec, .. }) => spec,
+            Effect::Run(Action::Background { spec, .. }) => *spec,
             other => panic!("expected a background command, got {other:?}"),
         }
     }
