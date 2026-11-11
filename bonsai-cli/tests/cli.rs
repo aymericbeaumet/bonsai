@@ -1035,8 +1035,14 @@ fn clean_includes_external_worktrees_and_skips_dirty_ones() {
         String::from_utf8_lossy(&output.stderr)
     );
     let report: serde_json::Value = serde_json::from_slice(&output.stdout).unwrap();
-    assert_eq!(report["planned"][0]["path"], external.to_str().unwrap());
-    assert_eq!(report["skipped_dirty"][0]["path"], dirty.to_str().unwrap());
+    assert_eq!(
+        Path::new(report["planned"][0]["path"].as_str().unwrap()),
+        external
+    );
+    assert_eq!(
+        Path::new(report["skipped_dirty"][0]["path"].as_str().unwrap()),
+        dirty
+    );
     repo.bonsai(&repo.clone)
         .args(["clean", "--yes", "--no-fetch"])
         .assert()
@@ -1094,7 +1100,10 @@ fn trim_includes_external_worktrees_by_branch_and_path() {
         String::from_utf8_lossy(&output.stderr)
     );
     let report: serde_json::Value = serde_json::from_slice(&output.stdout).unwrap();
-    assert_eq!(report["planned"][0]["path"], external.to_str().unwrap());
+    assert_eq!(
+        Path::new(report["planned"][0]["path"].as_str().unwrap()),
+        external
+    );
     assert!(external.join("node_modules/package.js").exists());
     repo.bonsai(&repo.clone)
         .args(["trim", "--yes", external.to_str().unwrap()])
@@ -1795,12 +1804,20 @@ fn prune_selected_missing_path_preserves_other_registrations_and_orphans() {
     std::fs::remove_dir_all(&selected).unwrap();
     std::fs::remove_dir_all(&other).unwrap();
 
-    repo.bonsai(&repo.clone)
+    let output = repo
+        .bonsai(&repo.clone)
         .args(["prune", selected.to_str().unwrap(), "--dry-run", "--json"])
-        .assert()
-        .success()
-        .stdout(predicate::str::contains(selected.to_str().unwrap()))
-        .stdout(predicate::str::contains(other.to_str().unwrap()).not());
+        .output()
+        .unwrap();
+    let report = json_of(&output);
+    let stale: Vec<&Path> = report["stale"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|path| Path::new(path.as_str().unwrap()))
+        .collect();
+    assert_eq!(stale, [selected.as_path()]);
+    assert_eq!(report["orphans"], serde_json::json!([]));
     assert!(repo.worktree_list().contains("feat-selected"));
 
     repo.bonsai(&repo.clone)
@@ -2946,7 +2963,7 @@ fn global_workspace_includes_external_worktrees_of_current_and_known_projects() 
     };
     let folders = read_folders();
     assert_eq!(folders.len(), 1);
-    assert_eq!(folders[0]["path"], external.to_str().unwrap());
+    assert_eq!(Path::new(folders[0]["path"].as_str().unwrap()), external);
 
     // The workspace reference keeps the project discoverable outside any repo.
     repo.bonsai(&repo.dir)
@@ -3736,20 +3753,23 @@ fn trim_deletes_ignored_files_but_keeps_work_config_and_nested_repos() {
         .collect();
     entries.sort();
     assert_eq!(entries, ["node_modules", "target"]);
-    let kept: Vec<(&str, &str)> = planned[0]["kept"]
+    let kept: Vec<(&Path, &str)> = planned[0]["kept"]
         .as_array()
         .unwrap()
         .iter()
         .map(|kept| {
             (
-                kept["path"].as_str().unwrap(),
+                Path::new(kept["path"].as_str().unwrap()),
                 kept["reason"].as_str().unwrap(),
             )
         })
         .collect();
     assert_eq!(
         kept,
-        [(".env", "protected"), ("vendor/local", "repository")]
+        [
+            (Path::new(".env"), "protected"),
+            (Path::new("vendor/local"), "repository"),
+        ]
     );
     assert!(planned[0]["bytes"].as_u64().unwrap() >= 8192);
     assert!(

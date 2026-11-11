@@ -13,7 +13,7 @@ struct Repo {
 impl Repo {
     fn new() -> Self {
         let tmp = TempDir::new().unwrap();
-        let dir = tmp.path().canonicalize().unwrap();
+        let dir = bonsai::paths::canonicalize_ok(tmp.path()).unwrap();
         let clone = dir.join("clone");
         std::fs::create_dir(&clone).unwrap();
         std::fs::write(dir.join("gitconfig-empty"), "").unwrap();
@@ -114,7 +114,10 @@ fn clean_selected_external_path_limits_plan_and_deletion() {
     let untouched = repo.add("untouched");
     let report = repo.planned(&selected);
     assert_eq!(report["planned"].as_array().unwrap().len(), 1);
-    assert_eq!(report["planned"][0]["path"], selected.to_str().unwrap());
+    assert_eq!(
+        Path::new(report["planned"][0]["path"].as_str().unwrap()),
+        selected
+    );
     repo.clean()
         .arg(&selected)
         .args(["--yes", "--no-fetch"])

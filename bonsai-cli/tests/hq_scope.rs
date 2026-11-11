@@ -12,7 +12,7 @@ struct Fixture {
 impl Fixture {
     fn new() -> Self {
         let temp = tempfile::tempdir().unwrap();
-        let base = temp.path().canonicalize().unwrap();
+        let base = bonsai::paths::canonicalize_ok(temp.path()).unwrap();
         let fixture = Self {
             temp,
             anchor: base.join("anchor"),
@@ -75,6 +75,13 @@ impl Fixture {
         String::from_utf8(output.stdout).unwrap()
     }
 
+    fn has_worktree(&self, repo: &Path, worktree: &Path) -> bool {
+        self.git(repo, &["worktree", "list", "--porcelain", "-z"])
+            .split('\0')
+            .filter_map(|field| field.strip_prefix("worktree "))
+            .any(|path| Path::new(path) == worktree)
+    }
+
     fn bonsai(&self, all: bool, roots: &str, execute: bool) -> Output {
         let mut command = self.command(Path::new(env!("CARGO_BIN_EXE_bonsai")), &self.anchor);
         command.env("_BONSAI_PROJECTS", roots).arg("prune");
@@ -101,32 +108,18 @@ fn hq_project_roots_find_external_projects_with_only_deleted_linked_checkouts() 
         String::from_utf8_lossy(&preview.stderr)
     );
     let report: serde_json::Value = serde_json::from_slice(&preview.stdout).unwrap();
-    assert_eq!(
-        report["stale"],
-        serde_json::json!([fixture.external_missing])
-    );
+    let stale: Vec<PathBuf> = serde_json::from_value(report["stale"].clone()).unwrap();
+    assert_eq!(stale, std::slice::from_ref(&fixture.external_missing));
     assert!(report["orphans"].as_array().unwrap().is_empty());
-    assert!(
-        fixture
-            .git(&fixture.external, &["worktree", "list", "--porcelain"])
-            .contains(fixture.external_missing.to_str().unwrap())
-    );
+    assert!(fixture.has_worktree(&fixture.external, &fixture.external_missing));
     let executed = fixture.bonsai(true, &roots, true);
     assert!(
         executed.status.success(),
         "{}",
         String::from_utf8_lossy(&executed.stderr)
     );
-    assert!(
-        !fixture
-            .git(&fixture.external, &["worktree", "list", "--porcelain"])
-            .contains(fixture.external_missing.to_str().unwrap())
-    );
-    assert!(
-        fixture
-            .git(&fixture.anchor, &["worktree", "list", "--porcelain"])
-            .contains(fixture.anchor_missing.to_str().unwrap())
-    );
+    assert!(!fixture.has_worktree(&fixture.external, &fixture.external_missing));
+    assert!(fixture.has_worktree(&fixture.anchor, &fixture.anchor_missing));
     assert!(
         fixture
             .git(&fixture.external, &["branch", "--list", "feature"])
@@ -139,11 +132,7 @@ fn hq_project_roots_do_not_expand_current_project_scope() {
     let fixture = Fixture::new();
     let roots = serde_json::to_string(&[&fixture.external]).unwrap();
     assert!(!fixture.bonsai(false, &roots, true).status.success());
-    assert!(
-        fixture
-            .git(&fixture.external, &["worktree", "list", "--porcelain"])
-            .contains(fixture.external_missing.to_str().unwrap())
-    );
+    assert!(fixture.has_worktree(&fixture.external, &fixture.external_missing));
 }
 
 #[test]
@@ -152,9 +141,5 @@ fn invalid_hq_project_roots_are_reported_without_expanding_scope() {
     let output = fixture.bonsai(true, "{invalid", false);
     assert!(!output.status.success());
     assert!(String::from_utf8_lossy(&output.stderr).contains("_BONSAI_PROJECTS"));
-    assert!(
-        fixture
-            .git(&fixture.external, &["worktree", "list", "--porcelain"])
-            .contains(fixture.external_missing.to_str().unwrap())
-    );
+    assert!(fixture.has_worktree(&fixture.external, &fixture.external_missing));
 }
