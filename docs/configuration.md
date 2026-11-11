@@ -41,7 +41,7 @@ workspace = true            # maintain a .code-workspace file per repo
 fetch = true                # fetch --prune before creating (set false for offline use)
 install = true              # auto-install deps (pnpm/npm/yarn/bun/cargo/uv)
 clone_cargo_target = true   # copy-on-write clone Cargo's target/ into new worktrees
-post_add = "mise install"   # runs after automatic dependency installation
+post_add = "mise install --locked" # optional; runs after automatic dependency installation
 # untracked files copied into new worktrees; setting this replaces the
 # defaults: [".env", ".env.*", ".envrc", ".mcp.json", "CLAUDE.local.md",
 #           ".claude/settings.local.json", ".cursor/mcp.json"]

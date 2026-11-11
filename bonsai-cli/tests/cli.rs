@@ -3870,6 +3870,127 @@ fn trim_reviewed_plan_rejects_new_ignored_roots_before_deletion() {
     assert!(path.join("target/new").exists());
 }
 
+#[cfg(unix)]
+fn confirm_trim_after(repo: &TestRepo, change: impl FnOnce()) -> (bool, String) {
+    use portable_pty::{CommandBuilder, PtySize, native_pty_system};
+    use std::io::{Read, Write};
+    use std::time::{Duration, Instant};
+
+    struct ChildGuard(Box<dyn portable_pty::Child + Send + Sync>);
+    impl Drop for ChildGuard {
+        fn drop(&mut self) {
+            let _ = self.0.kill();
+            let _ = self.0.wait();
+        }
+    }
+
+    let pair = native_pty_system()
+        .openpty(PtySize {
+            rows: 24,
+            cols: 100,
+            pixel_width: 0,
+            pixel_height: 0,
+        })
+        .unwrap();
+    let mut command = CommandBuilder::new(assert_cmd::cargo::cargo_bin("bonsai"));
+    command.arg("trim");
+    command.cwd(&repo.clone);
+    for (key, value) in repo.env_vars() {
+        command.env(key, value);
+    }
+    command.env("BONSAI_ROOT", &repo.root);
+    command.env("TERM", "xterm-256color");
+    command.env_remove("_BONSAI_WRAPPED");
+    command.env_remove("GIT_DIR");
+    command.env_remove("GIT_WORK_TREE");
+    let mut child = ChildGuard(pair.slave.spawn_command(command).unwrap());
+    drop(pair.slave);
+    let mut reader = pair.master.try_clone_reader().unwrap();
+    let mut writer = pair.master.take_writer().unwrap();
+    let (send, receive) = std::sync::mpsc::channel();
+    std::thread::spawn(move || {
+        let mut buffer = [0; 4096];
+        while let Ok(count) = reader.read(&mut buffer) {
+            if count == 0 || send.send(buffer[..count].to_vec()).is_err() {
+                break;
+            }
+        }
+    });
+    let mut output = String::new();
+    let mut change = Some(change);
+    let deadline = Instant::now() + Duration::from_secs(20);
+    loop {
+        assert!(Instant::now() < deadline, "trim timed out: {output}");
+        if let Ok(bytes) = receive.recv_timeout(Duration::from_millis(50)) {
+            output.push_str(&String::from_utf8_lossy(&bytes));
+            if bytes.windows(4).any(|window| window == b"\x1b[6n") {
+                writer.write_all(b"\x1b[1;1R").unwrap();
+            }
+            if output.contains("Confirm trim:")
+                && let Some(change) = change.take()
+            {
+                change();
+                writer.write_all(b"\r").unwrap();
+            }
+        }
+        if let Some(status) = child.0.try_wait().unwrap() {
+            while let Ok(bytes) = receive.recv_timeout(Duration::from_secs(1)) {
+                output.push_str(&String::from_utf8_lossy(&bytes));
+            }
+            assert!(
+                change.is_none(),
+                "trim never asked for confirmation: {output}"
+            );
+            return (status.success(), output);
+        }
+    }
+}
+
+#[cfg(unix)]
+#[test]
+fn trim_confirmation_rechecks_protected_and_tracked_files() {
+    for tracked in [false, true] {
+        let repo = TestRepo::new();
+        repo.commit_files(&[(".gitignore", "cache/\n")]);
+        let path = repo.add("ab/confirm-trim");
+        std::fs::create_dir(path.join("cache")).unwrap();
+        std::fs::write(path.join("cache/old"), "generated").unwrap();
+        let protected = path.join(if tracked {
+            "cache/source"
+        } else {
+            "cache/.env"
+        });
+        let (success, output) = confirm_trim_after(&repo, || {
+            std::fs::write(&protected, "preserve").unwrap();
+            if tracked {
+                repo.git(&path, &["add", "--force", "cache/source"]);
+            }
+        });
+        assert!(!success, "changed trim plan was accepted: {output}");
+        assert!(
+            output.contains("trim plan changed; review again"),
+            "{output}"
+        );
+        assert_eq!(std::fs::read_to_string(protected).unwrap(), "preserve");
+        assert!(path.join("cache/old").exists());
+    }
+}
+
+#[cfg(unix)]
+#[test]
+fn trim_confirmation_accepts_growth_within_regenerable_roots() {
+    let repo = TestRepo::new();
+    repo.commit_files(&[(".gitignore", "node_modules/\n")]);
+    let path = repo.add("ab/confirm-trim");
+    std::fs::create_dir(path.join("node_modules")).unwrap();
+    std::fs::write(path.join("node_modules/old"), "generated").unwrap();
+    let (success, output) = confirm_trim_after(&repo, || {
+        std::fs::write(path.join("node_modules/new"), "more generated").unwrap();
+    });
+    assert!(success, "unchanged trim roots were rejected: {output}");
+    assert!(!path.join("node_modules").exists());
+}
+
 #[test]
 fn trim_reviewed_plan_accepts_unchanged_roots_with_growing_contents() {
     let repo = TestRepo::new();

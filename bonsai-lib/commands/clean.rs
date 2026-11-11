@@ -426,7 +426,7 @@ fn plan(
             worktrees.len(),
         );
     }
-    let running = crate::agents::running();
+    let running = crate::agents::running()?;
     let checks = parallel::map_ordered(&worktrees, |wt| {
         let branch = wt.branch.clone()?;
         if branch == default

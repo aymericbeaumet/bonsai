@@ -155,7 +155,7 @@ fn run_inner(
         .collect();
     let mut targets = targets(scope, selection)?;
 
-    let running = agents::running();
+    let running = agents::running()?;
     targets.retain(|target| {
         let busy = agents::busy(&running, &target.path);
         if busy.is_empty() {
@@ -236,7 +236,7 @@ fn run_inner(
 
     // Every ignored path is independent: delete them all concurrently.
     // Recheck after the interactive wait: another agent may have started.
-    let running = agents::running();
+    let running = agents::running()?;
     for (target, plan) in &planned {
         let current = projects[target.project]
             .repo
@@ -254,7 +254,9 @@ fn run_inner(
                 agents::describe(&busy)
             );
         }
-        if options.reviewed_plan.is_some() && !options.yes {
+        // Editors and Git do not take Bonsai's locks. A path may have become
+        // tracked or protected while the user was reviewing the prompt.
+        if !options.yes {
             let fresh = ignored::plan(&target.path, &keeps[target.project])?;
             anyhow::ensure!(
                 review_roots(&[json_worktree(target, plan)])?

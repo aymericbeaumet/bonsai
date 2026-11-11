@@ -39,4 +39,4 @@ assert_eq!(id.as_deref(), Some("github.com/aymericbeaumet/bonsai"));
 ```
 
 API documentation is on [docs.rs](https://docs.rs/bonsai-lib); in a clone,
-run `cargo doc --open -p bonsai-lib`.
+run `mise run doc` after the [development setup](development.md).

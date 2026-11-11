@@ -199,7 +199,7 @@ pub fn preflight(repo: &Repo, _config: &Config, wt: &Worktree, force: bool) -> R
     // Never pull the rug from under another coding agent; the one running
     // bonsai can still remove its own worktree.
     if !force && !current.is_missing() {
-        let running = crate::agents::running();
+        let running = crate::agents::running()?;
         let busy = crate::agents::busy(&running, &wt.path);
         if !busy.is_empty() {
             bail!(

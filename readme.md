@@ -4,50 +4,32 @@
 [![latest release](https://img.shields.io/github/v/release/aymericbeaumet/bonsai)](https://github.com/aymericbeaumet/bonsai/releases/latest)
 [![license: MIT](https://img.shields.io/badge/license-MIT-blue)](LICENSE)
 
-**Git worktrees without the bookkeeping.** bonsai manages every registered
-worktree, wherever it lives and whatever created it. Fuzzy-jump between
-checkouts, switch coding agents, reclaim build caches, and clean up merged
-branches, including squash-merges. Create through bonsai when you want a
-predictable layout and automatic setup. Built for running several coding
-agents in parallel, and just as handy by hand.
+**Git worktrees without the bookkeeping.** Keep a feature, a bug fix, and
+several coding agents working side by side, each in its own checkout.
+One command creates a branch, copies your local config, installs dependencies,
+and takes you there. Jump between checkouts and clean up after the merge,
+including squash-merges.
+
+A single Rust binary with a CLI and terminal dashboard. Works with your
+existing Git worktrees in place; no account, server, or coding agent required.
 
 ![bonsai demo: create a worktree, push a fix, fuzzy-jump to another worktree, and clean up after the squash-merge](docs/demo/demo.gif)
 
 ## Why
 
-`git worktree` lets you work on several branches at once, but every task
-means choosing a directory, creating the branch, `cd`-ing there, copying your
-`.env`, and reinstalling dependencies. Afterwards you remove both the worktree
-and the branch, which `git branch --merged` cannot even detect once the pull
-request was squash-merged. bonsai does the bookkeeping:
-
-- **One command to start.** `bonsai add fix-login` fetches, branches off the
-  latest default branch, creates the worktree, copies untracked local config
-  (`.env*`, `.envrc`, `.mcp.json`, ...), installs dependencies from the
-  lockfile, and drops you into it.
-- **An optional shared layout.** New worktrees live outside your clone, at
-  `~/.bonsai/github.com/<owner>/<repo>/<branch>`, so they never clutter the
-  repository and every tool can find them. Existing worktrees from Git or
-  any coding harness work in place, with no import or skill required.
-- **Fuzzy navigation.** `bonsai cd` jumps between worktrees, most recently
-  used first; `-a` jumps across all your projects.
-- **Safe cleanup.** `bonsai clean` detects merged *and* squash-merged
-  branches, shows the plan before acting, and never touches a worktree with
-  uncommitted changes.
-- **Free disk, keep your work.** `bonsai trim` deletes what git ignores
-  (`node_modules`, `target`, `.venv`, build caches) across worktrees, with a
-  live progress bar, and preserves local state outside dependency/build
-  directories. Explicit keep rules apply everywhere.
-- **A headquarters.** `bonsai` (or `bonsai hq`) shows every project with its
-  checkouts, running coding agents, uncommitted changes, upstream state, and
-  disk size, and runs all of the above from one screen with vim keys.
-- **Ready for coding agents.** Idempotent commands, `--json` output, and a
-  bundled [Agent Skill](docs/agents.md) for Claude Code, Codex, OpenCode, and
-  Cursor. `bonsai ps` shows which agent works in which worktree, removal and
-  cleanup never pull a worktree from under a running agent, and
-  `bonsai resume` finds agent sessions across all your worktrees.
-- **Editor-friendly.** Maintained `.code-workspace` files show every worktree
-  in VS Code, Cursor, and other VS Code derivatives.
+- **Leave unfinished work where it is.** Start another branch without
+  stashing, then fuzzy-jump back with `bonsai cd`. New checkouts live under
+  `~/.bonsai/<host>/<owner>/<repo>/<branch>`; existing ones stay where they are.
+- **See the whole workspace.** `bonsai` opens a terminal dashboard with
+  checkouts, running agents, changes, upstream state, and disk usage. Open
+  an editor or coding session from the same screen.
+- **Finish the cleanup.** `bonsai clean` previews merged and squash-merged
+  worktrees before removing them, skipping dirty or busy checkouts.
+  `bonsai trim` reclaims ignored builds and dependencies while keeping
+  checkouts and protected local state. Both support `--dry-run`.
+- **Use your own tools.** Shell integration, VS Code/Cursor workspaces,
+  `--json` output, and an optional [Agent Skill](docs/agents.md). Your branches
+  and checkouts remain ordinary Git worktrees.
 
 ## Install
 
@@ -70,8 +52,8 @@ cargo install --locked --git https://github.com/aymericbeaumet/bonsai
 ```
 
 All three install the `bonsai` command. Prebuilt binaries support Linux,
-macOS, and Windows on amd64 and arm64; Linux binaries are static and run on
-any distribution. You can also download them from
+macOS, and Windows on amd64 and arm64; Linux binaries are statically linked.
+You can also download them from
 [GitHub Releases](https://github.com/aymericbeaumet/bonsai/releases/latest),
 verify the archive against `SHA256SUMS`, and put the binary on your `PATH`.
 
@@ -94,20 +76,27 @@ path instead, so `cd "$(bonsai add foo)"` composes.
 
 ## Quick start
 
+Start in an existing Git repository. This first command only lists its
+checkouts, including any created by other tools:
+
 ```sh
 cd ~/src/my-repo
+bonsai list --status
+```
+
+With shell integration enabled:
+
+```sh
 bonsai add fix-parser   # branch + worktree from the latest default branch, cd into it
 # ...hack, commit, push, open a pull request...
 bonsai cd               # fuzzy-jump between worktrees
-bonsai list             # show this repository's worktrees
-bonsai clean            # once merged: remove the worktree and delete the branch
-bonsai trim             # free node_modules, target, ... in the worktrees you keep
-bonsai                  # hq: every worktree with its agents, changes, and size
+bonsai clean --dry-run  # after merging: inspect eligible worktrees and branches
+bonsai clean            # review the plan, then confirm removal
 ```
 
-Leave out an argument and commands open a fuzzy picker. Run `bonsai` alone
-to see every project and worktree with its agents, changes, and size, and
-act on them from one screen.
+New to worktrees? The [first-worktree walkthrough](docs/getting-started.md)
+covers setup, stacked branches, cleanup, and what stays shared between
+checkouts. Already have worktrees? `bonsai` opens the dashboard immediately.
 
 ## Commands
 
@@ -133,6 +122,7 @@ share `-n`/`--dry-run`, `-y`/`--yes`, and `--json`. See the
 
 ## Documentation
 
+- [Getting started](docs/getting-started.md): your first worktree, safe previews, and common questions
 - [Commands](docs/commands.md): reference, worktree-relative behavior, and safety guarantees
 - [Configuration](docs/configuration.md): `.bonsai.toml`, `git config bonsai.*`, and environment variables
 - [AI coding agents](docs/agents.md): Agent Skill, AGENTS.md, scripting, and session resume

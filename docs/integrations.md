@@ -85,8 +85,13 @@ hook to control the sequence:
 ```toml
 [add]
 install = false
-post_add = "mise install && mise exec -- pnpm install --frozen-lockfile"
+post_add = "mise install --locked && mise exec -- pnpm install --frozen-lockfile"
 ```
+
+Commit exact tool versions in `mise.toml` (or `.mise.toml`) and the generated
+`mise.lock` alongside the package-manager lockfile. Trust the project's mise
+configuration before running setup; `--locked` uses the committed tool lock.
+For contributing to Bonsai itself, use the [development setup](development.md).
 
 Storage warnings are suggestions based on recognized settings, not a complete
 package-manager configuration evaluator. Bonsai does not change linker or

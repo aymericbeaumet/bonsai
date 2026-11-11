@@ -34,13 +34,22 @@ impl Watch {
         std::thread::spawn(move || {
             let mut last: Option<Vec<(PathBuf, Vec<u32>)>> = None;
             loop {
-                let working = by_checkout(&agents::running(), &checkouts);
-                let signature = signature(&working);
-                if last.as_ref() != Some(&signature) {
-                    if sender.send(working).is_err() {
-                        return;
+                match agents::running() {
+                    Ok(agents) => {
+                        let working = by_checkout(&agents, &checkouts);
+                        let signature = signature(&working);
+                        if last.as_ref() != Some(&signature) {
+                            if sender.send(working).is_err() {
+                                return;
+                            }
+                            last = Some(signature);
+                        }
                     }
-                    last = Some(signature);
+                    Err(error) => {
+                        if let Some(path) = super::log_file() {
+                            super::append_log_to(&path, &format!("{error:#}"));
+                        }
+                    }
                 }
                 match stopped.recv_timeout(INTERVAL) {
                     Err(RecvTimeoutError::Timeout) => {}

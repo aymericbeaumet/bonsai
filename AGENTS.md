@@ -45,9 +45,11 @@
   build artifacts. If it reports errors the workspace build does not, delete
   that directory, run `cargo clean -p bonsai-lib`, and package again.
 - Trust `.mise.toml` with `mise trust .mise.toml` and run
-  `mise install --locked`. Tool pins and platform checksums live in
-  `.mise.toml` and `mise.lock`. CI sets `MISE_TASK_RUN_AUTO_INSTALL=false`,
-  so each job uses only the tools it installs.
+  `mise run setup`. It installs only this project's tools with `--locked`,
+  leaving unrelated global tools alone. Tool pins and platform checksums
+  live in `.mise.toml` and `mise.lock`; npm dependency graphs live in
+  `.mise/locks/`. CI uses locked installs and disables task auto-install,
+  so each job uses only the tools it installs. See `docs/development.md`.
 - `bonsai hq` is a terminal worktree list that also runs commands. Inventory
   is Git checkouts under the bonsai root, workspace folder references, and
   the project where hq starts. Do not add a browser, a server, or a second
@@ -129,6 +131,9 @@
   worktrees another coding agent works in (`remove` refuses, `clean` and
   `trim` skip; the agent running bonsai is exempt), and `ignored::Keep` for
   ignored paths `trim` and removal never delete. Reuse them in new paths.
+  Propagate process-discovery failures before deletion; only an explicitly
+  unsupported platform may report no visible agents. HQ retains its last
+  successful scan and logs errors.
 - Treat every Git-registered linked checkout as a first-class worktree,
   regardless of creator or location. `Repo::linked_worktrees` supplies
   lifecycle targets; validate registrations before destructive work. The

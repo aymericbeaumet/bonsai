@@ -1,13 +1,17 @@
-"""Release steps that follow the GitHub release: the Homebrew formula and the
-bonsai-lib crate. Both are idempotent, so a failed run can simply be retried."""
+"""Version, package, and publish Bonsai releases with the pinned development tools.
+Homebrew and crate publication are idempotent, so failed jobs can be retried."""
 
 import argparse
 import base64
+import hashlib
 import json
 import os
 from pathlib import Path
 import re
 import subprocess
+import tarfile
+import tomllib
+import zipfile
 from urllib.error import HTTPError
 from urllib.request import Request, urlopen
 
@@ -177,6 +181,66 @@ def stamp(version, root=Path(".")):
     cli.write_text(text)
 
 
+def next_version(last, log):
+    major, minor, patch = map(int, last.removeprefix("v").split("."))
+    if re.search(r"(?m)^[a-z]+(?:\([^)]*\))?!:|^BREAKING CHANGE", log):
+        return f"{major + 1}.0.0"
+    if re.search(r"(?m)^feat(?:\([^)]*\))?:", log):
+        return f"{major}.{minor + 1}.0"
+    return f"{major}.{minor}.{patch + 1}"
+
+
+def release_version():
+    tags = subprocess.check_output(["git", "tag", "--list", "v*", "--sort=-v:refname"], text=True).splitlines()
+    if tags:
+        log = subprocess.check_output(["git", "log", f"{tags[0]}..HEAD", "--format=%s%n%b"], text=True)
+        version = next_version(tags[0], log)
+    else:
+        version = tomllib.loads(Path("Cargo.toml").read_text())["package"]["version"]
+    if output := os.environ.get("GITHUB_OUTPUT"):
+        with open(output, "a") as stream:
+            stream.write(f"version={version}\n")
+    print(version)
+
+
+def archive_binary(version, target, archive, root=Path(".")):
+    binary_name = "bonsai.exe" if archive.startswith("bonsai-windows-") else "bonsai"
+    binary = root / "target" / target / "release" / binary_name
+    actual = subprocess.check_output([str(binary.resolve()), "--version"], text=True).strip()
+    if actual != f"bonsai {version}":
+        raise ValueError(f"{actual!r}: expected bonsai {version}")
+    if target.endswith("-linux-musl"):
+        details = subprocess.check_output(["file", str(binary)], text=True)
+        if not re.search(r"static(?:ally|-pie) linked", details):
+            raise ValueError(f"Release binary must link musl statically: {details}")
+    dist = root / "dist"
+    dist.mkdir(exist_ok=True)
+    if binary_name.endswith(".exe"):
+        path = dist / f"{archive}.zip"
+        with zipfile.ZipFile(path, "w", compression=zipfile.ZIP_DEFLATED) as output:
+            output.write(binary, arcname=binary_name)
+    else:
+        path = dist / f"{archive}.tar.gz"
+        with tarfile.open(path, "w:gz") as output:
+            output.add(binary, arcname=binary_name)
+    return path
+
+
+def publish_github(version, dist=Path("dist")):
+    archives = sorted(path for path in dist.iterdir() if path.name.endswith((".tar.gz", ".zip")))
+    if len(archives) != 6:
+        raise ValueError(f"Expected six release archives, found {len(archives)}")
+    checksums = dist / "SHA256SUMS"
+    checksums.write_text("".join(
+        f"{hashlib.sha256(path.read_bytes()).hexdigest()}  {path.name}\n" for path in archives
+    ))
+    subprocess.run([
+        "gh", "release", "create", f"v{version}", "--repo", os.environ["GITHUB_REPOSITORY"],
+        "--target", os.environ["GITHUB_SHA"], "--generate-notes",
+        *map(str, archives), str(checksums),
+    ], check=True)
+
+
 def publish_crate(version, run=subprocess.run):
     if crate_published(LIBRARY, version):
         print(f"{LIBRARY} {version} is already on crates.io")
@@ -196,8 +260,20 @@ if __name__ == "__main__":
     homebrew.add_argument("--tap", required=True)
     crate = commands.add_parser("crate", help=f"publish {LIBRARY} to crates.io")
     crate.add_argument("--version", required=True)
+    commands.add_parser("version", help="calculate the next Conventional Commit version")
+    commands.add_parser("stamp", help="stamp VERSION into the Cargo manifests")
+    commands.add_parser("archive", help="verify and archive VERSION for TARGET and ARCHIVE")
+    commands.add_parser("github", help="checksum and publish VERSION to GitHub")
     args = parser.parse_args()
     if args.command == "homebrew":
         update_homebrew(args.tag, args.tap)
-    else:
+    elif args.command == "crate":
         publish_crate(args.version)
+    elif args.command == "version":
+        release_version()
+    elif args.command == "stamp":
+        stamp(os.environ["VERSION"])
+    elif args.command == "archive":
+        archive_binary(os.environ["VERSION"], os.environ["TARGET"], os.environ["ARCHIVE"])
+    elif args.command == "github":
+        publish_github(os.environ["VERSION"])

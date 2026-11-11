@@ -33,7 +33,7 @@ struct Entry<'a> {
 /// outside a repository): every agent on the machine, labelled by checkout
 /// when it works in a known one and by directory otherwise.
 pub fn run(scope: &Scope, json: bool) -> Result<()> {
-    let running = agents::running();
+    let running = agents::running()?;
     let mut places = Vec::new();
     for project in scope.projects() {
         let id = scope.is_all().then(|| project.id());

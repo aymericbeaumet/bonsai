@@ -635,7 +635,7 @@ fn print_inventory(snapshot: &Snapshot) -> Result<()> {
         .flat_map(|project| &project.worktrees)
         .map(|worktree| worktree.path.clone())
         .collect();
-    let working = running::by_checkout(&agents::running(), &checkouts);
+    let working = running::by_checkout(&agents::running()?, &checkouts);
     let mut value = serde_json::to_value(snapshot).context("cannot format the inventory")?;
     if let Some(projects) = value
         .get_mut("projects")

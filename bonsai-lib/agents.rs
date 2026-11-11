@@ -6,6 +6,7 @@ use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
+use anyhow::Context;
 use serde::Serialize;
 use sysinfo::{Pid, ProcessRefreshKind, ProcessesToUpdate, System, UpdateKind};
 
@@ -137,8 +138,18 @@ fn unix_seconds<S: serde::Serializer>(time: &SystemTime, serializer: S) -> Resul
 /// Every agent process visible to this user, newest first. Launcher chains
 /// (Codex's native binary under its node launcher) count once, as the
 /// outermost process.
-pub fn running() -> Vec<Agent> {
-    let mut system = System::new();
+/// Unsupported platforms have no visible agents. Initialization failures on
+/// supported platforms propagate so destructive commands cannot bypass busy checks.
+pub fn running() -> anyhow::Result<Vec<Agent>> {
+    running_with_system(System::new())
+}
+
+fn running_with_system(system: Result<System, sysinfo::Error>) -> anyhow::Result<Vec<Agent>> {
+    let mut system = match system {
+        Ok(system) => system,
+        Err(sysinfo::Error::Unsupported) => return Ok(Vec::new()),
+        Err(error) => return Err(error).context("cannot inspect running coding agents"),
+    };
     system.refresh_processes_specifics(
         ProcessesToUpdate::All,
         true,
@@ -188,7 +199,7 @@ pub fn running() -> Vec<Agent> {
         })
         .collect();
     agents.sort_by(|a, b| b.started.cmp(&a.started).then(a.pid.cmp(&b.pid)));
-    agents
+    Ok(agents)
 }
 
 /// For each agent, the index of the worktree it works in: the deepest
@@ -233,6 +244,26 @@ pub fn describe(agents: &[&Agent]) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn process_scan_failure_is_not_an_empty_agent_list() {
+        let error = running_with_system(Err(sysinfo::Error::Io(std::io::Error::new(
+            std::io::ErrorKind::PermissionDenied,
+            "process table denied",
+        ))))
+        .unwrap_err();
+        assert!(format!("{error:#}").contains("process table denied"));
+        assert!(running_with_system(Err(sysinfo::Error::Other("scan failed".into()))).is_err());
+    }
+
+    #[test]
+    fn unsupported_platform_has_no_visible_agents() {
+        assert!(
+            running_with_system(Err(sysinfo::Error::Unsupported))
+                .unwrap()
+                .is_empty()
+        );
+    }
 
     fn argv(args: &[&str]) -> Vec<String> {
         args.iter().map(|arg| arg.to_string()).collect()
