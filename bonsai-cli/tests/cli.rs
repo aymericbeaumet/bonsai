@@ -3143,6 +3143,42 @@ fn start_works_in_external_worktrees_without_adopting_them() {
 
 #[cfg(unix)]
 #[test]
+fn fake_interactive_provider() {
+    use std::io::Write;
+
+    if std::env::var_os("_BONSAI_TEST_INTERACTIVE_PROVIDER").is_none() {
+        return;
+    }
+    unsafe {
+        assert_eq!(libc::isatty(libc::STDIN_FILENO), 1);
+        assert_eq!(libc::tcgetpgrp(libc::STDIN_FILENO), libc::getpgrp());
+    }
+    let signals = bonsai::process::Cancellation::new().unwrap();
+    println!("PROVIDER_READY");
+    std::io::stdout().flush().unwrap();
+    loop {
+        if let Err(error) = signals.check() {
+            assert_eq!(
+                error
+                    .downcast_ref::<bonsai::process::Interrupted>()
+                    .unwrap()
+                    .0,
+                libc::SIGINT
+            );
+            break;
+        }
+        std::thread::sleep(std::time::Duration::from_millis(5));
+    }
+    println!("INT_HANDLED");
+    std::io::stdout().flush().unwrap();
+    let mut line = String::new();
+    assert!(std::io::stdin().read_line(&mut line).unwrap() > 0);
+    assert_eq!(line.trim(), "proceed");
+    println!("AFTER_INTERRUPT");
+}
+
+#[cfg(unix)]
+#[test]
 fn start_keeps_a_harness_that_handles_ctrl_c_attached_to_its_terminal() {
     use portable_pty::{CommandBuilder, PtySize, native_pty_system};
     use std::io::{Read, Write};
@@ -3158,7 +3194,7 @@ fn start_keeps_a_harness_that_handles_ctrl_c_attached_to_its_terminal() {
 
     let repo = TestRepo::new();
     let program = repo.fake_bin_dir().join("codex");
-    std::fs::write(&program, "#!/bin/sh\ntrap 'printf \"INT_HANDLED\\n\"' INT\nprintf 'PROVIDER_READY\\n'\nwhile :; do\n  IFS= read -r line\n  if [ \"$line\" = proceed ]; then printf 'AFTER_INTERRUPT\\n'; exit 0; fi\ndone\n").unwrap();
+    std::fs::write(&program, "#!/bin/sh\nexec \"$_BONSAI_TEST_EXECUTABLE\" --exact fake_interactive_provider --nocapture\n").unwrap();
     std::fs::set_permissions(&program, std::fs::Permissions::from_mode(0o755)).unwrap();
     let pair = native_pty_system()
         .openpty(PtySize {
@@ -3176,6 +3212,8 @@ fn start_keeps_a_harness_that_handles_ctrl_c_attached_to_its_terminal() {
     }
     command.env("BONSAI_ROOT", &repo.root);
     command.env("PATH", repo.path_with_fakebin());
+    command.env("_BONSAI_TEST_EXECUTABLE", std::env::current_exe().unwrap());
+    command.env("_BONSAI_TEST_INTERACTIVE_PROVIDER", "1");
     command.env_remove("_BONSAI_WRAPPED");
     command.env_remove("GIT_DIR");
     command.env_remove("GIT_WORK_TREE");

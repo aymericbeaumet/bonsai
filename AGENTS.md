@@ -149,6 +149,8 @@
 - `REQUIRE_TEST_SHELLS=1` makes Bash/Zsh/Fish coverage mandatory.
   Fake agent processes use the integration-test executable: system utilities
   such as Rust coreutils may reject being launched under another name.
+  Interactive provider fixtures use that executable with explicit signal
+  handling and foreground-terminal checks rather than shell trap timing.
 - Normalize fixture roots with `paths::canonicalize_ok` before passing them
   to Git on Windows. Decode JSON paths and compare `Path` values; Git output
   and native paths can use different separators.
