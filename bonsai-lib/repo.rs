@@ -13,8 +13,8 @@ use crate::worktree::Worktree;
 ///
 /// Git is the source of truth for the inventory. In particular, `External`
 /// worktrees live outside the configured Bonsai root and may have been
-/// created by another tool. They remain visible to navigation and session
-/// commands without becoming Bonsai-owned.
+/// created by another tool. Their location does not restrict management:
+/// every registered linked worktree has the same lifecycle safeguards.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum WorktreeKind {
     Main,
@@ -172,6 +172,46 @@ impl Repo {
             .filter(|entry| entry.kind == WorktreeKind::Managed)
             .map(|entry| entry.worktree)
             .collect())
+    }
+
+    /// Every registered linked checkout, independent of its creator or location.
+    pub fn linked_worktrees(&self) -> Result<Vec<Worktree>> {
+        Ok(self
+            .worktrees()?
+            .into_iter()
+            .skip(1)
+            .filter(|worktree| !worktree.is_bare)
+            .collect())
+    }
+
+    /// Re-read Git's inventory before touching a checkout. Canonical paths
+    /// prevent a symlink alias of the main checkout from bypassing protection.
+    pub fn validate_linked_worktree(&self, path: &Path) -> Result<Worktree> {
+        let canonical = crate::paths::canonicalize_or_self(path);
+        if canonical == crate::paths::canonicalize_or_self(&self.main_root) {
+            bail!("the main checkout cannot be modified by this operation");
+        }
+        let worktree = self
+            .linked_worktrees()?
+            .into_iter()
+            .find(|worktree| crate::paths::canonicalize_or_self(&worktree.path) == canonical)
+            .ok_or_else(|| anyhow!("worktree registration changed: {}; retry", path.display()))?;
+        if !worktree.is_missing() {
+            let checkout = Git::at(&worktree.path);
+            let top = checkout.out(&["rev-parse", "--show-toplevel"])?;
+            let common =
+                checkout.out(&["rev-parse", "--path-format=absolute", "--git-common-dir"])?;
+            let expected =
+                self.git
+                    .out(&["rev-parse", "--path-format=absolute", "--git-common-dir"])?;
+            if crate::paths::canonicalize_or_self(Path::new(&top)) != canonical
+                || crate::paths::canonicalize_or_self(Path::new(&common))
+                    != crate::paths::canonicalize_or_self(Path::new(&expected))
+            {
+                bail!("worktree checkout changed: {}; retry", path.display());
+            }
+        }
+        Ok(worktree)
     }
 
     /// `<root>/<repo-id>` — where this repo's worktrees live.

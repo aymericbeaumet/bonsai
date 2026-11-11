@@ -28,6 +28,7 @@ pub struct Config {
     pub workspace: bool,
     pub add: AddConfig,
     pub clean: CleanConfig,
+    pub trim: TrimConfig,
     pub hq: HqConfig,
 }
 
@@ -86,6 +87,14 @@ pub struct CleanConfig {
     pub protected: Vec<String>,
 }
 
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+#[serde(default, deny_unknown_fields)]
+pub struct TrimConfig {
+    /// Globs of ignored paths `trim` never deletes, on top of `[add] copy`
+    /// and the built-in local-state globs (`ignored::LOCAL_STATE`).
+    pub keep: Vec<String>,
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(default, deny_unknown_fields)]
 pub struct HqConfig {
@@ -102,6 +111,7 @@ impl Default for Config {
             workspace: true,
             add: AddConfig::default(),
             clean: CleanConfig::default(),
+            trim: TrimConfig::default(),
             hq: HqConfig::default(),
         }
     }
@@ -135,11 +145,26 @@ impl Config {
             figment = figment.merge(Toml::file(dir.join(".bonsai.toml")));
         }
         figment = figment.merge(Serialized::defaults(git_config_patch(git)?));
-        figment = figment.merge(Env::prefixed("BONSAI_").split("__"));
+        // Other tools share the prefix (Heroku's BONSAI_URL), so only known
+        // top-level settings are read; keys nested under them stay strict.
+        let settings = match serde_json::to_value(Config::default())? {
+            serde_json::Value::Object(fields) => fields.into_iter().map(|(key, _)| key).collect(),
+            _ => Vec::<String>::new(),
+        };
+        figment = figment.merge(Env::prefixed("BONSAI_").split("__").filter(move |key| {
+            let setting = key.as_str().split('.').next().unwrap_or_default();
+            settings
+                .iter()
+                .any(|known| known.eq_ignore_ascii_case(setting))
+        }));
         let config: Config = figment.extract().context("invalid bonsai configuration")?;
         for pattern in &config.clean.protected {
             glob::Pattern::new(pattern)
                 .with_context(|| format!("invalid clean.protected glob '{pattern}'"))?;
+        }
+        for pattern in &config.trim.keep {
+            glob::Pattern::new(pattern.trim_start_matches('/').trim_end_matches('/'))
+                .with_context(|| format!("invalid trim.keep glob '{pattern}'"))?;
         }
         for pattern in &config.add.copy {
             glob::Pattern::new(pattern)
@@ -177,6 +202,7 @@ struct GitConfigPatch {
     workspace: Option<bool>,
     add: GitConfigAddPatch,
     clean: GitConfigCleanPatch,
+    trim: GitConfigTrimPatch,
     hq: GitConfigHqPatch,
 }
 
@@ -200,6 +226,12 @@ struct GitConfigCleanPatch {
     fetch: Option<bool>,
     #[serde(skip_serializing_if = "Option::is_none")]
     protected: Option<Vec<String>>,
+}
+
+#[derive(Debug, Default, Serialize)]
+struct GitConfigTrimPatch {
+    #[serde(skip_serializing_if = "Option::is_none")]
+    keep: Option<Vec<String>>,
 }
 
 #[derive(Debug, Default, Serialize)]
@@ -242,6 +274,7 @@ fn git_config_patch(git: &Git) -> Result<GitConfigPatch> {
             "bonsai.add.copy" => patch.add.copy.get_or_insert_default().push(value),
             "bonsai.clean.fetch" => patch.clean.fetch = Some(boolean()?),
             "bonsai.clean.protected" => patch.clean.protected.get_or_insert_default().push(value),
+            "bonsai.trim.keep" => patch.trim.keep.get_or_insert_default().push(value),
             "bonsai.hq.scrolloff" => {
                 patch.hq.scrolloff =
                     Some(value.parse().with_context(|| {
@@ -338,6 +371,31 @@ mod tests {
             assert!(config.clean.fetch);
             assert!(config.add.install);
             assert_eq!(config.hq.scrolloff, 10);
+            Ok(())
+        });
+    }
+
+    #[test]
+    #[allow(clippy::result_large_err)]
+    fn env_ignores_foreign_variables_but_keeps_known_sections_strict() {
+        figment::Jail::expect_with(|jail| {
+            let home = jail.directory().join("home");
+            let repo = jail.directory().join("repo");
+            std::fs::create_dir_all(&repo).unwrap();
+            jail.set_env("HOME", home.to_string_lossy());
+            jail.set_env("XDG_CONFIG_HOME", home.join(".config").to_string_lossy());
+            jail.set_env("GIT_CONFIG_GLOBAL", "/dev/null");
+            jail.set_env("GIT_CONFIG_NOSYSTEM", "1");
+            let git = Git::at(&repo);
+
+            // Another tool's variable, e.g. Heroku's Bonsai Elasticsearch.
+            jail.set_env("BONSAI_URL", "https://user:secret@example.bonsai.io");
+            jail.set_env("BONSAI_DEFAULT_BRANCH", "trunk");
+            let config = Config::load(Some(&repo), &git).unwrap();
+            assert_eq!(config.default_branch.as_deref(), Some("trunk"));
+
+            jail.set_env("BONSAI_ADD__FETHC", "false");
+            assert!(Config::load(Some(&repo), &git).is_err());
             Ok(())
         });
     }

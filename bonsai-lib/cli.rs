@@ -19,8 +19,8 @@ in scope, and commands that need a single project prompt for one.
 composes with -a/--all.
 
 Interactive use: enable the shell wrapper with `eval \"$(bonsai init zsh)\"`
-so add/cd/remove move your shell automatically, and omit arguments to get
-fuzzy pickers.
+so add, cd, remove (rm), clean, and hq move your shell automatically, and
+omit arguments to get fuzzy pickers.
 
 Scripted use (CI, AI agents): pass arguments explicitly; cd-capable commands
 print the target path on stdout, so `cd \"$(bonsai add foo)\"` composes.
@@ -30,6 +30,101 @@ Configuration precedence, low to high: built-in defaults,
 ~/.config/bonsai/config.toml, <repo>/.bonsai.toml, `git config bonsai.*`,
 BONSAI_* environment variables, command-line flags.";
 
+/// Task-oriented command groups for the top-level help; every subcommand
+/// belongs to exactly one (enforced by a test).
+const GROUPS: &[(&str, &[&str])] = &[
+    (
+        "Work with worktrees and agents",
+        &["hq", "add", "cd", "list", "ps", "start", "resume"],
+    ),
+    (
+        "Free disk or remove worktrees",
+        &["trim", "remove", "clean", "prune"],
+    ),
+    (
+        "Setup",
+        &["init", "workspace", "skill", "agents", "completions"],
+    ),
+];
+
+const HQ_NOTE: &str = "\
+Run `bonsai` alone in a terminal to open hq: every project and worktree with
+its running agents, status, and sizes, and one key per command.";
+
+const BULK_NOTE: &str = "\
+Bulk cleanup (trim, clean, prune): -n/--dry-run previews, -y/--yes skips
+confirmation, and --json reports. -a/--all spans every project.
+Start with trim to free disk while keeping your worktrees and branches.";
+
+/// The clap command with the grouped overview as its help template.
+pub fn command() -> clap::Command {
+    let command = <Cli as clap::CommandFactory>::command();
+    let template = format!(
+        "{{before-help}}{{about-with-newline}}\n{{usage-heading}} {{usage}}\n\n{HQ_NOTE}\n\n{}{BULK_NOTE}\n\nOptions:\n{{options}}{{after-help}}",
+        overview(&command)
+    );
+    command.help_template(template)
+}
+
+fn overview(command: &clap::Command) -> String {
+    let rows: Vec<Vec<(String, String)>> = GROUPS
+        .iter()
+        .map(|(_, names)| {
+            names
+                .iter()
+                .filter_map(|name| command.find_subcommand(name))
+                .map(|sub| {
+                    let about = sub.get_about().map(|a| a.to_string()).unwrap_or_default();
+                    (signature(sub), about)
+                })
+                .collect()
+        })
+        .collect();
+    let width = rows
+        .iter()
+        .flatten()
+        .map(|(signature, _)| signature.len())
+        .max()
+        .unwrap_or(0);
+    let mut out = String::new();
+    for ((title, _), rows) in GROUPS.iter().zip(rows) {
+        out.push_str(&format!("{title}:\n"));
+        for (signature, about) in rows {
+            out.push_str(&format!("  {signature:width$}  {about}\n"));
+        }
+        out.push('\n');
+    }
+    out
+}
+
+/// `trim [TARGETS]...`, `init <SHELL>`, `skill [COMMAND]`.
+fn signature(command: &clap::Command) -> String {
+    let mut parts = vec![command.get_name().to_string()];
+    for arg in command.get_positionals() {
+        let name = arg
+            .get_value_names()
+            .and_then(|names| names.first())
+            .map(|name| name.to_string())
+            .unwrap_or_else(|| arg.get_id().as_str().to_uppercase());
+        let mut part = if arg.is_required_set() {
+            format!("<{name}>")
+        } else {
+            format!("[{name}]")
+        };
+        if arg
+            .get_num_args()
+            .is_some_and(|range| range.max_values() > 1)
+        {
+            part.push_str("...");
+        }
+        parts.push(part);
+    }
+    if command.has_subcommands() {
+        parts.push("[COMMAND]".to_string());
+    }
+    parts.join(" ")
+}
+
 const ADD_LONG: &str = "\
 Create a worktree and cd into it (prints the path without the shell wrapper).
 Existing branch names are preserved exactly. New branch inputs are slugified
@@ -37,8 +132,7 @@ segment-by-segment (`Fix API/Login` becomes `fix-api/login`); `/` remains the
 branch and directory delimiter.
 
 Branch resolution, in order:
-  - already checked out in a bonsai worktree: reuse it (idempotent)
-  - checked out in an external worktree: refuse it (external paths are read-only)
+  - already checked out in any registered worktree: reuse it in place (idempotent)
   - exists locally: check it out in the new worktree
   - exists on the remote: create a local branch tracking it
   - otherwise: create it from --base, or from the default branch
@@ -74,7 +168,7 @@ Outside a repository, or with -a/--all, a picker chooses the project first
 (terminal only); scripts pass -C <dir> instead.";
 
 const LIST_LONG: &str = "\
-List worktrees of the current repo, one per line, in tab-aligned columns:
+List worktrees of the current repo, one per line, in space-aligned columns:
 <branch>  <path>  <flags>. Root and external worktrees are labelled
 `<branch> (root)` and `<branch> (external)`. Flags: locked, prunable, dirty
 (with --status). The main checkout is listed first. With -a/--all (the
@@ -87,12 +181,15 @@ dirty is null when Git cannot determine status; errors are never shown as clean.
 const REMOVE_LONG: &str = "\
 Remove worktrees by branch or exact checkout path (including detached
 worktrees). Without arguments, opens a fuzzy
-multi-select of this repo's worktrees (terminal only).
+multi-select of this repo's worktrees (terminal only). Like git worktree
+remove, this removes a checkout rather than its branch.
 
-The branch itself is kept unless -d/--delete-branch is passed (use `clean`
-for \"remove everything that is merged\"). Worktrees with uncommitted changes
-are refused unless --force. Removing the worktree you are standing in is
-supported: the shell wrapper brings you back to the main checkout.
+The entire checkout directory is deleted, including its ignored files; the
+branch and its commits stay unless -d/--delete-branch is passed. Use `clean`
+to select merged worktrees automatically and delete their branches too.
+Worktrees with uncommitted changes are refused unless --force. Removing
+the worktree you are standing in is supported: the shell wrapper brings you
+back to the main checkout.
 
 With -a/--all (the default outside a repo), candidates span every project,
 labelled by repo id, and a branch argument selects that branch's worktree
@@ -103,19 +200,36 @@ Examples:
   bonsai remove fix-parser -d   # remove worktree and delete the branch";
 
 const PRUNE_LONG: &str = "\
-Housekeeping for the bonsai root: runs `git worktree prune` for the current
-repo, deletes orphaned directories (crash leftovers not registered as
-worktrees, after confirmation), and removes empty directories. With
--a/--all (the default outside a repo), prunes every project and sweeps the
-entire bonsai root, including worktrees whose main clone has been deleted
-(their .git file points nowhere). Confirmed independent
-orphan directories are deleted concurrently with numbered result lines.";
+Repair leftovers after checkout directories or their main clone were deleted.
+Branches are never deleted, and existing registered checkouts stay.
+
+There are three distinct effects:
+  1. Drop Git registrations for missing, unlocked linked worktrees, including
+     external ones (shown as 'directory deleted' in hq). No files remain to
+     delete; this metadata cleanup happens without a prompt.
+  2. Delete orphan directories under the bonsai root: directories no longer
+     registered as worktrees. Their contents may include uncommitted work,
+     so deletion requires confirmation or --yes. Review --dry-run first.
+  3. Remove empty directories left under the bonsai root.
+
+Optional branches or exact checkout paths restrict cleanup to those targets,
+including missing paths. With -a/--all (the default outside a repo), every
+project and the entire bonsai root are checked, including worktrees whose
+main clone was deleted. Confirmed independent orphan directories are deleted
+concurrently with numbered result lines. Use `trim` to free ignored build
+files from worktrees you want to keep; `prune` does not trim live worktrees.
+
+Examples:
+  bonsai prune --dry-run        # inspect registrations and directories
+  bonsai prune fix-parser       # clean up one missing worktree
+  bonsai prune -a --dry-run     # inspect leftovers across every project";
 
 const CLEAN_LONG: &str = "\
-Remove every worktree whose branch is already integrated into the default
-branch, then delete those branches. Detects regular merges and squash-merges
-(content comparison), including branches whose upstream was deleted after
-merging. A missing upstream alone never proves integration. Fetches with
+Delete entire worktree directories, including ignored files, and their
+local branches when already integrated into the default branch. Use `trim`
+instead to keep the worktrees and branches. Detects regular merges and
+squash-merges (content comparison), including branches whose upstream was
+deleted after merging. A missing upstream alone never proves integration. Fetches with
 --prune first (disable with --no-fetch or [clean] fetch = false).
 
 Never touched: the main checkout, the default branch, locked worktrees,
@@ -124,6 +238,7 @@ with unpushed commits on a live upstream, and branches matching [clean]
 protected globs. The plan is always printed; without --yes (alias
 -f/--force) a confirmation multi-select opens (terminal only).
 
+Optional branches or exact checkout paths restrict the plan and deletion.
 With -a/--all (the default outside a repo), every project is analyzed with
 its own configuration, then one combined plan is confirmed; --json prints
 an array with one report per project, each carrying its repo id.
@@ -137,6 +252,53 @@ Examples:
   bonsai clean --yes            # no confirmation (scripts, agents)
   bonsai clean -f               # same: --force is an alias of --yes
   bonsai clean -a --dry-run     # every project";
+
+const TRIM_LONG: &str = "\
+Free disk space by deleting what git ignores (node_modules, target, .venv,
+build output, caches) from Git-registered linked worktrees. Worktrees, branches,
+tracked files, and non-ignored untracked files stay. Like git clean -X,
+this targets ignored files, with additional keep rules. Dependencies and builds
+will need to be restored before using them again. This does not remove
+worktrees (`remove` or `clean`) or repair missing registrations (`prune`).
+
+Without arguments, every linked worktree of the current project is
+planned (-a/--all, the default outside a repo: of every project); branches
+or exact checkout paths narrow it. Worktrees created by other tools are
+fully supported in place. The main checkout, locked worktrees, and worktrees
+another coding agent is working in (see `bonsai ps`) are never touched.
+
+Kept even when ignored, with everything inside them: nested repositories,
+local state no rebuild restores (.env*, .envrc, *.local, *.local.*,
+*.sqlite, *.sqlite3, *.db, *.tfstate*, *.tfvars, *.key, *.pem, *.p12,
+.idea, .vscode), and [add] copy and [trim] keep globs. Like gitignore
+patterns, a glob without `/` matches a name at any depth. Other ignored
+files are deleted, so review the plan: it shows the largest paths with
+their disk usage, --dry-run lists every path, and --json details them all.
+Inside ignored dependency and build directories (node_modules, target,
+.build, etc.), only explicit [trim] keep globs and registered nested
+worktrees are protected; package fixtures and dependency checkouts can be
+rebuilt. Terminal deletion progress shows entries removed, throughput, and
+completed paths.
+
+Examples:
+  bonsai trim --dry-run         # how much would be reclaimed, and where
+  bonsai trim                   # confirm per worktree, then delete
+  bonsai trim fix-parser -y     # one worktree, no prompt
+  bonsai trim -a --yes          # every project";
+
+const PS_LONG: &str = "\
+List the coding agents running on this machine (Claude Code, Codex,
+OpenCode, Grok, Cursor Agent, Gemini CLI, Copilot, Amp, Aider, Goose, Crush,
+Qwen Code, Pi) with the checkout each one works in, its pid, and its uptime.
+Inside a repository, only agents working in its checkouts are listed; with
+-a/--all (the default outside a repo), every agent is, labelled
+`<repo-id>: <branch>` when it works in a known checkout and by directory
+otherwise. --json outputs an array of {kind, pid, cwd, started, caller,
+worktree, branch, repo?}.
+
+Agents launched through npm or bun count once, as their outermost process.
+remove refuses, and clean and trim skip, worktrees another agent is working
+in; an agent running bonsai itself never blocks its own request.";
 
 const CD_LONG: &str = "\
 Jump to a worktree. With the shell wrapper this cds; without it the target
@@ -181,10 +343,10 @@ Print the shell integration for zsh, bash, or fish. Add to your shell rc:
   eval \"$(bonsai init bash)\"    # bash
   bonsai init fish | source     # fish
 
-The wrapper makes add/cd/remove/clean move your shell into the right
-directory when stdout is a terminal. Substitutions, pipes, and redirections
-preserve the raw path; `command bonsai` always bypasses the wrapper. It uses
-a plain `cd`, so directory-change hooks keep working.";
+The wrapper makes add, cd, remove (rm), clean, and hq move your shell into
+the right directory when stdout is a terminal. Substitutions, pipes, and
+redirections preserve the raw path; `command bonsai` always bypasses the
+wrapper. It uses a plain `cd`, so directory-change hooks keep working.";
 
 const AGENTS_LONG: &str = "\
 Print the bundled Agent Skill without YAML frontmatter for AI coding agents
@@ -202,54 +364,60 @@ worktrees. Workspace settings, tasks, launch configuration, comments, and
 custom folders are preserved when Bonsai refreshes its folders.
 
   <root>/<repo-id>/<repo>.code-workspace   per repo: all registered worktrees
-  <root>/bonsai.code-workspace             global: Bonsai-managed worktrees
+  <root>/bonsai.code-workspace             global: linked worktrees of known projects
 
 Both are kept up to date by add/remove/clean/prune (disable with
 `workspace = false`). This command refreshes one and prints its path:
 
   code \"$(bonsai workspace)\"          # this repo's worktrees
-  cursor \"$(bonsai workspace -a)\"     # everything under the bonsai root
+  cursor \"$(bonsai workspace -a)\"     # linked worktrees of known projects
 
 Outside a repo, the global file is the default.
 
-The per-repo file includes external worktrees registered by other tools. The
-global file cannot discover those paths without a current repo context.
+Both files include external worktrees registered by other tools. Global
+discovery uses the Bonsai root, workspace references, and the current project.
 
 Claude Code and Codex desktop open plain folders: point them at a worktree
 directory (<root>/<repo-id>/<branch>) or use `bonsai cd`.";
 
 const HQ_LONG: &str = "\
-Browse projects in the terminal, including each project's main checkout
-and all Git-registered worktrees. Inside a repository hq shows that project,
-even when it has no Bonsai-managed worktrees yet; -a/--all, and running
-outside a repository, show every project under the Bonsai root. Editor
-workspace files contribute checkouts that live outside the root.
+Browse projects in the terminal and act on them without leaving it. Inside a
+repository hq shows that project, even when it has no Bonsai-managed
+worktrees yet; -a/--all, and running outside a repository, show every project
+under the Bonsai root. Editor workspace files contribute checkouts that live
+outside the root.
 
-The home list is one row per project, in alphabetical order by host, owner,
-and repository. s cycles between that and most recent. Each row
-shows the host, the repository owner, and the name, not the branch. A heading
-names each visible column. An open tree and an open project use a ruled
-frame; the home list stays a table. t opens
-and closes the tree, grouping checkouts by host, then owner, then
-repository. Host, owner, and project each have their own colour, in the table and in the tree. j/k or the
-arrow keys move one row, as do ctrl-e and ctrl-y. ctrl-d and ctrl-u move
-half a page. gg jumps to the top and G to the bottom. The cursor moves
-inside the window, and the list scrolls when it comes within hq.scrolloff
-rows of the top or bottom (default 10). / fuzzy-finds by host, owner, project, branch, path, stack,
-or harness.
-The / line and the : command line take readline keys (Ctrl-B/F, Ctrl-A/E,
-Ctrl-W, Ctrl-U, Ctrl-K). user:<name> and organisation:<name> (also org: and
-organization:) match the
-owner. Enter and o open that project, listing its checkouts by branch.
-ctrl-i does the same. A search that matches does too. ctrl-o and esc go up
-one step, clearing a search or leaving the project. : runs add, remove,
-clean, and prune.
-r refreshes. q quits. The checkout path stays on the status line.
+The home list is one row per project with its checkouts, uncommitted
+changes, total size, age, stack, coding agents, running agents, and deleted
+checkouts. Open a project to list each checkout with its changes, upstream,
+size, dependency directories, and the coding agents running in it. The home list has four views, from the shortest
+list to the longest: table, projects (each with its checkouts), owners, and
+hosts, each group with its totals. v moves to the next view and V back;
+tabs on the top border show the current one. ctrl-s sorts by name, recent activity, or size. Sizes from
+the previous session show at once and update as they are measured again.
 
-Git status and checkout sizes fill in on that same row after the list
-appears. A missing checkout is marked missing and is not passed to git.
-Warnings are appended to ~/.local/state/bonsai/hq.log. --json prints the
-inventory, including status and each footprint, and exits without a
+Keys follow vim: j/k with counts (5j), gg/G, ctrl-d/u, ctrl-f/b, ctrl-e/y,
+H/M/L, zz/zt/zb, { and } between projects, h/l to go back and in, and /
+to search (user: and org: match owners, running: keeps checkouts where
+coding agents run). Enter opens a project; on a
+checkout it quits and, with the shell wrapper, changes into it.
+
+Commands act on the selection: a adds a worktree, R removes it while
+keeping its branch, D deletes both, C cleans merged worktrees and branches,
+T trims ignored files (node_modules, target, ...), P prunes leftovers,
+f fetches, e edits with $VISUAL or $EDITOR, s starts and r resumes a coding
+agent, p lists running agents (ps), and y yanks the path. Every destructive
+action uses an uppercase key and confirms exactly what will be deleted.
+v/V changes views, ctrl-r refreshes, ctrl-s sorts, and o opens the output.
+: opens a command line with the same commands (:add <branch>).
+Bonsai commands stream into an output pane;
+agents and editors take over the terminal until they exit. ? lists every
+key.
+
+Git status and checkout sizes fill in after the list appears. Warnings are
+appended to ~/.local/state/bonsai/hq.log; sizes are remembered in
+~/.local/state/bonsai/footprints.json. --json prints the inventory,
+including status, each footprint, and running agents, and exits without a
 terminal.
 
 Examples:
@@ -319,13 +487,14 @@ pub struct Cli {
     #[arg(long, global = true, value_name = "NAME")]
     pub remote: Option<String>,
 
+    /// Omitted on a terminal: open hq
     #[command(subcommand)]
-    pub command: Commands,
+    pub command: Option<Commands>,
 }
 
 #[derive(Debug, Subcommand)]
 pub enum Commands {
-    /// Browse worktrees in the terminal
+    /// Browse and manage worktrees and their agents in the terminal
     #[command(long_about = HQ_LONG)]
     Hq {
         /// Print the worktree inventory as JSON and exit
@@ -379,14 +548,14 @@ pub enum Commands {
         /// Add a dirty flag (runs git status across worktrees concurrently)
         #[arg(long)]
         status: bool,
-        /// Output JSON instead of TSV
+        /// Output JSON instead of aligned columns
         #[arg(long)]
         json: bool,
     },
-    /// Remove worktrees, keeping their branches unless -d
+    /// Delete chosen worktree directories; keep branches unless -d
     #[command(alias = "rm", long_about = REMOVE_LONG)]
     Remove {
-        /// Branches or exact managed paths to remove; omit (on a terminal) to
+        /// Branches or exact checkout paths to remove; omit (on a terminal) to
         /// fuzzy multi-select
         branches: Vec<String>,
         /// Also delete the branch (refuses unmerged branches unless --force)
@@ -399,20 +568,54 @@ pub enum Commands {
         #[arg(short, long)]
         all: bool,
     },
-    /// Clean up stale registrations, orphaned directories, and empty dirs
+    /// Drop missing registrations; delete orphan dirs; keep branches
     #[command(long_about = PRUNE_LONG)]
     Prune {
+        /// Branches or exact checkout paths to prune (default: all in scope)
+        targets: Vec<String>,
+        #[arg(long, hide = true, value_name = "FILE")]
+        reviewed_plan: Option<PathBuf>,
+        /// Show what would be pruned without touching anything
+        #[arg(short = 'n', long)]
+        dry_run: bool,
+        /// Do not ask for confirmation
+        #[arg(short = 'y', long, visible_short_alias = 'f', visible_alias = "force")]
+        yes: bool,
+        /// Output the plan/result as JSON on stdout
+        #[arg(long)]
+        json: bool,
         /// Prune every project and sweep the whole bonsai root, including
         /// repos whose clone is gone
         #[arg(short, long)]
         all: bool,
+    },
+    /// Delete ignored files (builds, dependencies); keep worktrees and branches
+    #[command(long_about = TRIM_LONG)]
+    Trim {
+        /// Branches or exact checkout paths to trim (default: every
+        /// linked worktree in scope)
+        targets: Vec<String>,
+        /// Show what would be deleted without touching anything
+        #[arg(short = 'n', long)]
+        dry_run: bool,
         /// Do not ask for confirmation
         #[arg(short = 'y', long, visible_short_alias = 'f', visible_alias = "force")]
         yes: bool,
+        /// Output the plan/result as JSON on stdout
+        #[arg(long)]
+        json: bool,
+        /// Require the deletion roots to match a previously reviewed JSON plan
+        #[arg(long, hide = true)]
+        reviewed_plan: Option<PathBuf>,
+        /// Trim every project
+        #[arg(short, long)]
+        all: bool,
     },
-    /// Remove worktrees merged into the default branch (incl. squash-merges)
+    /// Delete merged worktrees and their branches (including squash-merges)
     #[command(long_about = CLEAN_LONG)]
     Clean {
+        /// Branches or exact checkout paths to clean (default: every linked worktree in scope)
+        targets: Vec<String>,
         /// Show what would be removed without touching anything
         #[arg(short = 'n', long)]
         dry_run: bool,
@@ -428,6 +631,16 @@ pub enum Commands {
         /// Clean every project
         #[arg(short, long)]
         all: bool,
+    },
+    /// List running coding agents and the worktrees they work in
+    #[command(long_about = PS_LONG)]
+    Ps {
+        /// Every agent on this machine, not only this project's
+        #[arg(short, long)]
+        all: bool,
+        /// Output JSON instead of aligned columns
+        #[arg(long)]
+        json: bool,
     },
     /// Jump to a worktree (fuzzy; every project with -a or outside a repo)
     #[command(long_about = CD_LONG)]
@@ -481,4 +694,45 @@ pub enum Commands {
         /// Shell flavor to emit
         shell: clap_complete::Shell,
     },
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn every_command_belongs_to_exactly_one_help_group() {
+        let command = <Cli as clap::CommandFactory>::command();
+        let grouped: Vec<&str> = GROUPS
+            .iter()
+            .flat_map(|(_, names)| names.iter().copied())
+            .collect();
+        for sub in command.get_subcommands() {
+            let name = sub.get_name();
+            assert_eq!(
+                grouped.iter().filter(|grouped| **grouped == name).count(),
+                1,
+                "{name} must appear in exactly one help group"
+            );
+        }
+        assert_eq!(grouped.len(), command.get_subcommands().count());
+    }
+
+    #[test]
+    fn overview_shows_each_signature_with_its_description() {
+        let help = command().render_help().to_string();
+        for sub in <Cli as clap::CommandFactory>::command().get_subcommands() {
+            let signature = signature(sub);
+            let about = sub.get_about().unwrap().to_string();
+            assert!(
+                help.lines().any(|line| {
+                    let line = line.trim();
+                    line.starts_with(&signature) && line.ends_with(&about)
+                }),
+                "missing overview line for {signature}:\n{help}"
+            );
+        }
+        assert!(help.contains("trim [TARGETS]..."));
+        assert!(help.contains("init <SHELL>"));
+    }
 }

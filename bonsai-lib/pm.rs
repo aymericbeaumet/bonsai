@@ -396,7 +396,7 @@ fn package_manager_version(dir: &Path, expected: &str) -> Option<Version> {
 }
 
 fn read_yaml<T: serde::de::DeserializeOwned>(path: &Path) -> Option<T> {
-    serde_yaml::from_str(&std::fs::read_to_string(path).ok()?).ok()
+    serde_saphyr::from_str(&std::fs::read_to_string(path).ok()?).ok()
 }
 
 fn read_toml<T: serde::de::DeserializeOwned>(path: &Path) -> Option<T> {

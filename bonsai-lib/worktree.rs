@@ -13,6 +13,13 @@ pub struct Worktree {
 }
 
 impl Worktree {
+    /// Git flags the registration as prunable and its directory is gone
+    /// (deleted by hand): no checkout content remains, so dropping the
+    /// registration loses nothing.
+    pub fn is_missing(&self) -> bool {
+        self.is_prunable && !self.is_locked && self.path.try_exists().is_ok_and(|exists| !exists)
+    }
+
     /// The main worktree is always the first entry emitted by git.
     pub fn parse_list(bytes: &[u8]) -> Vec<Worktree> {
         let mut worktrees = Vec::new();

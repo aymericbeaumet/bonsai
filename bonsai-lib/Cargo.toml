@@ -25,22 +25,25 @@ glob = "0.3.4"
 inquire = "0.9.4"
 jsonc-parser = { version = "0.34.0", features = ["cst", "serde", "serde_json"] }
 ratatui = "0.30.2"
-rusqlite = { version = "0.40.2", features = ["bundled"] }
+rayon = "1.12.0"
+rusqlite = { version = "0.42.0", features = ["bundled"] }
 serde = { version = "1.0.229", features = ["derive"] }
+serde-saphyr = "2.1.1"
 serde_json = "1.0.154"
-serde_yaml = "0.9.34"
 sha2 = "0.11.1"
 shlex = "2.0.1"
-skim = { version = "5.7.4", default-features = false }
+skim = { version = "5.9.0", default-features = false }
 slug = "0.1.6"
+sysinfo = { version = "0.40.1", default-features = false, features = ["system"] }
 tabwriter = "1.4.1"
 tempfile = "3.27.0"
 thiserror = "2.0.21"
-toml = "1.1.8"
+toml = "1.2.1"
 
 [target.'cfg(unix)'.dependencies]
-libc = "0.2.190"
-signal-hook = "0.4.5"
+libc = "0.2.191"
+rustix = { version = "1.1.6", features = ["fs"] }
+signal-hook = "0.4.6"
 
 [dev-dependencies]
 figment = { version = "0.10.19", features = ["test"] }

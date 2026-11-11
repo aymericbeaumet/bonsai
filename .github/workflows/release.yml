@@ -13,37 +13,28 @@ concurrency:
 
 env:
   CARGO_TERM_COLOR: always
+  # Each job installs only the tools it lists; tasks must not add the rest.
+  MISE_AUTO_INSTALL: "false"
+  MISE_TASK_RUN_AUTO_INSTALL: "false"
 
 jobs:
   test:
     uses: ./.github/workflows/ci.yml
 
   version:
-    runs-on: ubuntu-24.04
+    runs-on: ubuntu-26.04
     outputs:
       version: ${{ steps.version.outputs.version }}
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           fetch-depth: 0
+      - uses: jdx/mise-action@b44d12e7d0d8ee7461bb893e1b1993500433185b # v5.2.7
+        with:
+          version: 2026.11.6
+          install_args: --locked python
       - id: version
-        run: |
-          last="$(git tag --list 'v*' --sort=-v:refname | head -n1)"
-          if [ -z "$last" ]; then
-            version="$(perl -ne 'print $1 if /^version = "(.*)"/' Cargo.toml)"
-          else
-            IFS=. read -r major minor patch <<< "${last#v}"
-            log="$(git log "$last"..HEAD --format='%s%n%b')"
-            if grep -qE '^[a-z]+(\([^)]*\))?!:|^BREAKING CHANGE' <<< "$log"; then
-              major=$((major + 1)); minor=0; patch=0
-            elif grep -qE '^feat(\([^)]*\))?:' <<< "$log"; then
-              minor=$((minor + 1)); patch=0
-            else
-              patch=$((patch + 1))
-            fi
-            version="$major.$minor.$patch"
-          fi
-          echo "version=$version" >> "$GITHUB_OUTPUT"
+        run: mise run release-version
 
   build:
     name: build (${{ matrix.name }})
@@ -52,41 +43,42 @@ jobs:
       fail-fast: false
       matrix:
         include:
-          - { name: linux-amd64, os: ubuntu-24.04 }
-          - { name: linux-arm64, os: ubuntu-24.04-arm }
-          - { name: darwin-amd64, os: macos-15-intel }
-          - { name: darwin-arm64, os: macos-26 }
-          - { name: windows-amd64, os: windows-2025 }
-          - { name: windows-arm64, os: windows-11-arm }
+          # Linux binaries link musl statically so they run on any distribution.
+          - { name: linux-amd64, os: ubuntu-26.04, target: x86_64-unknown-linux-musl }
+          - { name: linux-arm64, os: ubuntu-26.04-arm, target: aarch64-unknown-linux-musl }
+          - { name: darwin-amd64, os: macos-26-intel, target: x86_64-apple-darwin }
+          - { name: darwin-arm64, os: macos-26, target: aarch64-apple-darwin }
+          - { name: windows-amd64, os: windows-2025, target: x86_64-pc-windows-msvc }
+          - { name: windows-arm64, os: windows-11-arm, target: aarch64-pc-windows-msvc }
     runs-on: ${{ matrix.os }}
+    env:
+      TARGET: ${{ matrix.target }}
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
-      - uses: jdx/mise-action@08ae2a091c038e1e05ec6f5115dc5c69d5a2a6b8 # v5.1.2
+      - uses: jdx/mise-action@b44d12e7d0d8ee7461bb893e1b1993500433185b # v5.2.7
         with:
-          version: 2026.10.11
-          install_args: rust
+          version: 2026.11.6
+          install_args: --locked rust python
           cache: false
-      - uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2.9.2
-      # Stamp the computed version (not committed) on both crates so
-      # `bonsai --version` matches the library it was built with.
-      - shell: bash
+      - uses: Swatinem/rust-cache@d1527c8f67ef9af357290475d4af4b0fab8f12e0 # v2.9.3
+      - name: Add the static musl target
+        if: runner.os == 'Linux'
+        run: |
+          sudo apt-get update -qq
+          sudo apt-get install --yes -qq musl-tools
+          mise run release-target -- "$TARGET"
+          echo "CC_${TARGET//-/_}=musl-gcc" >> "$GITHUB_ENV"
+      - name: Stamp the computed release version
         env:
           VERSION: ${{ needs.version.outputs.version }}
-        run: |
-          perl -pi -e 's/^version = ".*"/version = "$ENV{VERSION}"/' Cargo.toml bonsai-lib/Cargo.toml
-          perl -pi -e 's/(package = "bonsai-lib", path = "bonsai-lib", version = ")[^"]+/${1}$ENV{VERSION}/' Cargo.toml
-      - run: cargo update --workspace
-      - run: cargo build --release --locked
-      - shell: bash
+        run: mise run release-stamp
+      - run: mise run release -- --target "$TARGET"
+        shell: bash
+      - name: Verify and archive the binary
         env:
+          VERSION: ${{ needs.version.outputs.version }}
           ARCHIVE: bonsai-${{ matrix.name }}
-        run: |
-          mkdir dist
-          if [[ "$ARCHIVE" == bonsai-windows-* ]]; then
-            (cd target/release && 7z a "../../dist/$ARCHIVE.zip" bonsai.exe)
-          else
-            tar -C target/release -czf "dist/$ARCHIVE.tar.gz" bonsai
-          fi
+        run: mise run release-archive
       - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
         with:
           name: bonsai-${{ matrix.name }}
@@ -95,19 +87,53 @@ jobs:
 
   release:
     needs: [version, build]
-    runs-on: ubuntu-24.04
+    runs-on: ubuntu-26.04
     steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - uses: jdx/mise-action@b44d12e7d0d8ee7461bb893e1b1993500433185b # v5.2.7
+        with:
+          version: 2026.11.6
+          install_args: --locked python gh
       - uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
         with:
           path: dist
           merge-multiple: true
-      - run: cd dist && sha256sum -- * > SHA256SUMS
       - env:
           GH_TOKEN: ${{ github.token }}
           VERSION: ${{ needs.version.outputs.version }}
-        run: |
-          gh release create "v$VERSION" \
-            --repo "$GITHUB_REPOSITORY" \
-            --target "$GITHUB_SHA" \
-            --generate-notes \
-            dist/*
+        run: mise run release-publish
+
+  # The formula installs the prebuilt archives of the release above.
+  homebrew:
+    needs: [version, release]
+    runs-on: ubuntu-26.04
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - uses: jdx/mise-action@b44d12e7d0d8ee7461bb893e1b1993500433185b # v5.2.7
+        with:
+          version: 2026.11.6
+          install_args: --locked python
+          cache: false
+      - name: Update aymericbeaumet/homebrew-tap
+        env:
+          GH_TOKEN: ${{ secrets.HOMEBREW_TAP_TOKEN }}
+          VERSION: ${{ needs.version.outputs.version }}
+        run: mise run release-helper -- homebrew --tag "v$VERSION" --tap aymericbeaumet/homebrew-tap
+
+  # Only the library is published; the CLI installs from GitHub.
+  crate:
+    needs: [version, release]
+    runs-on: ubuntu-26.04
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - uses: jdx/mise-action@b44d12e7d0d8ee7461bb893e1b1993500433185b # v5.2.7
+        with:
+          version: 2026.11.6
+          install_args: --locked rust python
+          cache: false
+      - uses: Swatinem/rust-cache@d1527c8f67ef9af357290475d4af4b0fab8f12e0 # v2.9.3
+      - name: Publish bonsai-lib to crates.io
+        env:
+          CARGO_REGISTRY_TOKEN: ${{ secrets.CARGO_REGISTRY_TOKEN }}
+          VERSION: ${{ needs.version.outputs.version }}
+        run: mise run release-helper -- crate --version "$VERSION"
