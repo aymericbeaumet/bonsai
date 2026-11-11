@@ -130,15 +130,6 @@ description = "Re-record docs/demo/demo.gif in a container (Colima on macOS)"
 tools = { "docker-cli" = { version = "29.9.3", os = ["linux", "macos"] } }
 run = "docs/demo/record.sh"
 
-[tasks.review]
-description = "Review changes with Greptile (first run mise run review-setup)"
-tools = { "npm:greptile" = "3.8.0" }
-run = "greptile"
-
-[tasks.review-setup]
-description = "Install the locked optional Greptile review tool"
-run = "mise install --locked npm:greptile@3.8.0"
-
 [tasks.demo-setup]
 description = "Install the locked container CLI for the optional demo recorder"
 run = "mise install --locked docker-cli@29.9.3"

@@ -44,13 +44,11 @@ underlying command.
 | `mise run bench -- <options>` | Benchmarks, for example `--worktrees 1 10 100 --sessions 1000 10000 100000` |
 | `mise run bench-trim -- <packages> <files/package> <runs>` | Compare deletion primitives on disposable npm-like trees; defaults to `200 100 3` |
 | `mise run demo-setup` / `demo` | Install the pinned container CLI / re-record the README demo |
-| `mise run review-setup` / `review -- <args>` | Install the locked optional Greptile tool / run a review (requires a Greptile account) |
 
 Task runs do not silently install tools. CI explicitly installs its job's
 tools with `--locked`, and releases use the same Python, Rust, and GitHub CLI
-pins. The lock includes all six CI platforms and the optional review tool's
-npm dependency graph under `.mise/locks/`. Commit those files together when
-updating versions; refresh them with `mise lock`. Actionlint uses the pinned
+pins. The lock includes all six CI platforms. Commit it together with
+`.mise.toml` when updating versions; refresh it with `mise lock`. Actionlint uses the pinned
 ShellCheck and disables optional Pyflakes so ambient installations cannot
 change its checks.
 

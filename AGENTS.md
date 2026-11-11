@@ -47,8 +47,7 @@
 - Trust `.mise.toml` with `mise trust .mise.toml` and run
   `mise run setup`. It installs only this project's tools with `--locked`,
   leaving unrelated global tools alone. Tool pins and platform checksums
-  live in `.mise.toml` and `mise.lock`; npm dependency graphs live in
-  `.mise/locks/`. CI uses locked installs and disables task auto-install,
+  live in `.mise.toml` and `mise.lock`. CI uses locked installs and disables task auto-install,
   so each job uses only the tools it installs. See `docs/development.md`.
 - `bonsai hq` is a terminal worktree list that also runs commands. Inventory
   is Git checkouts under the bonsai root, workspace folder references, and
