@@ -586,8 +586,42 @@ fn remove_portable(path: &Path, removed: &AtomicU64, depth: usize) -> io::Result
             Ok(())
         }
         Err(error) if error.kind() == io::ErrorKind::NotFound => Ok(()),
+        #[cfg(windows)]
+        Err(error)
+            if disappeared_after_denial(
+                &error,
+                || fs::symlink_metadata(path).map(|_| ()),
+                || std::thread::sleep(std::time::Duration::from_millis(10)),
+            ) =>
+        {
+            Ok(())
+        }
         Err(error) => Err(error),
     }
+}
+
+/// Windows denies access to delete-pending entries until their last handle
+/// closes. Only confirmed disappearance can turn that error into success.
+#[cfg(any(windows, test))]
+fn disappeared_after_denial(
+    error: &io::Error,
+    mut probe: impl FnMut() -> io::Result<()>,
+    mut pause: impl FnMut(),
+) -> bool {
+    if error.kind() != io::ErrorKind::PermissionDenied {
+        return false;
+    }
+    for attempt in 0..6 {
+        match probe() {
+            Err(error) if error.kind() == io::ErrorKind::NotFound => return true,
+            Err(error) if error.kind() != io::ErrorKind::PermissionDenied => return false,
+            _ => {}
+        }
+        if attempt < 5 {
+            pause();
+        }
+    }
+    false
 }
 
 /// Remove a file or a link (never its target).
@@ -596,7 +630,9 @@ fn remove_entry(path: &Path, meta: &fs::Metadata) -> io::Result<()> {
     match fs::remove_file(path) {
         Err(_) if meta.file_type().is_symlink() => fs::remove_dir(path),
         #[cfg(windows)]
-        Err(error) if error.kind() == io::ErrorKind::PermissionDenied => {
+        Err(error)
+            if error.kind() == io::ErrorKind::PermissionDenied && meta.permissions().readonly() =>
+        {
             make_writable(path, meta)?;
             fs::remove_file(path)
         }
@@ -919,6 +955,61 @@ mod tests {
         remove_tree_with_progress(&tree, &removed).unwrap();
         assert_eq!(removed.load(Ordering::Relaxed), 4);
         assert!(outside.join("precious").exists());
+    }
+
+    #[test]
+    fn pending_deletion_requires_confirmed_disappearance() {
+        let denied = || io::Error::from(io::ErrorKind::PermissionDenied);
+        let mut probes = 0;
+        let mut pauses = 0;
+        assert!(disappeared_after_denial(
+            &denied(),
+            || {
+                probes += 1;
+                if probes == 3 {
+                    Err(io::ErrorKind::NotFound.into())
+                } else {
+                    Err(denied())
+                }
+            },
+            || pauses += 1,
+        ));
+        assert_eq!((probes, pauses), (3, 2));
+    }
+
+    #[test]
+    fn pending_deletion_preserves_persistent_permission_errors() {
+        for exists in [false, true] {
+            let mut probes = 0;
+            let mut pauses = 0;
+            assert!(!disappeared_after_denial(
+                &io::ErrorKind::PermissionDenied.into(),
+                || {
+                    probes += 1;
+                    if exists {
+                        Ok(())
+                    } else {
+                        Err(io::ErrorKind::PermissionDenied.into())
+                    }
+                },
+                || pauses += 1,
+            ));
+            assert_eq!((probes, pauses), (6, 5));
+        }
+    }
+
+    #[test]
+    fn pending_deletion_does_not_retry_unrelated_errors() {
+        assert!(!disappeared_after_denial(
+            &io::ErrorKind::InvalidInput.into(),
+            || panic!("unrelated errors must not inspect the path"),
+            || panic!("unrelated errors must not wait"),
+        ));
+        assert!(!disappeared_after_denial(
+            &io::ErrorKind::PermissionDenied.into(),
+            || Err(io::ErrorKind::InvalidInput.into()),
+            || panic!("unrelated metadata errors must not wait"),
+        ));
     }
 
     #[test]

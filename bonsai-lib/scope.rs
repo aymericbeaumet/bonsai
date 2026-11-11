@@ -256,8 +256,9 @@ mod tests {
 
     #[test]
     fn supplied_project_roots_deduplicate_existing_candidates() {
-        let existing = PathBuf::from("/bonsai-scope-tests/existing");
-        let external = PathBuf::from("/bonsai-scope-tests/external");
+        let dir = tempfile::tempdir().unwrap();
+        let existing = dir.path().join("existing");
+        let external = dir.path().join("external");
         let mut paths = BTreeSet::from([existing.clone()]);
         let supplied = serde_json::to_string(&[&existing, &external, &external]).unwrap();
         add_project_roots(&mut paths, &supplied).unwrap();
@@ -266,8 +267,13 @@ mod tests {
 
     #[test]
     fn malformed_or_relative_project_roots_leave_candidates_unchanged() {
-        let existing = PathBuf::from("/bonsai-scope-tests/existing");
-        for supplied in ["{invalid", r#"["/absolute/project", "relative/project"]"#] {
+        let dir = tempfile::tempdir().unwrap();
+        let existing = dir.path().join("existing");
+        let absolute = dir.path().join("new-project");
+        assert!(absolute.is_absolute());
+        let mixed =
+            serde_json::to_string(&[absolute.as_path(), Path::new("relative/project")]).unwrap();
+        for supplied in ["{invalid", mixed.as_str()] {
             let mut paths = BTreeSet::from([existing.clone()]);
             assert!(add_project_roots(&mut paths, supplied).is_err());
             assert_eq!(paths, BTreeSet::from([existing.clone()]));
