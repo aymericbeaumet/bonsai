@@ -10,13 +10,14 @@ uv = "0.13.7"
 actionlint = "1.7.12"
 shellcheck = "0.11.0"
 gh = "2.103.3"
+"github:fish-shell/fish-shell" = { version = "4.9.3", os = ["linux"] }
 
 [env]
 MISE_TASK_RUN_AUTO_INSTALL = "false"
 
 [tasks.setup]
 description = "Install only this project's locked development tools"
-run = "mise install --locked rust node python uv actionlint shellcheck gh"
+run = "mise install --locked rust node python uv actionlint shellcheck gh{% if os() == 'linux' %} github:fish-shell/fish-shell{% endif %}"
 
 [tasks.build]
 description = "Build the workspace"

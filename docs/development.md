@@ -58,8 +58,9 @@ updates. Tool and dependency pins make the development environment repeatable,
 but do not promise byte-identical binaries across operating systems.
 
 The PTY checks (`terminal`) require Unix. Package-manager smoke tests
-require npm, uv, and Python. The Linux CI shell tests also need Bash, Zsh,
-and Fish from the OS. Benchmarks use disposable repositories and synthetic
+require npm, uv, and Python. On Linux, mise also installs pinned standalone
+Fish binaries from the official releases. Bash and Zsh remain OS prerequisites;
+CI installs Zsh only when the runner does not already provide it. Benchmarks use disposable repositories and synthetic
 session stores, report first-run and warm median/p95 latency plus Git
 process counts, and never access personal sessions.
 
