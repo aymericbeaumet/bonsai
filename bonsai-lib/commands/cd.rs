@@ -54,6 +54,15 @@ pub fn pick(scope: &Scope, query: Option<&str>, prompt: &str) -> Result<PathBuf>
         if exact.is_empty() && matching.len() == 1 {
             return Ok(matching[0].path.clone());
         }
+        // Without a terminal the picker cannot settle the query.
+        if !picker::is_interactive() {
+            let matches = if exact.is_empty() { matching } else { exact };
+            if matches.is_empty() {
+                bail!("no worktree matches '{query}'");
+            }
+            let names = matches.iter().map(|c| c.search()).collect::<Vec<_>>();
+            bail!("'{query}' is ambiguous: {}", names.join(", "));
+        }
     }
 
     let activity = parallel::map_ordered(&candidates, |candidate| last_activity(&candidate.path));
@@ -75,7 +84,8 @@ fn candidates(scope: &Scope) -> Result<Vec<Candidate>> {
         for entry in project.repo.project_worktrees(&project.config)? {
             let label = entry.label();
             let wt = entry.worktree;
-            if wt.is_bare {
+            // A directory deleted by hand stays registered until pruned.
+            if wt.is_bare || wt.is_missing() {
                 continue;
             }
             out.push(Candidate {

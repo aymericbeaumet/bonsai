@@ -47,6 +47,13 @@ pub struct WorktreeEntry {
     pub untracked: usize,
     pub ahead: usize,
     pub behind: usize,
+    /// The branch's upstream, such as `origin/main`. `ahead` and `behind`
+    /// count against it; without one they stay zero.
+    pub upstream: Option<String>,
+    /// The upstream branch no longer exists, typically after its pull request
+    /// was merged and the remote branch deleted.
+    #[serde(rename = "upstreamGone")]
+    pub upstream_gone: bool,
     /// The checkout directory is gone. Git status is not run for it.
     pub missing: bool,
     #[serde(rename = "lastActivity")]
@@ -61,6 +68,8 @@ struct Status {
     untracked: usize,
     ahead: usize,
     behind: usize,
+    upstream: Option<String>,
+    upstream_gone: bool,
 }
 
 impl Status {
@@ -258,6 +267,8 @@ fn entry(wt: Worktree, kind: WorktreeKind, status: Option<Status>) -> WorktreeEn
         untracked: status.untracked,
         ahead: status.ahead,
         behind: status.behind,
+        upstream: status.upstream,
+        upstream_gone: status.upstream_gone,
     }
 }
 
@@ -283,9 +294,14 @@ fn orphan_repository(path: &Path) -> Option<String> {
 
 fn parse_status(bytes: &[u8]) -> Status {
     let mut status = Status::default();
+    // Git prints `branch.ab` only while the configured upstream exists.
+    let mut tracking_known = false;
     let mut records = bytes.split(|byte| *byte == 0);
     while let Some(record) = records.next() {
-        if let Some(tracking) = record.strip_prefix(b"# branch.ab ") {
+        if let Some(upstream) = record.strip_prefix(b"# branch.upstream ") {
+            status.upstream = Some(String::from_utf8_lossy(upstream).into_owned());
+        } else if let Some(tracking) = record.strip_prefix(b"# branch.ab ") {
+            tracking_known = true;
             let tracking = String::from_utf8_lossy(tracking);
             let mut counts = tracking.split_whitespace();
             status.ahead = counts
@@ -316,6 +332,7 @@ fn parse_status(bytes: &[u8]) -> Status {
             }
         }
     }
+    status.upstream_gone = status.upstream.is_some() && !tracking_known;
     status
 }
 
@@ -402,6 +419,8 @@ fn assign_status(entry: &mut WorktreeEntry, status: &Status) {
     entry.untracked = status.untracked;
     entry.ahead = status.ahead;
     entry.behind = status.behind;
+    entry.upstream.clone_from(&status.upstream);
+    entry.upstream_gone = status.upstream_gone;
 }
 
 pub struct StatusUpdate {
@@ -414,6 +433,8 @@ pub struct StatusUpdate {
     pub untracked: usize,
     pub ahead: usize,
     pub behind: usize,
+    pub upstream: Option<String>,
+    pub upstream_gone: bool,
     pub warning: Option<String>,
 }
 
@@ -468,6 +489,8 @@ pub fn start_status(paths: Vec<PathBuf>, generation: u64) -> StatusJob {
                                     untracked: status.untracked,
                                     ahead: status.ahead,
                                     behind: status.behind,
+                                    upstream_gone: status.upstream_gone,
+                                    upstream: status.upstream,
                                     warning: None,
                                 },
                                 Err(warning) => StatusUpdate {
@@ -480,6 +503,8 @@ pub fn start_status(paths: Vec<PathBuf>, generation: u64) -> StatusJob {
                                     untracked: 0,
                                     ahead: 0,
                                     behind: 0,
+                                    upstream: None,
+                                    upstream_gone: false,
                                     warning: Some(warning),
                                 },
                             };
@@ -503,7 +528,7 @@ mod tests {
     #[test]
     fn status_counts_changes_tracking_and_skips_rename_source() {
         let status = parse_status(
-            b"# branch.oid abc\0# branch.ab +12 -3\0\
+            b"# branch.oid abc\0# branch.upstream origin/feature\0# branch.ab +12 -3\0\
             1 A. N... 000000 100644 100644 a b added file\0\
             1 .M N... 100644 100644 100644 a b modified\0\
             1 D. N... 100644 000000 000000 a b deleted\0\
@@ -519,10 +544,23 @@ mod tests {
                 deleted: 1,
                 untracked: 1,
                 ahead: 12,
-                behind: 3
+                behind: 3,
+                upstream: Some("origin/feature".to_string()),
+                upstream_gone: false,
             }
         );
         assert!(status.dirty());
+    }
+
+    #[test]
+    fn an_upstream_without_tracking_counts_is_gone() {
+        let gone =
+            parse_status(b"# branch.oid abc\0# branch.head feat\0# branch.upstream origin/feat\0");
+        assert_eq!(gone.upstream.as_deref(), Some("origin/feat"));
+        assert!(gone.upstream_gone);
+        let untracked = parse_status(b"# branch.oid abc\0# branch.head feat\0");
+        assert_eq!(untracked.upstream, None);
+        assert!(!untracked.upstream_gone);
     }
 
     #[test]
@@ -616,6 +654,8 @@ mod tests {
             untracked: 0,
             ahead: 0,
             behind: 0,
+            upstream: None,
+            upstream_gone: false,
             last_activity: None,
         }
     }

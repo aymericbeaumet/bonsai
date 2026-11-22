@@ -13,8 +13,12 @@ use skim::{DisplayContext, Skim, SkimItem, options::SkimOptionsBuilder};
 /// inquire renders on stderr and reads the tty, so pickers stay interactive
 /// even while stdout is captured by the shell wrapper — but both ends must be
 /// terminals.
+pub fn is_interactive() -> bool {
+    stdin().is_terminal() && stderr().is_terminal()
+}
+
 fn ensure_tty(what: &str) -> Result<()> {
-    if !stdin().is_terminal() || !stderr().is_terminal() {
+    if !is_interactive() {
         bail!("{what} required but not running in a terminal; pass it as an argument");
     }
     Ok(())
@@ -239,6 +243,7 @@ pub fn multi_select_all_checked(prompt: &str, options: Vec<String>) -> Result<Ve
     let all: Vec<usize> = (0..options.len()).collect();
     MultiSelect::new(prompt, options)
         .with_default(&all)
+        .with_formatter(&|selected| format!("{} selected", selected.len()))
         .prompt()
         .context("selection cancelled")
 }

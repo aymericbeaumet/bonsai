@@ -26,6 +26,15 @@ impl Reason {
     }
 }
 
+/// Why an integrated worktree is kept anyway.
+#[derive(Debug, Clone)]
+enum Hold {
+    Dirty,
+    Missing,
+    /// Another coding agent works in it (who, for the report).
+    Agent(String),
+}
+
 /// Facts about a branch, gathered up front so the decision itself is pure.
 #[derive(Debug, Default, Clone, Copy)]
 pub struct BranchFacts {
@@ -65,6 +74,9 @@ struct JsonReport {
     dry_run: bool,
     planned: Vec<JsonEntry>,
     skipped_dirty: Vec<JsonEntry>,
+    skipped_missing: Vec<JsonEntry>,
+    /// Worktrees another coding agent is working in.
+    skipped_agents: Vec<JsonEntry>,
     removed: Vec<String>,
     deleted_branches: Vec<String>,
     failures: Vec<String>,
@@ -97,6 +109,20 @@ pub fn run(
     no_fetch: bool,
     json: bool,
 ) -> Result<Option<PathBuf>> {
+    run_selected(config, scope, &[], dry_run, yes, no_fetch, json)
+}
+
+/// Clean only the named linked branches or exact checkout paths in scope.
+/// An empty selection retains the ordinary whole-scope behavior.
+pub fn run_selected(
+    config: &Config,
+    scope: &Scope,
+    selection: &[String],
+    dry_run: bool,
+    yes: bool,
+    no_fetch: bool,
+    json: bool,
+) -> Result<Option<PathBuf>> {
     let mut reports = scope
         .projects()
         .iter()
@@ -106,7 +132,15 @@ pub fn run(
             ..Default::default()
         })
         .collect::<Vec<_>>();
-    let outcome = clean(config, scope, dry_run, yes, no_fetch, &mut reports);
+    let outcome = clean(
+        config,
+        scope,
+        selection,
+        dry_run,
+        yes,
+        no_fetch,
+        &mut reports,
+    );
     if let Scope::Current(_) = scope {
         if let Ok(recovery) = &outcome {
             reports[0].recovery = recovery.clone();
@@ -130,6 +164,7 @@ pub fn run(
 fn clean(
     config: &Config,
     scope: &Scope,
+    selection: &[String],
     dry_run: bool,
     yes: bool,
     no_fetch: bool,
@@ -137,6 +172,8 @@ fn clean(
 ) -> Result<Option<PathBuf>> {
     let _root_lock = crate::paths::lock_root(&config.root_dir(), false)?;
     let projects = scope.projects();
+    // Validate every selector before a fetch can update refs in any project.
+    let selected = selected_paths(scope, selection)?;
     let all = scope.is_all();
     let tag = |index: usize, branch: &str| {
         if all {
@@ -148,7 +185,11 @@ fn clean(
     let mut failed = 0;
     let mut plans = Vec::new();
     for (index, project) in projects.iter().enumerate() {
-        match plan(index, project, no_fetch, &mut reports[index], &tag) {
+        let paths = selected.as_ref().map(|selected| &selected[index]);
+        if paths.is_some_and(HashSet::is_empty) {
+            continue;
+        }
+        match plan(index, project, no_fetch, paths, &mut reports[index], &tag) {
             Ok(plan) => plans.push(plan),
             Err(error) if all => {
                 eprintln!("bonsai: [{}] skipped: {error:#}", project.id());
@@ -197,6 +238,9 @@ fn clean(
         return finish(failed, None);
     }
     if !yes {
+        if !picker::is_interactive() {
+            anyhow::bail!("cannot confirm without a terminal; pass --yes to remove them");
+        }
         let labels: Vec<String> = rows.iter().map(|(tag, _, _)| tag.clone()).collect();
         let picked = picker::multi_select_all_checked("Confirm removal:", labels)?;
         for plan in &mut plans {
@@ -271,15 +315,52 @@ fn finish(failed: usize, recovery: Option<PathBuf>) -> Result<Option<PathBuf>> {
     }
 }
 
+fn selected_paths(scope: &Scope, selection: &[String]) -> Result<Option<Vec<HashSet<PathBuf>>>> {
+    if selection.is_empty() {
+        return Ok(None);
+    }
+    let inventories = scope
+        .projects()
+        .iter()
+        .map(|project| project.repo.linked_worktrees())
+        .collect::<Result<Vec<_>>>()?;
+    let mut selected = vec![HashSet::new(); inventories.len()];
+    for wanted in selection {
+        let path = crate::paths::canonicalize_lenient(&std::path::absolute(wanted)?);
+        let mut found = false;
+        for (index, inventory) in inventories.iter().enumerate() {
+            for worktree in inventory {
+                if worktree.branch.as_deref() == Some(wanted.as_str())
+                    || crate::paths::canonicalize_lenient(&worktree.path) == path
+                {
+                    selected[index].insert(worktree.path.clone());
+                    found = true;
+                }
+            }
+        }
+        anyhow::ensure!(found, "no linked worktree for branch or path '{wanted}'");
+    }
+    Ok(Some(selected))
+}
+
 fn plan(
     index: usize,
     project: &Project,
     no_fetch: bool,
+    selected: Option<&HashSet<PathBuf>>,
     report: &mut JsonReport,
     tag: &impl Fn(usize, &str) -> String,
 ) -> Result<Plan> {
     let Project { repo, config } = project;
     let lock = repo.lock_mutations()?;
+    let mut worktrees = repo.linked_worktrees()?;
+    if let Some(selected) = selected {
+        worktrees.retain(|worktree| selected.contains(&worktree.path));
+        anyhow::ensure!(
+            worktrees.len() == selected.len(),
+            "selected worktree registrations changed; retry"
+        );
+    }
     let remote = repo.remote_name(config);
 
     // The gone-upstream check is only as good as the local remote refs, so
@@ -287,8 +368,9 @@ fn plan(
     if !no_fetch
         && config.clean.fetch
         && let Some(remote) = &remote
+        && let Err(error) = repo.git.interactive(&["fetch", "--prune", remote])
     {
-        repo.git.interactive(&["fetch", "--prune", remote])?;
+        anyhow::bail!("{error}; pass --no-fetch to clean without fetching");
     }
 
     let default = repo.default_branch(config)?;
@@ -337,7 +419,6 @@ fn plan(
         })
         .collect::<Result<Vec<_>>>()?;
 
-    let worktrees = repo.bonsai_worktrees(config)?;
     let workers = parallel::worker_count(worktrees.len());
     if workers > 1 {
         eprintln!(
@@ -345,6 +426,7 @@ fn plan(
             worktrees.len(),
         );
     }
+    let running = crate::agents::running()?;
     let checks = parallel::map_ordered(&worktrees, |wt| {
         let branch = wt.branch.clone()?;
         if branch == default
@@ -364,25 +446,43 @@ fn plan(
             facts.squash_merged = is_squash_merged(&repo.git, &target, wt.head.as_deref()?);
         }
         let reason = classify(facts)?;
-        Some((wt.clone(), branch, reason, is_dirty(wt)))
+        // A deleted directory cannot be inspected. Prune can drop its stale
+        // registration while preserving the branch.
+        let busy = crate::agents::busy(&running, &wt.path);
+        let hold = if wt.is_missing() {
+            Some(Hold::Missing)
+        } else if !busy.is_empty() {
+            Some(Hold::Agent(crate::agents::describe(&busy)))
+        } else {
+            is_dirty(wt).then_some(Hold::Dirty)
+        };
+        Some((wt.clone(), branch, reason, hold))
     });
 
     let mut candidates: Vec<(Worktree, String, Reason)> = Vec::new();
-    for (wt, branch, reason, dirty) in checks.into_iter().flatten() {
-        if dirty {
-            eprintln!(
-                "bonsai: [{}] skipped ({}): uncommitted changes",
-                tag(index, &branch),
-                reason.as_str()
-            );
-            report.skipped_dirty.push(JsonEntry {
-                branch,
-                reason: reason.as_str(),
-                path: wt.path,
-            });
+    for (wt, branch, reason, hold) in checks.into_iter().flatten() {
+        let Some(hold) = hold else {
+            candidates.push((wt, branch, reason));
             continue;
-        }
-        candidates.push((wt, branch, reason));
+        };
+        let (why, skipped) = match hold {
+            Hold::Dirty => ("uncommitted changes".to_string(), &mut report.skipped_dirty),
+            Hold::Missing => (
+                "directory missing; use 'bonsai prune' to drop its registration".to_string(),
+                &mut report.skipped_missing,
+            ),
+            Hold::Agent(who) => (format!("agent running: {who}"), &mut report.skipped_agents),
+        };
+        eprintln!(
+            "bonsai: [{}] skipped ({}): {why}",
+            tag(index, &branch),
+            reason.as_str()
+        );
+        skipped.push(JsonEntry {
+            branch,
+            reason: reason.as_str(),
+            path: wt.path,
+        });
     }
     report.planned = candidates
         .iter()

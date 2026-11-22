@@ -43,22 +43,37 @@ pub fn run(
     }
     validate_branch_name(&repo.git, &branch)?;
 
-    let project_worktrees = repo.project_worktrees(config)?;
+    let mut project_worktrees = repo.project_worktrees(config)?;
+    // A Bonsai worktree whose directory was deleted by hand holds nothing to
+    // lose: drop its stale registration and create the worktree afresh.
+    if let Some(stale) = project_worktrees.iter().find(|entry| {
+        entry.kind == WorktreeKind::Managed
+            && entry.worktree.branch.as_deref() == Some(branch.as_str())
+            && entry.worktree.is_missing()
+    }) {
+        let path = stale.worktree.path.to_string_lossy().into_owned();
+        eprintln!("bonsai: '{branch}' worktree {path} was deleted; recreating it");
+        repo.git.run(&["worktree", "remove", &path])?;
+        project_worktrees = repo.project_worktrees(config)?;
+    }
     let worktrees = project_worktrees
         .iter()
         .map(|entry| entry.worktree.clone())
         .collect::<Vec<_>>();
-    let bonsai_dir = crate::paths::ensure_contained(&repo.bonsai_dir(config), &config.root_dir())?;
-
-    // Idempotent: adding a branch that already has a Bonsai worktree just cds
-    // there. A checkout anywhere else is read-only to Bonsai: `add` never
-    // adopts, moves, or creates worktrees outside the configured root.
+    // Reuse every existing linked checkout without moving it or rerunning setup.
     if let Some(entry) = project_worktrees
         .iter()
         .find(|entry| entry.worktree.branch.as_deref() == Some(branch.as_str()))
     {
         let wt = &entry.worktree;
-        if entry.kind == WorktreeKind::Managed {
+        if entry.kind != WorktreeKind::Main {
+            if wt.is_missing() {
+                bail!(
+                    "'{branch}' worktree {} was deleted; run 'bonsai remove {branch}' before recreating it",
+                    wt.path.display()
+                );
+            }
+            repo.validate_linked_worktree(&wt.path)?;
             eprintln!(
                 "bonsai: '{branch}' already has a worktree at {}",
                 wt.path.display()
@@ -70,6 +85,8 @@ pub fn run(
             wt.path.display()
         );
     }
+
+    let bonsai_dir = crate::paths::ensure_contained(&repo.bonsai_dir(config), &config.root_dir())?;
 
     if fetch_enabled && !fetched {
         fetch_remote(repo, config)?;
@@ -180,8 +197,16 @@ fn resolve_branch_input(repo: &Repo, config: &Config, input: &str) -> Result<Str
 }
 
 fn fetch_remote(repo: &Repo, config: &Config) -> Result<()> {
-    if let Some(remote) = repo.remote_name(config) {
-        repo.git.interactive(&["fetch", "--prune", &remote])?;
+    if let Some(remote) = repo.remote_name(config)
+        && let Err(error) = repo.git.interactive(&["fetch", "--prune", &remote])
+    {
+        // An explicit --fetch already overrides the setting the hint names.
+        if config.add.fetch {
+            bail!(
+                "{error}; to add without fetching, set [add] fetch = false or BONSAI_ADD__FETCH=false"
+            );
+        }
+        return Err(error.into());
     }
     Ok(())
 }

@@ -1,8 +1,163 @@
-min_version = "2026.8.4"
+min_version = "2026.10.17"
 
+# The single development environment: these tools, and the tasks below for
+# every command contributors and CI run. `mise tasks` lists them.
 [tools]
-rust = { version = "1.99.1", profile = "default" }
-node = "26.12.0"
-python = "3.15.0"
-uv = "0.13.1"
+rust = { version = "1.100.0", profile = "default" }
+node = "26.13.1"
+python = "3.15.2"
+uv = "0.13.9"
 actionlint = "1.7.12"
+shellcheck = "0.11.0"
+gh = "2.105.0"
+"conda:bash" = { version = "5.3", os = ["linux", "macos"] }
+"conda:fish" = { version = "4.9.3", os = ["linux", "macos"] }
+"conda:zsh" = { version = "5.9.2", os = ["linux", "macos"] }
+"conda:git" = { version = "2.56.1", os = ["linux", "macos"] }
+"conda:file" = { version = "5.48", os = ["linux"] }
+zig = { version = "0.17.1", os = ["linux"] }
+"github:rust-cross/cargo-zigbuild" = { version = "0.24.1", os = ["linux"], matching_regex = '-unknown-linux-gnu\.tar\.xz$' }
+
+[tools."github:git-for-windows/git"]
+version = "2.56.1.windows.1"
+os = ["windows"]
+bin_path = "cmd"
+platforms.windows-x64.asset_pattern = "MinGit-*-64-bit.zip"
+platforms.windows-arm64.asset_pattern = "MinGit-*-arm64.zip"
+
+[env]
+MISE_TASK_RUN_AUTO_INSTALL = "false"
+
+[tasks.setup]
+description = "Install only this project's locked development tools"
+run = """mise install --locked rust node python uv actionlint shellcheck gh\
+{% if os() == 'windows' %} github:git-for-windows/git\
+{% else %} conda:bash conda:fish conda:zsh conda:git{% endif %}\
+{% if os() == 'linux' %} conda:file zig github:rust-cross/cargo-zigbuild{% endif %}"""
+
+[tasks.build]
+description = "Build the workspace"
+run = "cargo build --workspace --locked"
+
+[tasks.release]
+description = "Build the optimized CLI (pass Cargo options after --)"
+run = "cargo build --release --locked"
+
+[tasks.run]
+description = "Run the CLI (pass its arguments after --)"
+run = "cargo run --locked --"
+
+[tasks.install]
+description = "Install this checkout's bonsai"
+run = "cargo install --locked --path ."
+
+[tasks.fmt]
+description = "Format Rust code"
+run = "cargo fmt --all"
+
+[tasks.fmt-check]
+description = "Check Rust formatting"
+run = "cargo fmt --all -- --check"
+
+[tasks.lint]
+description = "Lint every target with warnings denied"
+run = "cargo clippy --locked --all-targets -- -D warnings"
+
+[tasks.test]
+description = "Run the workspace tests (pass Cargo test options after --)"
+run = "cargo test --locked"
+
+[tasks.shell-check]
+description = "Verify the Bash, Zsh, and Fish test dependencies can launch"
+run = ["bash --version", "zsh --version", "fish --version"]
+
+[tasks.package]
+description = "Package both crates and verify the CLI against the packaged library"
+run = "cargo package --workspace --locked"
+
+[tasks.actionlint]
+description = "Lint the GitHub workflows"
+run = "actionlint -pyflakes=''"
+
+[tasks.release-helper]
+description = "Run the release helper (pass its command and options after --)"
+run = "python .github/scripts/release.py"
+
+[tasks.release-helper-tests]
+description = "Test the release helper"
+run = "python -m unittest discover -s .github/scripts -p 'test_*.py'"
+
+[tasks.release-musl]
+description = "Build the static Linux CLI with Zig's musl C headers and libraries"
+run = 'cargo zigbuild --release --locked --target "$TARGET"'
+
+[tasks.release-stamp]
+description = "Stamp VERSION into both crates and refresh workspace lock entries"
+run = ["python .github/scripts/release.py stamp", "cargo update --workspace"]
+
+[tasks.release-version]
+description = "Calculate the next release version from Conventional Commits"
+run = "python .github/scripts/release.py version"
+
+[tasks.release-archive]
+description = "Verify and archive the release binary using VERSION, TARGET, and ARCHIVE"
+run = "python .github/scripts/release.py archive"
+
+[tasks.release-publish]
+description = "Checksum and publish release archives using VERSION and GitHub environment"
+run = "python .github/scripts/release.py github"
+
+[tasks.release-target]
+description = "Install the target for the pinned Rust toolchain (pass a target triple)"
+run = "rustup target add"
+
+[tasks.check]
+description = "Run the checks every change needs: formatting, lints, tests, packaging, and workflows"
+run = [
+  { task = "fmt-check" },
+  { task = "lint" },
+  { task = "test" },
+  { task = "package" },
+  { task = "actionlint" },
+  { task = "release-helper-tests" },
+]
+
+[tasks.package-managers]
+description = "Smoke-test installs with real package managers (needs npm, uv, and Python)"
+run = "cargo test --locked --test cli real_package_managers_ -- --ignored"
+
+[tasks.terminal]
+description = "Run the release PTY checks against the optimized binary (Unix)"
+run = [{ task = "release" }, "python tests/terminal.py target/release/bonsai"]
+
+[tasks.bench]
+description = "Benchmark disposable repositories (pass benchmark options after --)"
+run = "python scripts/benchmark.py"
+
+[tasks.bench-trim]
+description = "Compare tree deletion on disposable package trees (packages, files/package, runs)"
+run = "cargo run --release --locked -p bonsai-lib --example trim-benchmark --"
+
+[tasks.smoke]
+description = "Run the slower smoke tests CI adds on Linux"
+run = [
+  { task = "package-managers" },
+  { task = "terminal" },
+  "python scripts/benchmark.py --worktrees 1 --sessions 1000 --runs 3",
+]
+
+[tasks.doc]
+description = "Build and open the library documentation"
+run = "cargo doc --locked --no-deps --open -p bonsai-lib"
+
+[tasks.demo]
+description = "Re-record docs/demo/demo.gif in a container (Colima on macOS)"
+run = "docs/demo/record.sh"
+
+[tasks.demo.tools]
+docker-cli = { version = "29.10.0", os = ["linux", "macos"] }
+"aqua:docker/buildx" = { version = "0.39.1", os = ["linux", "macos"] }
+
+[tasks.demo-setup]
+description = "Install the locked container CLI and Buildx for the demo recorder"
+run = "mise install --locked docker-cli@29.10.0 aqua:docker/buildx@0.39.1"

@@ -1,2 +1,3 @@
 /target
 !mise.lock
+__pycache__/

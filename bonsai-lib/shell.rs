@@ -101,6 +101,8 @@ const POSIX_WRAPPER: &str = r#"bonsai() {
   local out code last arg skip capture
   skip=0
   capture=0
+  # Bare `bonsai` opens hq, which can cd like `bonsai hq`.
+  (( $# )) || capture=1
   for arg in "$@"; do
     if (( skip )); then
       skip=0
@@ -111,7 +113,7 @@ const POSIX_WRAPPER: &str = r#"bonsai() {
       --root=*|--remote=*|--cwd=*) ;;
       -*) ;;
         *)
-        case "$arg" in add|cd|remove|rm|clean|prune) capture=1 ;; esac
+        case "$arg" in add|cd|remove|rm|clean|prune|hq) capture=1 ;; esac
         break
         ;;
     esac
@@ -149,6 +151,10 @@ const BASH_COMPLETIONS: &str = r#"eval "$(command bonsai completions bash)"
 const FISH_WRAPPER: &str = r#"function bonsai
     set -l skip 0
     set -l capture 0
+    # Bare `bonsai` opens hq, which can cd like `bonsai hq`.
+    if test (count $argv) -eq 0
+        set capture 1
+    end
     for arg in $argv
         if test $skip -eq 1
             set skip 0
@@ -160,7 +166,7 @@ const FISH_WRAPPER: &str = r#"function bonsai
             case '--root=*' '--remote=*' '--cwd=*'
             case '-*'
             case '*'
-                if contains -- "$arg" add cd remove rm clean prune
+                if contains -- "$arg" add cd remove rm clean prune hq
                     set capture 1
                 end
                 break
@@ -209,7 +215,7 @@ mod tests {
 case "$1" in
  completions) exit 0;;
  list) printf '%s' direct; exit 0;;
- hq|start|resume)
+ start|resume)
    test -t 1 || exit 81
    test -z "${_BONSAI_WRAPPED:-}" || exit 82
    printf '%s' "$1"
@@ -285,14 +291,18 @@ if [ -n "${_BONSAI_WRAPPED:-}" ]; then printf '__bonsai_cd\037%s\n' "$DESTINATIO
                 );
                 continue;
             }
-            let output = run(shell, "bonsai hq; bonsai start; bonsai resume");
+            // hq draws on stderr and hands back a directory like cd does.
+            let output = run(
+                shell,
+                "bonsai start; bonsai resume; bonsai hq; test \"$PWD\" = \"$DESTINATION\"",
+            );
             assert!(
                 output.status.success(),
                 "{}: {}",
                 shell.name(),
                 String::from_utf8_lossy(&output.stderr)
             );
-            assert_eq!(output.stdout, b"hqstartresume", "{}", shell.name());
+            assert_eq!(output.stdout, b"startresume", "{}", shell.name());
         }
     }
 

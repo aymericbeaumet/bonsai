@@ -12,6 +12,7 @@ use sha2::{Digest, Sha256};
 use crate::config::Config;
 use crate::parallel;
 use crate::repo::{Repo, WorktreeKind};
+use crate::scope::{Project, Scope};
 use crate::worktree::{cleanup_empty_dirs, current_branch, find_worktree_dirs, repo_id_of};
 
 /// Multi-root VS Code workspace file understood by VS Code, Cursor,
@@ -72,27 +73,22 @@ pub fn sync(repo: &Repo, config: &Config) -> Result<PathBuf> {
     Ok(file)
 }
 
-/// The global workspace file: every worktree of every repo under the bonsai
-/// root, at `<root>/bonsai.code-workspace`.
+/// The global workspace file: linked worktrees of every known project,
+/// at `<root>/bonsai.code-workspace`.
 pub fn global_file_path(config: &Config) -> PathBuf {
     config.root_dir().join("bonsai.code-workspace")
 }
 
-/// Rewrite the global workspace file from the on-disk layout (no repo
-/// context needed), or delete it when no worktrees remain anywhere.
+/// Refresh registrations of projects found under the root, in workspace
+/// references, or through the current checkout. Retain orphan directories.
 pub fn sync_global(config: &Config) -> Result<PathBuf> {
     let root = config.root_dir();
     let file = global_file_path(config);
     let _lock = lock_workspace(&file, config)?;
     let dirs = find_worktree_dirs(&root);
 
-    if dirs.is_empty() {
-        update_file(&file, &[], config)?;
-        return Ok(file);
-    }
-
     // (repo-id, branch label, relative path), sorted for a stable file.
-    let mut entries: Vec<(String, String, PathBuf)> = parallel::map_ordered(&dirs, |path| {
+    let directory_entries = parallel::map_ordered(&dirs, |path| {
         let branch = current_branch(path);
         let repo_id =
             repo_id_of(&root, path, branch.as_deref()).unwrap_or_else(|| "(unknown)".to_string());
@@ -101,11 +97,41 @@ pub fn sync_global(config: &Config) -> Result<PathBuf> {
             .map(|relative| relative.to_path_buf())
             .unwrap_or_else(|_| path.clone());
         (
-            repo_id,
-            branch.unwrap_or_else(|| "(detached)".to_string()),
-            rel,
+            crate::paths::canonicalize_or_self(path),
+            (
+                repo_id,
+                branch.unwrap_or_else(|| "(detached)".to_string()),
+                rel,
+            ),
         )
     });
+    let mut by_path = directory_entries
+        .into_iter()
+        .collect::<std::collections::BTreeMap<_, _>>();
+    let current = Repo::discover()?.map(|repo| Project {
+        repo,
+        config: config.clone(),
+    });
+    let scope = Scope::resolve(config, current, true, None);
+    for project in scope.projects() {
+        let id = project.id();
+        for worktree in project.repo.linked_worktrees()? {
+            let path = worktree
+                .path
+                .strip_prefix(&root)
+                .map(Path::to_path_buf)
+                .unwrap_or_else(|_| worktree.path.clone());
+            by_path.insert(
+                crate::paths::canonicalize_or_self(&worktree.path),
+                (
+                    id.clone(),
+                    worktree.branch.unwrap_or_else(|| "(detached)".to_string()),
+                    path,
+                ),
+            );
+        }
+    }
+    let mut entries = by_path.into_values().collect::<Vec<_>>();
     entries.sort();
 
     // Label with the repo's short name, falling back to the full repo-id

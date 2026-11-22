@@ -1,0 +1,10 @@
+*
+!Cargo.toml
+!Cargo.lock
+!bonsai-cli/
+!bonsai-lib/
+!skills/
+!.mise.toml
+!mise.lock
+!readme.md
+!LICENSE
