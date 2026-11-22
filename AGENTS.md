@@ -39,11 +39,9 @@
   and keep `docs/development.md` listing them.
 - Before finishing, run `mise run check`: formatting, Clippy with warnings
   denied, tests, packaging, actionlint, and the release helper tests.
-- Locally, `cargo package --workspace` may verify the CLI against a stale
-  `bonsai-lib` because the placeholder version never changes: cargo reuses
-  the unpacked copy in `~/.cargo/registry/src/*/bonsai-lib-0.1.1` and its
-  build artifacts. If it reports errors the workspace build does not, delete
-  that directory, run `cargo clean -p bonsai-lib`, and package again.
+- Stamp release PRs with `mise run release-stamp` and commit both manifests
+  and the lockfile so Cargo installs from the tag report the release version.
+  See the release steps in `docs/development.md`.
 - Trust `.mise.toml` with `mise trust .mise.toml` and run
   `mise run setup`. It installs only this project's tools with `--locked`,
   leaving unrelated global tools alone. Tool pins and platform checksums

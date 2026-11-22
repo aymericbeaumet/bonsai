@@ -161,7 +161,7 @@ def crate_published(name, version):
 
 def stamp(version, root=Path(".")):
     """Write the release version into both manifests and the CLI's library
-    requirement; the committed version is a placeholder."""
+    requirement so source installs and release builds agree."""
     if not re.fullmatch(r"\d+\.\d+\.\d+", version):
         raise ValueError(f"Releases need a major.minor.patch version, not {version!r}")
     for manifest in (root / "Cargo.toml", root / LIBRARY / "Cargo.toml"):

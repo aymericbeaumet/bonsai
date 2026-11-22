@@ -88,7 +88,10 @@ Every push to `main` runs the test suite, then tags and publishes a GitHub
 release with binaries for Linux, macOS, and Windows (amd64 and arm64). The
 version is derived from Conventional Commits since the last tag: a breaking
 change bumps the major version, `feat` the minor, anything else the patch.
-The `version` in `Cargo.toml` is a placeholder stamped at release time.
+When preparing a release PR, run `mise run release-version`, then run
+`mise run release-stamp` with `VERSION` set to that value. Commit both
+manifests and `Cargo.lock` so installing from the Git tag reports the same
+version as the published binaries. Release CI also stamps its build checkout.
 Linux builds use the pinned Zig compiler and cargo-zigbuild to compile
 native dependencies against musl. Each build checks that `--version`
 reports the release version.
