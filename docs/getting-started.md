@@ -6,8 +6,8 @@ in a second checkout. Bonsai manages the directories and setup around Git.
 
 ## Look around first
 
-[Install Bonsai and enable shell integration](../readme.md#install), then run
-these commands from a repository you already use:
+[Install Bonsai](../readme.md#install), then run these commands from a
+repository you already use. Both work immediately in a fresh shell.
 
 ```sh
 bonsai list --status
@@ -21,22 +21,31 @@ directory, use `bonsai -C ~/src/my-repo list --status`.
 
 ## Start a task
 
+Suppose you have an editor open on a feature and want to fix a parser bug.
+Open a second terminal in the same repository. With shell integration,
+`bonsai add fix-parser` creates the checkout and takes you there. Without
+integration, Bash and Zsh can use the printed path directly.
+
 ```sh
-bonsai add fix-parser
+cd "$(bonsai add fix-parser)"
+git branch --show-current   # fix-parser
 ```
+
+In PowerShell, use `Set-Location -LiteralPath (bonsai add fix-parser)`.
 
 For a new branch, Bonsai fetches the remote and branches from the latest
 default branch, creates a checkout under `~/.bonsai/`, copies matching
 untracked local config such as `.env`, and installs dependencies using
-supported lockfiles. The shell integration changes into that directory.
-Without it, use `cd "$(bonsai add fix-parser)"`.
+supported lockfiles. Run `bonsai list --status` in either terminal to see
+both paths and which checkout has local changes.
 
 An existing local or remote branch keeps its history. If it already has a
 worktree, `add` returns that checkout without moving it or rerunning setup.
-To start a new branch from your current commit instead of the default branch:
+If you commit the parser fix and want to work on a follow-up before the fix
+merges, branch from that commit in the parser checkout.
 
 ```sh
-bonsai add parser-followup --base HEAD
+cd "$(bonsai add parser-followup --base HEAD)"
 ```
 
 Your uncommitted source edits stay in the original checkout. Git commits,

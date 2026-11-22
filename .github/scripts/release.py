@@ -228,8 +228,12 @@ def archive_binary(version, target, archive, root=Path(".")):
 
 def publish_github(version, dist=Path("dist")):
     archives = sorted(path for path in dist.iterdir() if path.name.endswith((".tar.gz", ".zip")))
-    if len(archives) != 6:
-        raise ValueError(f"Expected six release archives, found {len(archives)}")
+    expected = {name for _, arches in HOMEBREW_ARCHIVES for _, name in arches}
+    expected.update(("bonsai-windows-amd64.zip", "bonsai-windows-arm64.zip"))
+    actual = {path.name for path in archives}
+    if actual != expected:
+        raise ValueError(f"Release archives differ: missing {sorted(expected - actual)}, "
+                         f"unexpected {sorted(actual - expected)}")
     checksums = dist / "SHA256SUMS"
     checksums.write_text("".join(
         f"{hashlib.sha256(path.read_bytes()).hexdigest()}  {path.name}\n" for path in archives

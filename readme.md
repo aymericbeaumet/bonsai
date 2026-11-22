@@ -4,32 +4,23 @@
 [![latest release](https://img.shields.io/github/v/release/aymericbeaumet/bonsai)](https://github.com/aymericbeaumet/bonsai/releases/latest)
 [![license: MIT](https://img.shields.io/badge/license-MIT-blue)](LICENSE)
 
-**Git worktrees without the bookkeeping.** Keep a feature, a bug fix, and
-several coding agents working side by side, each in its own checkout.
-One command creates a branch, copies your local config, installs dependencies,
-and takes you there. Jump between checkouts and clean up after the merge,
-including squash-merges.
+**Work on two branches at once.** A bug report comes in halfway through a
+feature. Leave the feature open in your editor and its tests running.
+`bonsai add fix-login` gives the fix its own Git checkout, copies local
+config such as `.env`, and installs dependencies from supported lockfiles.
 
-A single Rust binary with a CLI and terminal dashboard. Works with your
-existing Git worktrees in place; no account, server, or coding agent required.
+Bonsai is a single Rust binary. Its terminal dashboard shows which checkouts
+have changes, where coding agents are running, and how much disk each checkout
+uses. It picks up worktrees you already created with Git or another tool.
 
 ![bonsai demo: create a worktree, push a fix, fuzzy-jump to another worktree, and clean up after the squash-merge](docs/demo/demo.gif)
 
-## Why
+Already use mise? From any of your repositories, try the dashboard in one
+command. Press `?` for keys or `q` to quit.
 
-- **Leave unfinished work where it is.** Start another branch without
-  stashing, then fuzzy-jump back with `bonsai cd`. New checkouts live under
-  `~/.bonsai/<host>/<owner>/<repo>/<branch>`; existing ones stay where they are.
-- **See the whole workspace.** `bonsai` opens a terminal dashboard with
-  checkouts, running agents, changes, upstream state, and disk usage. Open
-  an editor or coding session from the same screen.
-- **Finish the cleanup.** `bonsai clean` previews merged and squash-merged
-  worktrees before removing them, skipping dirty or busy checkouts.
-  `bonsai trim` reclaims ignored builds and dependencies while keeping
-  checkouts and protected local state. Both support `--dry-run`.
-- **Use your own tools.** Shell integration, VS Code/Cursor workspaces,
-  `--json` output, and an optional [Agent Skill](docs/agents.md). Your branches
-  and checkouts remain ordinary Git worktrees.
+```sh
+mise x github:aymericbeaumet/bonsai@latest -- bonsai hq
+```
 
 ## Install
 
@@ -57,8 +48,31 @@ You can also download them from
 [GitHub Releases](https://github.com/aymericbeaumet/bonsai/releases/latest),
 verify the archive against `SHA256SUMS`, and put the binary on your `PATH`.
 
-Then enable the shell integration, which lets bonsai `cd` you into worktrees
-and adds completions:
+## Quick start
+
+Open a second terminal in a repository where you're working. Create a checkout
+for the fix and check which branch you're on. This works in Bash or Zsh as soon
+as the binary is installed.
+
+```sh
+cd "$(bonsai add fix-login)"
+git branch --show-current   # fix-login
+bonsai list --status
+```
+
+The list shows both checkout paths. Your first terminal is still on its
+original branch with its uncommitted edits. Commit and push the fix from the
+second terminal as usual. Once the fix lands, preview removal of its checkout
+and local branch. Bonsai recognizes squash merges too.
+
+```sh
+bonsai clean fix-login --dry-run
+```
+
+### Shell integration
+
+To make `bonsai add` and `bonsai cd` change directory directly and enable
+completions, add the line for your shell to its startup file.
 
 ```sh
 # zsh — ~/.zshrc
@@ -71,32 +85,8 @@ eval "$(bonsai init bash)"
 bonsai init fish | source
 ```
 
-Without it everything still works: commands that change directory print the
-path instead, so `cd "$(bonsai add foo)"` composes.
-
-## Quick start
-
-Start in an existing Git repository. This first command only lists its
-checkouts, including any created by other tools:
-
-```sh
-cd ~/src/my-repo
-bonsai list --status
-```
-
-With shell integration enabled:
-
-```sh
-bonsai add fix-parser   # branch + worktree from the latest default branch, cd into it
-# ...hack, commit, push, open a pull request...
-bonsai cd               # fuzzy-jump between worktrees
-bonsai clean --dry-run  # after merging: inspect eligible worktrees and branches
-bonsai clean            # review the plan, then confirm removal
-```
-
-New to worktrees? The [first-worktree walkthrough](docs/getting-started.md)
-covers setup, stacked branches, cleanup, and what stays shared between
-checkouts. Already have worktrees? `bonsai` opens the dashboard immediately.
+See the [first-worktree walkthrough](docs/getting-started.md) for stacked
+branches, returning to a checkout, and reclaiming space after a merge.
 
 ## Commands
 

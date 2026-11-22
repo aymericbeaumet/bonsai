@@ -113,8 +113,14 @@ class BuildTests(unittest.TestCase):
 
     def test_github_release_requires_all_six_platforms(self):
         with tempfile.TemporaryDirectory() as directory:
-            with self.assertRaisesRegex(ValueError, "six release archives"):
-                release.publish_github("0.8.0", Path(directory))
+            dist = Path(directory)
+            for name in (*CHECKSUMS, "bonsai-windows-amd64-debug.zip"):
+                (dist / name).touch()
+            with patch.object(release.subprocess, "run") as run, self.assertRaisesRegex(
+                ValueError, "bonsai-windows-arm64.zip"
+            ):
+                release.publish_github("0.8.0", dist)
+            run.assert_not_called()
 
     def test_version_follows_conventional_commits(self):
         cases = [
