@@ -19,12 +19,19 @@ or your clone's version with `mise run install` after the setup below.
 
 ## Tasks
 
-mise is the single development environment. Install
-[mise](https://mise.jdx.dev) 2026.10.17 or newer, then in the clone run
-`mise trust .mise.toml` and `mise run setup`. This installs only this project's
-tools, even if your global mise configuration contains other tools.
+CI and the demo use [mise](https://mise.jdx.dev) 2026.11.12. To reproduce
+the environment locally, install that version and run these commands in the
+clone:
+
+```sh
+mise trust .mise.toml
+mise run setup
+```
+
+Setup installs only this project's tools, even when your global mise
+configuration contains other tools.
 `.mise.toml` and `mise.lock` pin Rust, Node.js, Python, uv, actionlint,
-ShellCheck, and the GitHub CLI for local development and CI. Every
+ShellCheck, Git, and the GitHub CLI for local development and CI. Every
 command is a task; `mise tasks` lists them, and options after `--` reach the
 underlying command.
 
@@ -44,7 +51,7 @@ underlying command.
 | `mise run smoke` | The slower Linux CI checks: `package-managers`, `terminal`, and a quick benchmark |
 | `mise run bench -- <options>` | Benchmarks, for example `--worktrees 1 10 100 --sessions 1000 10000 100000` |
 | `mise run bench-trim -- <packages> <files/package> <runs>` | Compare deletion primitives on disposable npm-like trees; defaults to `200 100 3` |
-| `mise run demo-setup` / `demo` | Install the pinned container CLI / re-record the README demo |
+| `mise run demo-setup` / `demo` | Install the pinned container CLI and Buildx / re-record the README demo |
 
 Task runs do not silently install tools. CI explicitly installs its job's
 tools with `--locked`, and releases use the same Python, Rust, and GitHub CLI
@@ -53,17 +60,16 @@ pins. The lock includes all six CI platforms. Commit it together with
 ShellCheck and disables optional Pyflakes so ambient installations cannot
 change its checks.
 
-The host's Git, native compiler/linker, and OS libraries remain platform
-prerequisites. CI pins runner generations; their OS packages receive upstream
-updates. Tool and dependency pins make the development environment repeatable,
-but do not promise byte-identical binaries across operating systems.
+Use your host Git to clone the repository. After setup, mise supplies Git
+on every supported platform, including MinGit on Windows. Native system
+compilers, platform SDKs and OS libraries come from the host. CI pins
+runner generations; their OS packages receive upstream updates.
 
-The PTY checks (`terminal`) require Unix. Package-manager smoke tests
-require npm, uv, and Python. On Linux, mise also installs pinned standalone
-Fish binaries from the official releases and Zsh from conda-forge, including
-its locked libraries. Bash remains an OS prerequisite. These shells are test
-dependencies; setup does not change your login shell. CI requires all three
-shells without installing OS packages. Benchmarks use disposable repositories and synthetic
+On Linux and macOS, setup installs Bash, Zsh and Fish from conda-forge with
+their locked libraries. Every Unix CI runner requires all three shells.
+The PTY checks (`terminal`) require Unix. The package-manager smoke tests
+use the pinned npm (bundled with Node.js), uv and Python.
+Benchmarks use disposable repositories and synthetic
 session stores, report first-run and warm median/p95 latency plus Git
 process counts, and never access personal sessions.
 
@@ -83,11 +89,12 @@ release with binaries for Linux, macOS, and Windows (amd64 and arm64). The
 version is derived from Conventional Commits since the last tag: a breaking
 change bumps the major version, `feat` the minor, anything else the patch.
 The `version` in `Cargo.toml` is a placeholder stamped at release time.
-Linux binaries link musl statically; each build checks that `--version`
+Linux builds use the pinned Zig compiler and cargo-zigbuild to compile
+native dependencies against musl. Each build checks that `--version`
 reports the release version.
 
 Release tasks are `release-version`, `release-target -- <triple>`,
-`release-stamp`, `release-archive`, and `release-publish`. The workflows supply
+`release-stamp`, `release-musl`, `release-archive`, and `release-publish`. The workflows supply
 `VERSION`, `TARGET`, and `ARCHIVE` where needed. `release-helper -- homebrew`
 and `release-helper -- crate` run the post-release distribution steps. These
 tasks use the same locked tools locally and in CI; publishing needs the
@@ -118,7 +125,8 @@ mise run demo-setup
 mise run demo
 ```
 
-It runs `docs/demo/record.sh`, which installs the locked Rust toolchain through
-mise inside a digest-pinned container, builds bonsai from the checkout, and records in
-a throwaway environment (`docs/demo/setup.sh`), so it never touches your
-repositories or `~/.bonsai`. It needs native Docker Engine on Linux or Colima on macOS (`colima start`).
+The recorder uses the mise-managed Buildx and container CLI to build bonsai
+from the checkout. The compiler image, mise binary, and VHS image are pinned
+by digest. The recording uses the same locked Rust, Git, and Zsh as the
+development environment. It creates a throwaway repository inside the container.
+Start Colima on macOS (`colima start`) or use native Docker Engine on Linux.

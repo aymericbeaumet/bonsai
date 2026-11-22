@@ -13,7 +13,7 @@ Bonsai is a single Rust binary. Its terminal dashboard shows which checkouts
 have changes, where coding agents are running, and how much disk each checkout
 uses. It picks up worktrees you already created with Git or another tool.
 
-![bonsai demo: create a worktree, push a fix, fuzzy-jump to another worktree, and clean up after the squash-merge](docs/demo/demo.gif)
+![Create a worktree, push a fix, inspect the checkouts in the terminal dashboard, jump to another branch, and preview cleanup after a squash merge](docs/demo/demo.gif)
 
 Already use mise? From any of your repositories, try the dashboard in one
 command. Press `?` for keys or `q` to quit.

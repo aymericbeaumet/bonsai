@@ -3,22 +3,37 @@ min_version = "2026.10.17"
 # The single development environment: these tools, and the tasks below for
 # every command contributors and CI run. `mise tasks` lists them.
 [tools]
-rust = { version = "1.99.1", profile = "default" }
-node = "26.13.0"
+rust = { version = "1.100.0", profile = "default" }
+node = "26.13.1"
 python = "3.15.2"
-uv = "0.13.7"
+uv = "0.13.9"
 actionlint = "1.7.12"
 shellcheck = "0.11.0"
-gh = "2.103.3"
-"github:fish-shell/fish-shell" = { version = "4.9.3", os = ["linux"] }
-"conda:zsh" = { version = "5.9.2", os = ["linux"] }
+gh = "2.105.0"
+"conda:bash" = { version = "5.3", os = ["linux", "macos"] }
+"conda:fish" = { version = "4.9.3", os = ["linux", "macos"] }
+"conda:zsh" = { version = "5.9.2", os = ["linux", "macos"] }
+"conda:git" = { version = "2.56.1", os = ["linux", "macos"] }
+"conda:file" = { version = "5.48", os = ["linux"] }
+zig = { version = "0.17.1", os = ["linux"] }
+"github:rust-cross/cargo-zigbuild" = { version = "0.24.1", os = ["linux"], matching_regex = '-unknown-linux-gnu\.tar\.xz$' }
+
+[tools."github:git-for-windows/git"]
+version = "2.56.1.windows.1"
+os = ["windows"]
+bin_path = "cmd"
+platforms.windows-x64.asset_pattern = "MinGit-*-64-bit.zip"
+platforms.windows-arm64.asset_pattern = "MinGit-*-arm64.zip"
 
 [env]
 MISE_TASK_RUN_AUTO_INSTALL = "false"
 
 [tasks.setup]
 description = "Install only this project's locked development tools"
-run = "mise install --locked rust node python uv actionlint shellcheck gh{% if os() == 'linux' %} github:fish-shell/fish-shell conda:zsh{% endif %}"
+run = """mise install --locked rust node python uv actionlint shellcheck gh\
+{% if os() == 'windows' %} github:git-for-windows/git\
+{% else %} conda:bash conda:fish conda:zsh conda:git{% endif %}\
+{% if os() == 'linux' %} conda:file zig github:rust-cross/cargo-zigbuild{% endif %}"""
 
 [tasks.build]
 description = "Build the workspace"
@@ -66,27 +81,31 @@ run = "actionlint -pyflakes=''"
 
 [tasks.release-helper]
 description = "Run the release helper (pass its command and options after --)"
-run = "python3 .github/scripts/release.py"
+run = "python .github/scripts/release.py"
 
 [tasks.release-helper-tests]
 description = "Test the release helper"
-run = "python3 -m unittest discover -s .github/scripts -p 'test_*.py'"
+run = "python -m unittest discover -s .github/scripts -p 'test_*.py'"
+
+[tasks.release-musl]
+description = "Build the static Linux CLI with Zig's musl C headers and libraries"
+run = 'cargo zigbuild --release --locked --target "$TARGET"'
 
 [tasks.release-stamp]
 description = "Stamp VERSION into both crates and refresh workspace lock entries"
-run = ["python3 .github/scripts/release.py stamp", "cargo update --workspace"]
+run = ["python .github/scripts/release.py stamp", "cargo update --workspace"]
 
 [tasks.release-version]
 description = "Calculate the next release version from Conventional Commits"
-run = "python3 .github/scripts/release.py version"
+run = "python .github/scripts/release.py version"
 
 [tasks.release-archive]
 description = "Verify and archive the release binary using VERSION, TARGET, and ARCHIVE"
-run = "python3 .github/scripts/release.py archive"
+run = "python .github/scripts/release.py archive"
 
 [tasks.release-publish]
 description = "Checksum and publish release archives using VERSION and GitHub environment"
-run = "python3 .github/scripts/release.py github"
+run = "python .github/scripts/release.py github"
 
 [tasks.release-target]
 description = "Install the target for the pinned Rust toolchain (pass a target triple)"
@@ -109,11 +128,11 @@ run = "cargo test --locked --test cli real_package_managers_ -- --ignored"
 
 [tasks.terminal]
 description = "Run the release PTY checks against the optimized binary (Unix)"
-run = [{ task = "release" }, "python3 tests/terminal.py target/release/bonsai"]
+run = [{ task = "release" }, "python tests/terminal.py target/release/bonsai"]
 
 [tasks.bench]
 description = "Benchmark disposable repositories (pass benchmark options after --)"
-run = "python3 scripts/benchmark.py"
+run = "python scripts/benchmark.py"
 
 [tasks.bench-trim]
 description = "Compare tree deletion on disposable package trees (packages, files/package, runs)"
@@ -124,7 +143,7 @@ description = "Run the slower smoke tests CI adds on Linux"
 run = [
   { task = "package-managers" },
   { task = "terminal" },
-  "python3 scripts/benchmark.py --worktrees 1 --sessions 1000 --runs 3",
+  "python scripts/benchmark.py --worktrees 1 --sessions 1000 --runs 3",
 ]
 
 [tasks.doc]
@@ -133,9 +152,12 @@ run = "cargo doc --locked --no-deps --open -p bonsai-lib"
 
 [tasks.demo]
 description = "Re-record docs/demo/demo.gif in a container (Colima on macOS)"
-tools = { "docker-cli" = { version = "29.9.3", os = ["linux", "macos"] } }
 run = "docs/demo/record.sh"
 
+[tasks.demo.tools]
+docker-cli = { version = "29.10.0", os = ["linux", "macos"] }
+"aqua:docker/buildx" = { version = "0.39.1", os = ["linux", "macos"] }
+
 [tasks.demo-setup]
-description = "Install the locked container CLI for the optional demo recorder"
-run = "mise install --locked docker-cli@29.9.3"
+description = "Install the locked container CLI and Buildx for the demo recorder"
+run = "mise install --locked docker-cli@29.10.0 aqua:docker/buildx@0.39.1"

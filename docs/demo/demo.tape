@@ -5,7 +5,8 @@
 Output demo.gif
 
 Set Shell bash
-Set FontSize 16
+Set FontSize 18
+Set Framerate 15
 Set Width 1280
 Set Height 680
 Set Padding 24
@@ -36,9 +37,11 @@ Type@15ms "# ...the pull request gets squash-merged on GitHub"
 Sleep 600ms Enter
 Sleep 1.5s
 
-Type "bonsai list"
+Type "bonsai hq"
 Sleep 400ms Enter
-Sleep 3s
+Sleep 4s
+Type "q"
+Sleep 750ms
 
 Type "bonsai cd"
 Type@15ms "   # fuzzy-jump, most recently used first"

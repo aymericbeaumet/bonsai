@@ -5,5 +5,10 @@
 set -eu
 
 dir=$(cd "$(dirname "$0")" && pwd)
-docker build --file "$dir/Dockerfile" --tag bonsai-demo "$dir/../.."
-docker run --rm --volume "$dir:/vhs" bonsai-demo demo.tape
+docker-cli-plugin-docker-buildx build --load --file "$dir/Dockerfile" --tag bonsai-demo "$dir/../.."
+recording=$(mktemp -d "$dir/.recording.XXXXXXXX")
+trap 'rm -rf "$recording"' EXIT
+cp "$dir/demo.tape" "$dir/setup.sh" "$recording/"
+docker run --rm --volume "$recording:/vhs" bonsai-demo demo.tape
+test -s "$recording/demo.gif"
+mv "$recording/demo.gif" "$dir/demo.gif"
