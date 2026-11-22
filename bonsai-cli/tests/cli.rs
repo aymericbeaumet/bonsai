@@ -221,17 +221,20 @@ impl TestRepo {
         std::env::join_paths(paths).unwrap()
     }
 
-    /// A PATH reduced to the fake-binary dir plus every host dir containing
-    /// git, making "package manager not installed" reproducible even on
-    /// machines that have the real tools.
+    /// Expose the fixture tools and Git without importing unrelated mise shims.
     fn restricted_path(&self) -> std::ffi::OsString {
-        let git_name = if cfg!(windows) { "git.exe" } else { "git" };
-        let mut paths = vec![self.fake_bin_dir()];
-        paths.extend(
+        let git_dir = PathBuf::from(self.git(&self.clone, &["--exec-path"]));
+        let git = format!("git{}", std::env::consts::EXE_SUFFIX);
+        let git_dir = if !cfg!(windows) && git_dir.join(&git).is_file() {
+            git_dir
+        } else {
+            // Git for Windows' public launcher locates its DLLs. Other Git
+            // distributions may put only the subcommands in libexec.
             std::env::split_paths(&std::env::var_os("PATH").unwrap_or_default())
-                .filter(|dir| dir.join(git_name).is_file()),
-        );
-        std::env::join_paths(paths).unwrap()
+                .find(|dir| dir.join(&git).is_file())
+                .expect("Git is required for integration tests")
+        };
+        std::env::join_paths([self.fake_bin_dir(), git_dir]).unwrap()
     }
 
     /// `bonsai add` with a custom PATH; returns the worktree path + stderr.
@@ -2202,7 +2205,6 @@ fn add_install_disabled_via_config() {
 fn add_install_reports_missing_package_manager() {
     let repo = TestRepo::new();
     repo.commit_files(&[("pnpm-lock.yaml", "")]);
-    // Empty fakebin + only the host dirs containing git: pnpm is absent.
     let (path, stderr) = repo.add_with_path("feat-nopm", &repo.restricted_path());
     assert!(!path.join("pnpm-args.txt").exists());
     assert!(
